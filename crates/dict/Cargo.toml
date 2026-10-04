@@ -1,0 +1,10 @@
+[package]
+name = "kanaemi-dict"
+description = "Builds Kanaemi's official dictionaries and ranking model from their sources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
