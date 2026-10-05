@@ -273,7 +273,7 @@ fn cost_of(count: usize, total: usize) -> u32 {
 
 /// The okurigana line of a word whose surface ends in kanji and hiragana:
 /// `(か*く, 書く)` for 書く.
-fn okuri_line(reading: &str, surface: &str) -> Option<(String, String)> {
+pub(crate) fn okuri_line(reading: &str, surface: &str) -> Option<(String, String)> {
     let okuri_len = surface
         .chars()
         .rev()

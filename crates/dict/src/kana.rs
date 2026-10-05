@@ -11,6 +11,17 @@ pub fn katakana_to_hiragana(s: impl AsRef<str>) -> String {
         .collect()
 }
 
+/// Hiragana to katakana, leaving every other character alone.
+pub(crate) fn hiragana_to_katakana(s: impl AsRef<str>) -> String {
+    s.as_ref()
+        .chars()
+        .map(|c| match c {
+            '\u{3041}'..='\u{3096}' => char::from_u32(c as u32 + 0x60).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
 pub(crate) fn is_hiragana(c: char) -> bool {
     matches!(c, '\u{3041}'..='\u{3096}')
 }
@@ -41,6 +52,14 @@ mod tests {
         assert_eq!(
             katakana_to_hiragana("カキクケコヴヵヶーABCかな漢"),
             "かきくけこゔゕゖーABCかな漢"
+        );
+    }
+
+    #[test]
+    fn hiragana_becomes_katakana_and_the_rest_stays() {
+        assert_eq!(
+            hiragana_to_katakana("ぁかきゔゕゖーABCカナ漢"),
+            "ァカキヴヵヶーABCカナ漢"
         );
     }
 

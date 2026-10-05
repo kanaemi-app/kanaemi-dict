@@ -227,10 +227,12 @@ name = "kanaemi-dict"
 version = "0.1.0"
 dependencies = [
  "csv",
+ "kanaemi-core",
  "kanaemi-engine",
  "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "sudachi",
  "thiserror 2.0.21",
 ]

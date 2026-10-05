@@ -45,9 +45,14 @@ sudachi:
 units:
     cargo run --release -p kanaemi-dict -- units
 
-# Build build/dictionaries/base.tsv from build/units.jsonl and the UniDic lexicon.
-dictionary:
-    cargo run --release -p kanaemi-dict -- dictionary
+# Build build/dictionaries/base.tsv from build/units.jsonl and the UniDic lexicon;
+# `--train-only` builds build/dictionaries/base-train.tsv from the train documents alone.
+dictionary *flags:
+    cargo run --release -p kanaemi-dict -- dictionary {{flags}}
+
+# Convert the eval documents' units with build/dictionaries/base-train.tsv into build/evaluation.tsv.
+evaluate:
+    cargo run --release -p kanaemi-dict -- evaluate
 
 # Run the tests that need SudachiDict full (`just sudachi` first).
 test-sudachi:

@@ -10,9 +10,9 @@ use crate::{AnalyzerError, Token};
 
 /// One line of `build/docs.jsonl`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-struct Document {
-    doc_id: String,
-    text: String,
+pub(crate) struct Document {
+    pub(crate) doc_id: String,
+    pub(crate) text: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -115,10 +115,11 @@ fn cut_in_batches(
     Ok(summary)
 }
 
-fn each_document(
+/// Hands each document of `docs`, JSON Lines sorted by doc ID, to `f` in order.
+pub(crate) fn each_document<E: From<DocumentsError>>(
     docs: impl BufRead,
-    mut f: impl FnMut(Document) -> Result<(), CutError>,
-) -> Result<(), CutError> {
+    mut f: impl FnMut(Document) -> Result<(), E>,
+) -> Result<(), E> {
     let mut previous: Option<String> = None;
     for (i, line) in docs.lines().enumerate() {
         let line_no = i + 1;

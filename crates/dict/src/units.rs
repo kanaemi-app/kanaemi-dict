@@ -1,6 +1,8 @@
 //! Conversion units: the pieces of text Kanaemi converts in one go, cut from
 //! Sudachi's morphemes.
 
+use std::io::{self, BufRead};
+
 use kanaemi_engine::{MAX_SUFFIX_KANA, terminal_ending};
 
 use crate::Token;
@@ -24,6 +26,26 @@ pub struct Unit {
     /// A conjugation type Kanaemi's table does not know; such a unit never
     /// enters the dictionary.
     pub unknown_conjugation: Option<String>,
+}
+
+/// A line of `build/units.jsonl` that could not be read as a unit.
+#[derive(Debug, thiserror::Error)]
+#[error("line {line}: {source}")]
+pub struct UnitsError {
+    pub line: usize,
+    pub source: io::Error,
+}
+
+/// The units of `reader`, one JSON object per line.
+pub fn read_units(reader: impl BufRead) -> impl Iterator<Item = Result<Unit, UnitsError>> {
+    reader.lines().enumerate().map(|(i, line)| {
+        let failed = |source| UnitsError {
+            line: i + 1,
+            source,
+        };
+        let line = line.map_err(failed)?;
+        serde_json::from_str(&line).map_err(|e| failed(e.into()))
+    })
 }
 
 /// One unit within a line. `begin` counts characters from the line's start.
@@ -302,6 +324,33 @@ fn after_last_kanji(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn units_are_read_one_per_line_and_a_bad_line_is_an_error_with_its_number() {
+        let unit = Unit {
+            doc_id: "a:1".into(),
+            position: 3,
+            reading: "ã¦ãã¿".into(),
+            surface: "æç´".into(),
+            stem_reading: None,
+            stem_surface: None,
+            conjugation: None,
+            unknown_conjugation: None,
+        };
+        let text = format!(
+            "{}\n{{\"doc_id\":\"a:1\"}}\n",
+            serde_json::to_string(&unit).unwrap()
+        );
+
+        let read: Vec<_> = read_units(text.as_bytes()).collect();
+
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].as_ref().unwrap(), &unit);
+        assert!(
+            matches!(read[1], Err(UnitsError { line: 2, .. })),
+            "{read:?}"
+        );
+    }
 
     /// A token from `surface/reading/pos/dictionary_form`, `pos` being the six
     /// comma-separated fields.
