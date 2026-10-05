@@ -2,6 +2,7 @@
 //! dictionary from them and evaluates it, and builds the additional
 //! dictionaries, reading and writing under the current directory.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
@@ -9,13 +10,15 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kanaemi_dict::{
-    Analyzer, AnalyzerError, BASE_LABEL, Base, CutError, Dictionary, DocumentsError,
-    EvalDocumentsError, RejectedLines, Split, TitlesError, UnidicError, Unit, UnitsError,
-    WriteError, cut_documents, document_texts, eval_documents, evaluate_documents,
-    field_dictionary, place_dictionary, place_names, plain_words, read_titles, read_units,
-    split_of, write_atomically, year_dictionary,
+    Analyzer, AnalyzerError, BASE_LABEL, Base, CutError, Dictionary, DocumentsError, EvalDocument,
+    EvalDocumentsError, Evaluation, ExampleFile, Examples, RejectedLines, Split, TitlesError,
+    UnidicError, Unit, UnitsError, WriteError, cut_documents, document_texts,
+    each_document_with_units, engine, eval_documents, evaluate_documents, examples_of_document,
+    field_dictionary, model_file, place_dictionary, place_names, plain_words, read_titles,
+    read_units, split_of, train, write_atomically, year_dictionary,
 };
-use kanaemi_engine::TextDictionary;
+use kanaemi_engine::{RankingModel, TextDictionary};
+use rayon::prelude::*;
 
 const SYSTEM_DICTIONARY: &str = "build/sudachi/system_full.dic";
 const LEXICON: &str = "build/sudachi/small_lex.csv";
@@ -29,6 +32,23 @@ const ADDITIONAL: &str = "additional";
 const ADDITIONAL_BUILD: &str = "build/additional";
 /// The additional dictionary built from the postal code data, not from documents.
 const PLACE: &str = "place";
+/// The ranking model, paired with the base dictionary.
+const MODEL: &str = "build/dictionaries/base.model";
+const RANKING_EVALUATION: &str = "build/ranking-evaluation.tsv";
+/// Where the training examples wait, in a file of each run's own, while the
+/// model trains.
+const RANKING_WORK: &str = "build/ranking";
+const MODEL_BITS: u8 = 20;
+const EPOCHS: usize = 3;
+const RATE: f32 = 0.05;
+/// Documents become examples a block at a time; a block closes once its units
+/// reach this many or its text [`BLOCK_BYTES`], and training holds one block
+/// at a time.
+const BLOCK_UNITS: usize = 100_000;
+const BLOCK_BYTES: usize = 4_000_000;
+/// Units of each field's train documents the model also learns from, the
+/// same for every field however much text it has.
+const FIELD_UNITS: usize = 250_000;
 
 /// Where a base dictionary build writes.
 struct Outputs {
@@ -63,7 +83,13 @@ usage: kanaemi-dict units
          build the additional dictionaries NAME, or every one under
          additional/, from build/additional/NAME/ into
          build/dictionaries/NAME.tsv and NAME-report.tsv, without what
-         build/dictionaries/base.tsv already gives";
+         build/dictionaries/base.tsv already gives
+       kanaemi-dict ranking
+         train the ranking model on the candidates of
+         build/dictionaries/base-train.tsv from the train documents of the
+         base and of each field's additional dictionary, write it to
+         build/dictionaries/base.model, and measure the eval documents
+         without and with it into build/ranking-evaluation.tsv";
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -89,6 +115,13 @@ enum Error {
     Titles { path: PathBuf, source: TitlesError },
     #[error("{}: not a page ID", path.display())]
     Since { path: PathBuf },
+    #[error("{}: {source}", path.display())]
+    Examples { path: PathBuf, source: io::Error },
+    #[error("{}: Kanaemi does not read the model: {source}", path.display())]
+    Model {
+        path: PathBuf,
+        source: kanaemi_engine::ModelError,
+    },
     #[error("reading the eval documents from {UNITS} and {DOCS}: {0}")]
     EvalDocuments(#[from] EvalDocumentsError),
     #[error(transparent)]
@@ -113,6 +146,7 @@ fn main() -> ExitCode {
         ["dictionary", "--train-only"] => build_dictionary(true),
         ["evaluate"] => evaluate(),
         ["additional", ref names @ ..] => build_additional(names),
+        ["ranking"] => train_ranking(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -222,31 +256,37 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
 /// Converts the units of the eval documents with the dictionary built from
 /// the train documents, and writes the scores per kind of source.
 fn evaluate() -> Result<(), Error> {
-    let path = BASE_TRAIN.dictionary;
-    let dictionary = {
-        let text = std::fs::read(path).map_err(|source| Error::Read {
-            path: path.into(),
-            source,
-        })?;
-        let (dictionary, invalid) = TextDictionary::parse(text);
-        if !invalid.is_empty() {
-            return Err(Error::Unreadable {
-                path: path.into(),
-                source: RejectedLines(invalid),
-            });
-        }
-        Arc::new(dictionary)
-    };
+    let dictionary = train_dictionary()?;
     let docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
-    let evaluation = evaluate_documents(&docs, &dictionary);
+    let evaluation = evaluate_documents(&docs, &dictionary, None);
     write_atomically(EVALUATION, |w| {
         w.write_all(evaluation.to_tsv().as_bytes())
             .map_err(write_error(EVALUATION))
     })?;
+    print_scores("", &evaluation);
+    println!("documents: {}, out: {EVALUATION}", docs.len());
+    Ok(())
+}
+
+/// The base dictionary built from the train documents, as Kanaemi reads it.
+fn train_dictionary() -> Result<Arc<TextDictionary>, Error> {
+    let path = BASE_TRAIN.dictionary;
+    let text = std::fs::read(path).map_err(read_error(path))?;
+    let (dictionary, invalid) = TextDictionary::parse(text);
+    if !invalid.is_empty() {
+        return Err(Error::Unreadable {
+            path: path.into(),
+            source: RejectedLines(invalid),
+        });
+    }
+    Ok(Arc::new(dictionary))
+}
+
+fn print_scores(label: &str, evaluation: &Evaluation) {
     for (class, scores) in evaluation.all().classes() {
         for (history, score) in [("off", scores.fresh), ("on", scores.with_history)] {
             println!(
-                "{class} history {history}: units {}, covered {:.2}%, first {:.2}%, mean rank {:.3}",
+                "{label}{class} history {history}: units {}, covered {:.2}%, first {:.2}%, mean rank {:.3}",
                 score.units,
                 percent(score.covered, score.units),
                 percent(score.first, score.units),
@@ -254,8 +294,141 @@ fn evaluate() -> Result<(), Error> {
             );
         }
     }
-    println!("documents: {}, out: {EVALUATION}", docs.len());
+}
+
+/// Trains the ranking model on the candidates the dictionary of the train
+/// documents gives, writes it, and measures the eval documents without and
+/// with it.
+fn train_ranking() -> Result<(), Error> {
+    let dictionary = train_dictionary()?;
+    let examples_path = format!("{RANKING_WORK}/examples-{}.bin", std::process::id());
+    std::fs::create_dir_all(RANKING_WORK).map_err(read_error(RANKING_WORK))?;
+    let mut examples = ExampleFile::create(&examples_path).map_err(|source| Error::Examples {
+        path: examples_path.clone().into(),
+        source,
+    })?;
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut add = |units: &str, docs: &str, budget: usize| -> Result<(), Error> {
+        let added = add_examples(units, docs, budget, &taken, &dictionary, &mut examples)?;
+        println!("{docs}: {} documents", added.len());
+        taken.extend(added);
+        Ok(())
+    };
+    add(UNITS, DOCS, usize::MAX)?;
+    for name in field_names()? {
+        let dir = format!("{ADDITIONAL_BUILD}/{name}");
+        add(
+            &format!("{dir}/units.jsonl"),
+            &format!("{dir}/docs.jsonl"),
+            FIELD_UNITS,
+        )?;
+    }
+    println!("examples: {}", examples.len());
+    let weights = train(&examples, MODEL_BITS, EPOCHS, RATE).map_err(|source| Error::Examples {
+        path: examples_path.clone().into(),
+        source,
+    })?;
+    drop(examples);
+    write_atomically(MODEL, |w| {
+        w.write_all(&model_file(MODEL_BITS, &weights))
+            .map_err(write_error(MODEL))
+    })?;
+    let model = RankingModel::open(MODEL).map_err(|source| Error::Model {
+        path: MODEL.into(),
+        source,
+    })?;
+    let docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
+    print_scores(
+        "without the model: ",
+        &evaluate_documents(&docs, &dictionary, None),
+    );
+    let with = evaluate_documents(&docs, &dictionary, Some(&Arc::new(model)));
+    print_scores("with the model: ", &with);
+    write_atomically(RANKING_EVALUATION, |w| {
+        w.write_all(with.to_tsv().as_bytes())
+            .map_err(write_error(RANKING_EVALUATION))
+    })?;
+    println!("out: {MODEL}, evaluation: {RANKING_EVALUATION}");
     Ok(())
+}
+
+/// The additional dictionaries built from a field's documents, whose writing
+/// the model learns too: every one with units but a year's new words.
+fn field_names() -> Result<Vec<String>, Error> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(ADDITIONAL).map_err(read_error(ADDITIONAL))? {
+        let name = entry
+            .map_err(read_error(ADDITIONAL))?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        let year =
+            std::path::Path::new(&format!("{ADDITIONAL}/{name}/wikipedia-since.txt")).exists();
+        let built =
+            std::path::Path::new(&format!("{ADDITIONAL_BUILD}/{name}/units.jsonl")).exists();
+        if !name.starts_with('.') && !year && built {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Adds the examples of the train documents of `units` and `docs` that are
+/// not `taken`, until their units reach `budget`, a block at a time; returns
+/// the doc IDs added.
+fn add_examples(
+    units: &str,
+    docs: &str,
+    budget: usize,
+    taken: &HashSet<String>,
+    dictionary: &Arc<TextDictionary>,
+    examples: &mut ExampleFile,
+) -> Result<Vec<String>, Error> {
+    let mut added = Vec::new();
+    let mut units_taken = 0usize;
+    let mut batch: Vec<EvalDocument> = Vec::new();
+    let (mut batch_units, mut batch_bytes) = (0usize, 0usize);
+    let flush = |batch: &mut Vec<EvalDocument>, examples: &mut ExampleFile| {
+        let parts: Vec<Examples> = batch
+            .par_iter()
+            .map_init(
+                || engine(dictionary.clone()),
+                |engine, doc| examples_of_document(engine, &doc.units, &doc.text),
+            )
+            .collect();
+        let mut block = Examples::default();
+        for part in parts {
+            block.append(part);
+        }
+        batch.clear();
+        examples.push(&block).map_err(|source| Error::Examples {
+            path: examples.path().into(),
+            source,
+        })
+    };
+    each_document_with_units(
+        open(units)?,
+        open(docs)?,
+        |doc_id| split_of(doc_id) == Split::Train && !taken.contains(doc_id),
+        |doc| {
+            if units_taken >= budget {
+                return Ok(());
+            }
+            units_taken += doc.units.len();
+            batch_units += doc.units.len();
+            batch_bytes += doc.text.len();
+            added.push(doc.doc_id.clone());
+            batch.push(doc);
+            if batch_units >= BLOCK_UNITS || batch_bytes >= BLOCK_BYTES {
+                flush(&mut batch, examples)?;
+                (batch_units, batch_bytes) = (0, 0);
+            }
+            Ok::<_, Error>(())
+        },
+    )?;
+    flush(&mut batch, examples)?;
+    Ok(added)
 }
 
 fn percent(n: usize, of: usize) -> f64 {

@@ -236,6 +236,7 @@ dependencies = [
  "sha2",
  "sudachi",
  "thiserror 2.0.21",
+ "xxhash-rust",
 ]
 
 [[package]]

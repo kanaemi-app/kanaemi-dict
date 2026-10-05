@@ -2,12 +2,12 @@
 //! units, converting them in parallel, and counting the scores per kind of
 //! source.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::BufRead;
 use std::sync::Arc;
 
-use kanaemi_engine::TextDictionary;
+use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
 
 use crate::documents::each_document;
@@ -51,54 +51,103 @@ pub fn eval_documents(
     units: impl BufRead,
     docs: impl BufRead,
 ) -> Result<Vec<EvalDocument>, EvalDocumentsError> {
-    let mut eval: Vec<EvalDocument> = Vec::new();
-    let mut previous: Option<(String, usize)> = None;
-    for (i, unit) in read_units(units).enumerate() {
-        let unit = unit?;
-        if let Some((previous_doc_id, previous_position)) =
-            previous.take_if(|(doc_id, position)| {
-                (doc_id.as_str(), *position) > (unit.doc_id.as_str(), unit.position)
-            })
-        {
-            return Err(EvalDocumentsError::UnsortedUnits {
-                line: i + 1,
-                doc_id: unit.doc_id,
-                position: unit.position,
-                previous_doc_id,
-                previous_position,
-            });
-        }
-        previous = Some((unit.doc_id.clone(), unit.position));
-        if split_of(&unit.doc_id) != Split::Eval {
-            continue;
-        }
-        match eval.last_mut() {
-            Some(doc) if doc.doc_id == unit.doc_id => doc.units.push(unit),
-            _ => eval.push(EvalDocument {
-                doc_id: unit.doc_id.clone(),
-                units: vec![unit],
-                text: String::new(),
-            }),
-        }
-    }
-
-    let index: HashMap<String, usize> = eval
-        .iter()
-        .enumerate()
-        .map(|(i, doc)| (doc.doc_id.clone(), i))
-        .collect();
-    let mut found = vec![false; eval.len()];
-    each_document(docs, |doc| {
-        if let Some(&i) = index.get(&doc.doc_id) {
-            eval[i].text = doc.text;
-            found[i] = true;
-        }
-        Ok::<_, EvalDocumentsError>(())
-    })?;
-    if let Some(i) = found.iter().position(|found| !found) {
-        return Err(EvalDocumentsError::MissingText(eval[i].doc_id.clone()));
-    }
+    let mut eval = Vec::new();
+    each_document_with_units(
+        units,
+        docs,
+        |doc_id| split_of(doc_id) == Split::Eval,
+        |doc| {
+            eval.push(doc);
+            Ok::<_, EvalDocumentsError>(())
+        },
+    )?;
     Ok(eval)
+}
+
+/// Calls `f` on each document `wanted` takes by its doc ID, in doc ID order,
+/// with its units from `units` and its text from `docs`, both sorted as
+/// `kanaemi-dict units` and the documents are; one document is held at a
+/// time. A document without units is no document here.
+pub fn each_document_with_units<E: From<EvalDocumentsError>>(
+    units: impl BufRead,
+    docs: impl BufRead,
+    wanted: impl Fn(&str) -> bool,
+    mut f: impl FnMut(EvalDocument) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut units = read_units(units).enumerate();
+    let mut previous: Option<(String, usize)> = None;
+    let mut pending: Option<Unit> = None;
+    // The units of the next wanted document, all of them.
+    let mut next_group = || -> Result<Option<Vec<Unit>>, EvalDocumentsError> {
+        let mut group: Vec<Unit> = pending.take().into_iter().collect();
+        for (i, unit) in units.by_ref() {
+            let unit = unit?;
+            if let Some((previous_doc_id, previous_position)) =
+                previous.take_if(|(doc_id, position)| {
+                    (doc_id.as_str(), *position) > (unit.doc_id.as_str(), unit.position)
+                })
+            {
+                return Err(EvalDocumentsError::UnsortedUnits {
+                    line: i + 1,
+                    doc_id: unit.doc_id,
+                    position: unit.position,
+                    previous_doc_id,
+                    previous_position,
+                });
+            }
+            previous = Some((unit.doc_id.clone(), unit.position));
+            if !wanted(&unit.doc_id) {
+                continue;
+            }
+            if group
+                .first()
+                .is_some_and(|first| first.doc_id != unit.doc_id)
+            {
+                pending = Some(unit);
+                return Ok(Some(group));
+            }
+            group.push(unit);
+        }
+        Ok((!group.is_empty()).then_some(group))
+    };
+    // Reading fails with the reader's errors, `f` with the caller's.
+    enum Failed<E> {
+        Read(EvalDocumentsError),
+        Caller(E),
+    }
+    impl<E> From<DocumentsError> for Failed<E> {
+        fn from(e: DocumentsError) -> Self {
+            Failed::Read(e.into())
+        }
+    }
+    let mut next = next_group()?;
+    let read = each_document(docs, |doc| {
+        if let Some(group) = next.take_if(|g| g[0].doc_id < doc.doc_id) {
+            return Err(Failed::Read(EvalDocumentsError::MissingText(
+                group[0].doc_id.clone(),
+            )));
+        }
+        if next.as_ref().is_some_and(|g| g[0].doc_id == doc.doc_id) {
+            let units = next.take().expect("checked");
+            next = next_group().map_err(Failed::Read)?;
+            f(EvalDocument {
+                doc_id: doc.doc_id,
+                units,
+                text: doc.text,
+            })
+            .map_err(Failed::Caller)?;
+        }
+        Ok(())
+    });
+    match read {
+        Err(Failed::Read(e)) => return Err(e.into()),
+        Err(Failed::Caller(e)) => return Err(e),
+        Ok(()) => {}
+    }
+    match next {
+        Some(group) => Err(EvalDocumentsError::MissingText(group[0].doc_id.clone()).into()),
+        None => Ok(()),
+    }
 }
 
 /// Scores per kind of source, the part of a doc ID before its first `:`.
@@ -146,16 +195,26 @@ impl Evaluation {
     }
 }
 
-/// Converts every document with engines reading `dictionary` alone, in
-/// parallel by chunks of documents, a few chunks per thread. Each chunk has
-/// its own pair of engines, all sharing the one parsed dictionary.
-pub fn evaluate_documents(docs: &[EvalDocument], dictionary: &Arc<TextDictionary>) -> Evaluation {
+/// Converts every document with engines reading `dictionary` alone, ranking
+/// with `model` when given, in parallel by chunks of documents, a few chunks
+/// per thread. Each chunk has its own pair of engines, all sharing the one
+/// parsed dictionary and model.
+pub fn evaluate_documents(
+    docs: &[EvalDocument],
+    dictionary: &Arc<TextDictionary>,
+    model: Option<&Arc<RankingModel>>,
+) -> Evaluation {
+    let engine = || {
+        let mut engine = engine(dictionary.clone());
+        engine.set_model(model.cloned());
+        engine
+    };
     let chunk = docs.len().div_ceil(rayon::current_num_threads() * 4).max(1);
     let per_doc: Vec<ClassScores> = docs
         .par_chunks(chunk)
         .flat_map_iter(|chunk| {
-            let fresh = engine(dictionary.clone());
-            let mut with_history = engine(dictionary.clone());
+            let fresh = engine();
+            let mut with_history = engine();
             chunk
                 .iter()
                 .map(|doc| evaluate_document(&fresh, &mut with_history, &doc.units, &doc.text))
@@ -244,6 +303,50 @@ mod tests {
                     doc_id: "aozora:000015".into(),
                     units: units[4..].to_vec(),
                     text: "あ書".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn wanted_documents_stream_one_at_a_time_with_their_units_and_texts() {
+        let units = [
+            unit("aozora:000001", 0, "てがみ", "手紙"),
+            unit("aozora:000004", 0, "かん", "漢"),
+            unit("aozora:000004", 2, "じ", "字"),
+            unit("aozora:000013", 0, "ほん", "本"),
+        ];
+        let docs = docs_jsonl(&[
+            ("aozora:000001", "手紙"),
+            ("aozora:000004", "漢い字"),
+            ("aozora:000009", "単位のない文書"),
+            ("aozora:000013", "本"),
+        ]);
+        let mut seen = Vec::new();
+
+        each_document_with_units(
+            units_jsonl(&units).as_bytes(),
+            docs.as_bytes(),
+            |doc_id| doc_id != "aozora:000013",
+            |doc| {
+                seen.push(doc);
+                Ok::<_, EvalDocumentsError>(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            seen,
+            [
+                EvalDocument {
+                    doc_id: "aozora:000001".into(),
+                    units: units[..1].to_vec(),
+                    text: "手紙".into(),
+                },
+                EvalDocument {
+                    doc_id: "aozora:000004".into(),
+                    units: units[1..3].to_vec(),
+                    text: "漢い字".into(),
                 },
             ]
         );
@@ -400,7 +503,7 @@ mod tests {
             .num_threads(1)
             .build()
             .unwrap()
-            .install(|| evaluate_documents(&docs, &dictionary));
+            .install(|| evaluate_documents(&docs, &dictionary, None));
 
         let mut alone: BTreeMap<String, ClassScores> = BTreeMap::new();
         for doc in &docs {
@@ -418,5 +521,52 @@ mod tests {
             evaluation.all().all().fresh.units,
             docs.iter().map(|d| d.units.len()).sum::<usize>()
         );
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use kanaemi_engine::RankingModel;
+
+    use super::*;
+    use crate::model_file;
+
+    #[test]
+    fn with_a_model_the_candidates_go_by_its_scores() {
+        let (dictionary, _) = TextDictionary::parse("てがみ\t手紙\t\t100\nてがみ\t手神\t\t200\n");
+        let dictionary = Arc::new(dictionary);
+        let doc = EvalDocument {
+            doc_id: "aozora:1".into(),
+            units: vec![Unit {
+                doc_id: "aozora:1".into(),
+                position: 0,
+                reading: "てがみ".into(),
+                surface: "手神".into(),
+                stem_reading: None,
+                stem_surface: None,
+                conjugation: None,
+                unknown_conjugation: None,
+                numeric: None,
+            }],
+            text: "手神".into(),
+        };
+        let model = {
+            let bits = 10;
+            let mut weights = vec![0.0f32; 1 << bits];
+            let at = xxhash_rust::xxh3::xxh3_64("s\u{1f}手神".as_bytes()) & ((1 << bits) - 1);
+            weights[at as usize] = 1.0;
+            let path = std::env::temp_dir()
+                .join(format!("kanaemi-dict-eval-model-{}", std::process::id()));
+            std::fs::write(&path, model_file(bits, &weights)).unwrap();
+            let model = RankingModel::open(&path).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            Arc::new(model)
+        };
+
+        let without = evaluate_documents(std::slice::from_ref(&doc), &dictionary, None);
+        let with = evaluate_documents(&[doc], &dictionary, Some(&model));
+
+        assert_eq!(without.all().all().fresh.first, 0);
+        assert_eq!(with.all().all().fresh.first, 1);
     }
 }

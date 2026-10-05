@@ -69,6 +69,11 @@ additional-docs:
 additional *names:
     cargo run --release -p kanaemi-dict -- additional {{names}}
 
+# Train the ranking model into build/dictionaries/base.model on the candidates of build/dictionaries/base-train.tsv,
+# and measure the eval documents without and with it into build/ranking-evaluation.tsv.
+ranking:
+    cargo run --release -p kanaemi-dict -- ranking
+
 # Run the tests that need SudachiDict full (`just sudachi` first).
 test-sudachi:
     cargo test --workspace --release -- --ignored
