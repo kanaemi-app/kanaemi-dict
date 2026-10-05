@@ -78,7 +78,7 @@ ranking:
 take:
     cargo run --release -p kanaemi-dict -- take
 
-# Check dictionaries/ and gather each dictionary with its notice and license into build/dist/NAME/.
+# Check dictionaries/ and gather each dictionary with its notice and license into build/dist/NAME/, with the catalog build/dist/index.json.
 dist:
     cargo run --release -p kanaemi-dict -- dist
 

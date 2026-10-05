@@ -31,13 +31,14 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
       - run: nix develop -c just dist
-      # One zip a dictionary, its folder inside.
+      # One zip a dictionary, its folder inside, and the catalog of them.
       - run: |
           mkdir -p build/release
           for dir in build/dist/*/; do
             name=$(basename "$dir")
             (cd build/dist && zip -qr "../release/kanaemi-$name.zip" "$name")
           done
+          cp build/dist/index.json build/release/
       # Releases are made by hand; this only attaches the files.
       - run: gh release upload "$TAG" build/release/* --clobber
         env:

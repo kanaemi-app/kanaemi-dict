@@ -23,6 +23,10 @@ const DICTIONARY_EXTENSION: &str = ".tsv";
 const MODEL: &str = "base.model";
 /// The license of the dictionaries and the model, kept beside them.
 const LICENSE: &str = "LICENSE";
+/// The catalog of the dictionaries, beside their folders.
+const CATALOG: &str = "index.json";
+/// The version of the catalog's shape, raised when it changes.
+const CATALOG_FORMAT: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DistError {
@@ -140,8 +144,8 @@ pub fn notice(
 
 /// Every file to ship of the dictionaries and the model in `dir`, each
 /// dictionary in a folder of its name with its notice and the license, and
-/// the model in the base dictionary's. Anything that would not ship is an
-/// error, and then nothing is given.
+/// the model in the base dictionary's, with the catalog of them all. Anything
+/// that would not ship is an error, and then nothing is given.
 pub fn gather(dir: &Path, notices: &Path) -> Result<Vec<DistFile>, DistError> {
     let read = |name: &str| {
         let path = dir.join(name);
@@ -156,6 +160,7 @@ pub fn gather(dir: &Path, notices: &Path) -> Result<Vec<DistFile>, DistError> {
     }
     names.sort_by_key(|n| n != BASE);
     let mut files: Vec<DistFile> = Vec::new();
+    let mut catalog: Vec<serde_json::Value> = Vec::new();
     let mut base: Option<(Vec<u8>, Base)> = None;
     for name in names {
         let file = format!("{name}{DICTIONARY_EXTENSION}");
@@ -170,6 +175,18 @@ pub fn gather(dir: &Path, notices: &Path) -> Result<Vec<DistFile>, DistError> {
             });
         }
         let folder = PathBuf::from(&name);
+        let shipped = format!("kanaemi-{name}{DICTIONARY_EXTENSION}");
+        let mut entry = serde_json::json!({
+            "name": name,
+            "base": base.is_none(),
+            "label": label(&text).unwrap_or(&name),
+            "archive": format!("kanaemi-{name}.zip"),
+            "dictionary": {
+                "file": shipped,
+                "size": bytes.len(),
+                "sha256": sha256_hex(&bytes),
+            },
+        });
         match &base {
             None => {
                 let parsed = Base::parse(&text).map_err(|source| DistError::Rejected {
@@ -183,6 +200,10 @@ pub fn gather(dir: &Path, notices: &Path) -> Result<Vec<DistFile>, DistError> {
                         return Err(DistError::Unpaired);
                     }
                     RankingModel::open(dir.join(MODEL)).map_err(DistError::Model)?;
+                    entry["model"] = serde_json::json!({
+                        "format": model_format(&model),
+                        "sha256": sha256_hex(&model),
+                    });
                     sources.extend(record.sources);
                     files.push((folder.join("ranking.model"), model));
                 }
@@ -202,12 +223,29 @@ pub fn gather(dir: &Path, notices: &Path) -> Result<Vec<DistFile>, DistError> {
             notice(&sources, read_notice)?.into_bytes(),
         ));
         files.push((folder.join(LICENSE), license.clone()));
-        files.push((
-            folder.join(format!("kanaemi-{name}{DICTIONARY_EXTENSION}")),
-            bytes,
-        ));
+        files.push((folder.join(shipped), bytes));
+        catalog.push(entry);
     }
+    let catalog = serde_json::json!({
+        "format": CATALOG_FORMAT,
+        "dictionaries": catalog,
+    });
+    let mut catalog = serde_json::to_string_pretty(&catalog).expect("JSON values serialize");
+    catalog.push('\n');
+    files.push((PathBuf::from(CATALOG), catalog.into_bytes()));
     Ok(files)
+}
+
+/// The description on a dictionary's first line.
+fn label(text: &str) -> Option<&str> {
+    let label = text.lines().next()?.strip_prefix('#')?.trim();
+    (!label.is_empty()).then_some(label)
+}
+
+/// The format version a model file says it is, which `RankingModel::open`
+/// has read.
+fn model_format(model: &[u8]) -> u32 {
+    u32::from_le_bytes(model[8..12].try_into().expect("a model's header is read"))
 }
 
 /// The record of `name`, checked against its `bytes`.
@@ -462,6 +500,7 @@ mod tests {
                 "base/NOTICE",
                 "base/kanaemi-base.tsv",
                 "base/ranking.model",
+                "index.json",
                 "railway/LICENSE",
                 "railway/NOTICE",
                 "railway/kanaemi-railway.tsv",
@@ -474,6 +513,61 @@ mod tests {
         assert!(base_notice.contains("青空文庫") && base_notice.contains("FineWeb-2"));
         let railway_notice = String::from_utf8(file(&files, "railway/NOTICE").to_vec()).unwrap();
         assert!(railway_notice.contains("ウィキペディア") && !railway_notice.contains("青空文庫"));
+    }
+
+    #[test]
+    fn the_catalog_lists_each_dictionary_with_what_its_archive_holds() {
+        let dir = scratch("catalog");
+        let model = model();
+        let kept = kept(
+            &dir,
+            &[
+                ("base.tsv", BASE.as_bytes(), None, &["aozora-text"]),
+                (
+                    "base.model",
+                    &model,
+                    Some(BASE.as_bytes()),
+                    &["fineweb2-jpn"],
+                ),
+                ("railway.tsv", RAILWAY.as_bytes(), None, &["wikipedia-ja"]),
+            ],
+        );
+
+        let files = gather(&kept, &notices(&dir)).unwrap();
+
+        let catalog: serde_json::Value =
+            serde_json::from_slice(file(&files, "index.json")).unwrap();
+        assert_eq!(
+            catalog,
+            serde_json::json!({
+                "format": 1,
+                "dictionaries": [
+                    {
+                        "name": "base",
+                        "base": true,
+                        "label": "base",
+                        "archive": "kanaemi-base.zip",
+                        "dictionary": {
+                            "file": "kanaemi-base.tsv",
+                            "size": BASE.len(),
+                            "sha256": sha256_hex(BASE.as_bytes()),
+                        },
+                        "model": { "format": 3, "sha256": sha256_hex(&model) },
+                    },
+                    {
+                        "name": "railway",
+                        "base": false,
+                        "label": "railway",
+                        "archive": "kanaemi-railway.zip",
+                        "dictionary": {
+                            "file": "kanaemi-railway.tsv",
+                            "size": RAILWAY.len(),
+                            "sha256": sha256_hex(RAILWAY.as_bytes()),
+                        },
+                    },
+                ],
+            })
+        );
     }
 
     #[test]

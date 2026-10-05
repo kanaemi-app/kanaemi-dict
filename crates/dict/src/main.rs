@@ -503,6 +503,7 @@ fn build_dist() -> Result<(), Error> {
     let mut names: Vec<String> = files
         .iter()
         .filter_map(|(path, _)| Some(path.parent()?.to_string_lossy().into_owned()))
+        .filter(|name| !name.is_empty())
         .collect();
     names.dedup();
     println!("dictionaries: {}, out: {DIST}", names.join(", "));
