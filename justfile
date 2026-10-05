@@ -37,5 +37,21 @@ fetch *args:
 docs:
     deno run --allow-read --allow-write --allow-run=lbzip2 scripts/docs.ts
 
+# Fetch SudachiDict into build/sudachi/raw and write the analyzer's dictionary and the UniDic lexicon into build/sudachi/.
+sudachi:
+    deno run --allow-read --allow-write --allow-net scripts/sudachi.ts
+
+# Cut every document of build/docs.jsonl into build/units.jsonl.
+units:
+    cargo run --release -p kanaemi-dict -- units
+
+# Build build/dictionaries/base.tsv from build/units.jsonl and the UniDic lexicon.
+dictionary:
+    cargo run --release -p kanaemi-dict -- dictionary
+
+# Run the tests that need SudachiDict full (`just sudachi` first).
+test-sudachi:
+    cargo test --workspace --release -- --ignored
+
 # Everything CI runs.
 ci: fmt-check lint test
