@@ -26,3 +26,23 @@
 どちらも、素材のライセンスや 30 条の 4 とは別の論点として残る。このため、他の IME の辞書（SKK-JISYO、Mozc の辞書）や、NEologd、SudachiDict の語彙一覧を丸ごと取り込むことはしない。
 
 自分で集めた文章を解析器で読み、実際に出てきた語の読みを使うのは、これとは性質が違う。語を選ぶのは文章で、解析器の辞書は読みを付ける道具にすぎない。
+
+## SudachiDict の中身
+
+SudachiDict の上流のリポジトリの `LEGAL` と `README.md` による。
+
+| 版 | 中身 |
+| --- | --- |
+| small | UniDic の語彙だけ。UniDic は BSD-3-Clause（著作権表示と免責の保持が条件） |
+| core | small ＋ NEologd の一部 |
+| full | core ＋ 固有名詞 |
+
+core と full に入る NEologd の一部の由来：
+
+- はてなキーワード一覧の表記と読み
+- 日本郵便の郵便番号データ
+- 駅名一覧
+- 人名データ（Mozc の人名辞書を活用したもの）
+- Web からクロールした表記と読みの組
+
+SudachiDict の core と full、NEologd はいずれも Apache-2.0 で、解析結果の利用を制限していない。
