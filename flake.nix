@@ -37,7 +37,9 @@
           default = pkgs.mkShell {
             packages = [
               rust
+              pkgs.deno
               pkgs.just
+              pkgs.lbzip2
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
               pkgs.libiconv

@@ -1,0 +1,29 @@
+{
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1",
+    "@std/crypto": "jsr:@std/crypto@^1",
+    "@std/csv": "jsr:@std/csv@^1",
+    "@std/encoding": "jsr:@std/encoding@^1",
+    "@std/path": "jsr:@std/path@^1",
+    "@std/tar": "jsr:@std/tar@^0.1",
+    "@zip-js/zip-js": "jsr:@zip-js/zip-js@^2",
+    "hyparquet": "npm:hyparquet@^1.31",
+    "hyparquet-compressors": "npm:hyparquet-compressors@^1.1",
+    "hyparquet-writer": "npm:hyparquet-writer@^0.16",
+    "linkedom": "npm:linkedom@^0.18",
+    "saxes": "npm:saxes@^6"
+  },
+  "compilerOptions": {
+    "lib": ["deno.window", "dom", "dom.iterable"]
+  },
+  "fmt": {
+    "include": ["scripts/"],
+    "lineWidth": 100
+  },
+  "lint": {
+    "include": ["scripts/"]
+  },
+  "test": {
+    "include": ["scripts/"]
+  }
+}
