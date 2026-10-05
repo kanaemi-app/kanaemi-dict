@@ -1,0 +1,45 @@
+# This workflow is managed by gh actions-lock.
+
+name: Release
+
+on:
+  release:
+    types: [published]
+  # Attaches the files to a release published before, as this workflow is now.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag of the published release
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop -c just dist
+      # One zip a dictionary, its folder inside.
+      - run: |
+          mkdir -p build/release
+          for dir in build/dist/*/; do
+            name=$(basename "$dir")
+            (cd build/dist && zip -qr "../release/kanaemi-$name.zip" "$name")
+          done
+      # Releases are made by hand; this only attaches the files.
+      - run: gh release upload "$TAG" build/release/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

@@ -2,7 +2,7 @@
 //! dictionary from them and evaluates it, and builds the additional
 //! dictionaries, reading and writing under the current directory.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
@@ -10,12 +10,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kanaemi_dict::{
-    Analyzer, AnalyzerError, BASE_LABEL, Base, CutError, Dictionary, DocumentsError, EvalDocument,
-    EvalDocumentsError, Evaluation, ExampleFile, Examples, RejectedLines, Split, TitlesError,
-    UnidicError, Unit, UnitsError, WriteError, cut_documents, document_texts,
-    each_document_with_units, engine, eval_documents, evaluate_documents, examples_of_document,
-    field_dictionary, model_file, place_dictionary, place_names, plain_words, read_titles,
-    read_units, split_of, train, write_atomically, year_dictionary,
+    Analyzer, AnalyzerError, BASE_LABEL, Base, CutError, Dictionary, DistError, DocumentsError,
+    EvalDocument, EvalDocumentsError, Evaluation, ExampleFile, Examples, RejectedLines, Split,
+    TitlesError, UnidicError, Unit, UnitsError, WriteError, cut_documents, document_sources,
+    document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
+    examples_of_document, field_dictionary, gather, model_file, place_dictionary, place_names,
+    plain_words, read_titles, read_units, sources_file, split_of, take, train, write_atomically,
+    year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -32,6 +33,17 @@ const ADDITIONAL: &str = "additional";
 const ADDITIONAL_BUILD: &str = "build/additional";
 /// The additional dictionary built from the postal code data, not from documents.
 const PLACE: &str = "place";
+/// The sources every dictionary read with the analyzer has: the analyzer's
+/// dictionary, and for the base the UniDic lexicon too.
+const ANALYZER_SOURCE: &str = "sudachidict-full";
+const LEXICON_SOURCE: &str = "sudachidict-small-lex";
+/// The source of the article titles and of the place names.
+const TITLES_SOURCE: &str = "wikipedia-ja";
+const POSTAL_SOURCE: &str = "japanpost-ken-all";
+/// Where the dictionaries and the model that ship are kept, and their notices.
+const KEPT: &str = "dictionaries";
+const NOTICES: &str = "notices";
+const DIST: &str = "build/dist";
 /// The ranking model, paired with the base dictionary.
 const MODEL: &str = "build/dictionaries/base.model";
 const RANKING_EVALUATION: &str = "build/ranking-evaluation.tsv";
@@ -88,8 +100,16 @@ usage: kanaemi-dict units
          train the ranking model on the candidates of
          build/dictionaries/base-train.tsv from the train documents of the
          base and of each field's additional dictionary, write it to
-         build/dictionaries/base.model, and measure the eval documents
-         without and with it into build/ranking-evaluation.tsv";
+         build/dictionaries/base.model paired with
+         build/dictionaries/base.tsv, and measure the eval documents
+         without and with it into build/ranking-evaluation.tsv
+       kanaemi-dict take
+         put the dictionaries and the model of build/dictionaries/ that have
+         a sources record into dictionaries/ in place of those there, once
+         they check as they would ship
+       kanaemi-dict dist
+         check dictionaries/ and gather each dictionary with the notice of
+         its sources (from notices/) and the license into build/dist/NAME/";
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -117,6 +137,8 @@ enum Error {
     Since { path: PathBuf },
     #[error("{}: {source}", path.display())]
     Examples { path: PathBuf, source: io::Error },
+    #[error(transparent)]
+    Dist(#[from] DistError),
     #[error("{}: Kanaemi does not read the model: {source}", path.display())]
     Model {
         path: PathBuf,
@@ -147,6 +169,8 @@ fn main() -> ExitCode {
         ["evaluate"] => evaluate(),
         ["additional", ref names @ ..] => build_additional(names),
         ["ranking"] => train_ranking(),
+        ["take"] => take_built(),
+        ["dist"] => build_dist(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -240,6 +264,15 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         w.write_all(dictionary.report.to_tsv().as_bytes())
             .map_err(write_error(outputs.report))
     })?;
+    if !train_only {
+        let mut sources =
+            document_sources(open(DOCS)?, |_| true).map_err(|source| Error::Documents {
+                path: DOCS.into(),
+                source,
+            })?;
+        sources.extend([ANALYZER_SOURCE, LEXICON_SOURCE].map(String::from));
+        write_sources(outputs.dictionary, text.as_bytes(), None, &sources)?;
+    }
     println!(
         "entries: {}, okurigana lines: {}, numeric lines: {}, unknown types: {}, disallowed okurigana: {}, out: {}, report: {}",
         dictionary.entries.len(),
@@ -307,9 +340,19 @@ fn train_ranking() -> Result<(), Error> {
         path: examples_path.clone().into(),
         source,
     })?;
+    let base = std::fs::read(BASE.dictionary).map_err(read_error(BASE.dictionary))?;
     let mut taken: HashSet<String> = HashSet::new();
+    let mut sources = BTreeSet::from([ANALYZER_SOURCE.to_owned(), LEXICON_SOURCE.to_owned()]);
     let mut add = |units: &str, docs: &str, budget: usize| -> Result<(), Error> {
-        let added = add_examples(units, docs, budget, &taken, &dictionary, &mut examples)?;
+        let added = add_examples(
+            units,
+            docs,
+            budget,
+            &taken,
+            &dictionary,
+            &mut examples,
+            &mut sources,
+        )?;
         println!("{docs}: {} documents", added.len());
         taken.extend(added);
         Ok(())
@@ -329,10 +372,11 @@ fn train_ranking() -> Result<(), Error> {
         source,
     })?;
     drop(examples);
+    let model_bytes = model_file(MODEL_BITS, &weights);
     write_atomically(MODEL, |w| {
-        w.write_all(&model_file(MODEL_BITS, &weights))
-            .map_err(write_error(MODEL))
+        w.write_all(&model_bytes).map_err(write_error(MODEL))
     })?;
+    write_sources(MODEL, &model_bytes, Some(&base), &sources)?;
     let model = RankingModel::open(MODEL).map_err(|source| Error::Model {
         path: MODEL.into(),
         source,
@@ -375,8 +419,8 @@ fn field_names() -> Result<Vec<String>, Error> {
 }
 
 /// Adds the examples of the train documents of `units` and `docs` that are
-/// not `taken`, until their units reach `budget`, a block at a time; returns
-/// the doc IDs added.
+/// not `taken`, until their units reach `budget`, a block at a time, and to
+/// `sources` their source IDs; returns the doc IDs added.
 fn add_examples(
     units: &str,
     docs: &str,
@@ -384,6 +428,7 @@ fn add_examples(
     taken: &HashSet<String>,
     dictionary: &Arc<TextDictionary>,
     examples: &mut ExampleFile,
+    sources: &mut BTreeSet<String>,
 ) -> Result<Vec<String>, Error> {
     let mut added = Vec::new();
     let mut units_taken = 0usize;
@@ -419,6 +464,7 @@ fn add_examples(
             batch_units += doc.units.len();
             batch_bytes += doc.text.len();
             added.push(doc.doc_id.clone());
+            sources.insert(doc.source_id.clone());
             batch.push(doc);
             if batch_units >= BLOCK_UNITS || batch_bytes >= BLOCK_BYTES {
                 flush(&mut batch, examples)?;
@@ -429,6 +475,46 @@ fn add_examples(
     )?;
     flush(&mut batch, examples)?;
     Ok(added)
+}
+
+/// Gathers what ships from dictionaries/ into build/dist/, a folder per
+/// dictionary, in place of what was there.
+fn build_dist() -> Result<(), Error> {
+    let files = gather(KEPT.as_ref(), NOTICES.as_ref())?;
+    let partial = format!("{DIST}.{}.tmp", std::process::id());
+    let _ = std::fs::remove_dir_all(&partial);
+    let written = (|| {
+        for (path, bytes) in &files {
+            let target = std::path::Path::new(&partial).join(path);
+            if let Some(dir) = target.parent() {
+                std::fs::create_dir_all(dir).map_err(write_error(&dir.to_string_lossy()))?;
+            }
+            std::fs::write(&target, bytes).map_err(write_error(&target.to_string_lossy()))?;
+        }
+        match std::fs::remove_dir_all(DIST) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(write_error(DIST)(e)),
+            _ => std::fs::rename(&partial, DIST).map_err(write_error(DIST)),
+        }
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(e);
+    }
+    let mut names: Vec<String> = files
+        .iter()
+        .filter_map(|(path, _)| Some(path.parent()?.to_string_lossy().into_owned()))
+        .collect();
+    names.dedup();
+    println!("dictionaries: {}, out: {DIST}", names.join(", "));
+    Ok(())
+}
+
+/// Puts the built dictionaries and model into dictionaries/, once they check
+/// as they would ship.
+fn take_built() -> Result<(), Error> {
+    let taken = take(DICTIONARIES.as_ref(), KEPT.as_ref(), NOTICES.as_ref())?;
+    println!("taken: {}, out: {KEPT}", taken.join(", "));
+    Ok(())
 }
 
 fn percent(n: usize, of: usize) -> f64 {
@@ -473,8 +559,11 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
     let mut analyzer = None;
     for name in names {
         let label = read_to_string(format!("{ADDITIONAL}/{name}/label.txt"))?;
-        let dictionary = if name == PLACE {
-            place_dictionary_of(&format!("{ADDITIONAL_BUILD}/{name}/ken_all.csv"))?
+        let (dictionary, sources) = if name == PLACE {
+            (
+                place_dictionary_of(&format!("{ADDITIONAL_BUILD}/{name}/ken_all.csv"))?,
+                BTreeSet::from([POSTAL_SOURCE.to_owned()]),
+            )
         } else {
             if analyzer.is_none() {
                 analyzer = Some(open_analyzer()?);
@@ -499,6 +588,7 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             w.write_all(dictionary.report.to_tsv().as_bytes())
                 .map_err(write_error(&report_path))
         })?;
+        write_sources(&dictionary_path, text.as_bytes(), None, &sources)?;
         println!(
             "{name}\tlines: {}\tout: {dictionary_path}",
             text.lines().count() - 1
@@ -514,8 +604,13 @@ fn place_dictionary_of(path: &str) -> Result<Dictionary, Error> {
 }
 
 /// The dictionary `name` built from its documents: a year's new words when it
-/// names the first article of its year, or else a field's words.
-fn sourced_dictionary(name: &str, base: &Base, analyzer: &Analyzer) -> Result<Dictionary, Error> {
+/// names the first article of its year, or else a field's words; and the
+/// sources it was built from.
+fn sourced_dictionary(
+    name: &str,
+    base: &Base,
+    analyzer: &Analyzer,
+) -> Result<(Dictionary, BTreeSet<String>), Error> {
     let dir = format!("{ADDITIONAL_BUILD}/{name}");
     let (docs, units_path) = (format!("{dir}/docs.jsonl"), format!("{dir}/units.jsonl"));
     write_atomically(&units_path, |out| {
@@ -531,6 +626,12 @@ fn sourced_dictionary(name: &str, base: &Base, analyzer: &Analyzer) -> Result<Di
         path: docs.clone().into(),
         source,
     })?;
+    let mut sources =
+        document_sources(open(&docs)?, |_| true).map_err(|source| Error::Documents {
+            path: docs.clone().into(),
+            source,
+        })?;
+    sources.insert(ANALYZER_SOURCE.to_owned());
     let titles = {
         let path = format!("{dir}/titles.tsv");
         match File::open(&path) {
@@ -561,23 +662,43 @@ fn sourced_dictionary(name: &str, base: &Base, analyzer: &Analyzer) -> Result<Di
         }
     };
     let Some(since) = since else {
-        return Ok(field_dictionary(&units, &titles, &texts));
+        return Ok((field_dictionary(&units, &titles, &texts), sources));
     };
     // Text from before the year: the works and laws, and the articles
     // created before it.
-    let older = document_texts(open(DOCS)?, |doc_id| {
+    let older_doc = |doc_id: &str| {
         doc_id.starts_with("aozora:")
             || doc_id.starts_with("law:")
             || doc_id
                 .strip_prefix("wikipedia:")
                 .and_then(|id| id.parse::<u64>().ok())
                 .is_some_and(|id| id < since)
-    })
-    .map_err(|source| Error::Documents {
+    };
+    let documents_error = |source| Error::Documents {
         path: DOCS.into(),
         source,
-    })?;
-    Ok(year_dictionary(&titles, base, &texts, &older, units.len()))
+    };
+    let older = document_texts(open(DOCS)?, older_doc).map_err(documents_error)?;
+    sources.extend(document_sources(open(DOCS)?, older_doc).map_err(documents_error)?);
+    sources.insert(TITLES_SOURCE.to_owned());
+    Ok((
+        year_dictionary(&titles, base, &texts, &older, units.len()),
+        sources,
+    ))
+}
+
+/// Writes beside `path` the record of the sources its `bytes` were built from.
+fn write_sources(
+    path: &str,
+    bytes: &[u8],
+    paired: Option<&[u8]>,
+    sources: &BTreeSet<String>,
+) -> Result<(), Error> {
+    let record = format!("{path}.sources.txt");
+    write_atomically(&record, |w| {
+        w.write_all(sources_file(bytes, paired, sources).as_bytes())
+            .map_err(write_error(&record))
+    })
 }
 
 fn read_all_units(path: &str) -> Result<Vec<Unit>, Error> {

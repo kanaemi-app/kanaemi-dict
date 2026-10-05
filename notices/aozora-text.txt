@@ -1,0 +1,5 @@
+青空文庫
+https://www.aozora.gr.jp/
+https://github.com/aozorahack/aozorabunko_text
+
+作品の本文から、語とその出現回数を数えた。作品の文章は辞書に含まない。

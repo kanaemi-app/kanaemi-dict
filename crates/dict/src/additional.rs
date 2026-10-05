@@ -159,18 +159,10 @@ impl Base {
         // on tabs splits fields, and equal fields mean equal values.
         let mut keys = HashSet::new();
         let mut surfaces = HashSet::new();
-        for line in text
-            .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        {
-            let fields: Vec<&str> = line.split('\t').collect();
-            let named = match fields.get(2) {
-                Some(conjugation) if !conjugation.is_empty() => 3,
-                _ => 2,
-            };
-            keys.insert(fields[..named.min(fields.len())].join("\t"));
-            if let Some(surface) = fields.get(1) {
-                surfaces.insert((*surface).to_owned());
+        for line in item_lines(text) {
+            keys.insert(line_key(line));
+            if let Some(surface) = line.split('\t').nth(1) {
+                surfaces.insert(surface.to_owned());
             }
         }
         Ok(Self {
@@ -178,6 +170,11 @@ impl Base {
             surfaces,
             engine: engine(Arc::new(dictionary)),
         })
+    }
+
+    /// The first item line of `text` the base dictionary has too, cost aside.
+    pub fn shared_line<'a>(&self, text: &'a str) -> Option<&'a str> {
+        item_lines(text).find(|line| self.keys.contains(&line_key(line)))
     }
 
     /// The `titles` whose surface no line of the base dictionary has, under
@@ -221,6 +218,22 @@ impl Base {
         };
         rank_of(&self.engine, &query).is_none()
     }
+}
+
+fn item_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+}
+
+/// A line's reading, surface and conjugation type, as written, without its
+/// cost.
+fn line_key(line: &str) -> String {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let named = match fields.get(2) {
+        Some(conjugation) if !conjugation.is_empty() => 3,
+        _ => 2,
+    };
+    fields[..named.min(fields.len())].join("\t")
 }
 
 /// `surface` as a line of a text dictionary writes it.

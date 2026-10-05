@@ -1,0 +1,5 @@
+ウィキペディア日本語版の寄稿者
+https://ja.wikipedia.org/
+
+記事の本文から、語とその出現回数を数えた。追加辞書の見出しの語とその読みは、記事の見出しと本文の冒頭から取った。並べ替えのモデルも、記事の本文で学習した。記事は Creative Commons 表示-継承 4.0 国際（CC BY-SA 4.0）で提供されている。辞書とモデルは記事の文章を含まない。
+https://creativecommons.org/licenses/by-sa/4.0/deed.ja

@@ -1,0 +1,6 @@
+FineWeb-2（Hugging Face）
+https://huggingface.co/datasets/HuggingFaceFW/fineweb-2
+
+日本語の Web の文章から、語とその出現回数を数え、並べ替えのモデルを学習した。FineWeb-2 は Open Data Commons Attribution License（ODC-By）v1.0 で提供され、Common Crawl の利用規約に従う。辞書とモデルは Web の文章を含まない。
+https://opendatacommons.org/licenses/by/1-0/
+https://commoncrawl.org/terms-of-use

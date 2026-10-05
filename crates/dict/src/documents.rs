@@ -1,6 +1,6 @@
 //! Cutting every document of `build/docs.jsonl` into units.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
 
 use rayon::prelude::*;
@@ -12,6 +12,7 @@ use crate::{AnalyzerError, Token};
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub(crate) struct Document {
     pub(crate) doc_id: String,
+    pub(crate) source_id: String,
     pub(crate) text: String,
 }
 
@@ -208,6 +209,22 @@ fn cut_alone(
     Ok(())
 }
 
+/// The source IDs of the documents of `docs`, JSON Lines sorted by doc ID,
+/// whose doc ID is `wanted`, each once.
+pub fn document_sources(
+    docs: impl BufRead,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<BTreeSet<String>, DocumentsError> {
+    let mut sources = BTreeSet::new();
+    each_document(docs, |d| {
+        if wanted(&d.doc_id) {
+            sources.insert(d.source_id);
+        }
+        Ok::<_, DocumentsError>(())
+    })?;
+    Ok(sources)
+}
+
 /// The texts of the documents of `docs`, JSON Lines sorted by doc ID, whose
 /// doc ID is `wanted`, in order.
 pub fn document_texts(
@@ -377,5 +394,29 @@ mod text_tests {
         let texts = document_texts(docs.as_bytes(), |id| id.starts_with("b:")).unwrap();
 
         assert_eq!(texts, ["二", "三"]);
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn the_sources_of_the_wanted_documents_come_once_each() {
+        let docs = concat!(
+            r#"{"doc_id":"a:1","source_id":"aozora-text","text":"一"}"#,
+            "\n",
+            r#"{"doc_id":"b:2","source_id":"hatena-hotentry:20260101","text":"二"}"#,
+            "\n",
+            r#"{"doc_id":"b:3","source_id":"hatena-hotentry:20260101","text":"三"}"#,
+            "\n",
+        );
+
+        let sources = document_sources(docs.as_bytes(), |id| id.starts_with("b:")).unwrap();
+
+        assert_eq!(
+            sources,
+            ["hatena-hotentry:20260101"].map(String::from).into()
+        );
     }
 }

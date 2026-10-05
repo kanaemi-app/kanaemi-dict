@@ -20,6 +20,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalDocument {
     pub doc_id: String,
+    pub source_id: String,
     pub units: Vec<Unit>,
     pub text: String,
 }
@@ -132,6 +133,7 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
             next = next_group().map_err(Failed::Read)?;
             f(EvalDocument {
                 doc_id: doc.doc_id,
+                source_id: doc.source_id,
                 units,
                 text: doc.text,
             })
@@ -266,7 +268,7 @@ mod tests {
             .map(|(doc_id, text)| {
                 format!(
                     "{}\n",
-                    serde_json::json!({ "doc_id": doc_id, "text": text })
+                    serde_json::json!({ "doc_id": doc_id, "source_id": "aozora-text", "text": text })
                 )
             })
             .collect()
@@ -296,11 +298,13 @@ mod tests {
             [
                 EvalDocument {
                     doc_id: "aozora:000004".into(),
+                    source_id: "aozora-text".into(),
                     units: units[1..3].to_vec(),
                     text: "漢い字".into(),
                 },
                 EvalDocument {
                     doc_id: "aozora:000015".into(),
+                    source_id: "aozora-text".into(),
                     units: units[4..].to_vec(),
                     text: "あ書".into(),
                 },
@@ -340,11 +344,13 @@ mod tests {
             [
                 EvalDocument {
                     doc_id: "aozora:000001".into(),
+                    source_id: "aozora-text".into(),
                     units: units[..1].to_vec(),
                     text: "手紙".into(),
                 },
                 EvalDocument {
                     doc_id: "aozora:000004".into(),
+                    source_id: "aozora-text".into(),
                     units: units[1..3].to_vec(),
                     text: "漢い字".into(),
                 },
@@ -469,6 +475,7 @@ mod tests {
     fn eval_document(doc_id: &str, units: &[(&str, &str)]) -> EvalDocument {
         EvalDocument {
             doc_id: doc_id.into(),
+            source_id: "aozora-text".into(),
             units: units
                 .iter()
                 .map(|(reading, surface)| unit(doc_id, 0, reading, surface))
@@ -537,6 +544,7 @@ mod model_tests {
         let dictionary = Arc::new(dictionary);
         let doc = EvalDocument {
             doc_id: "aozora:1".into(),
+            source_id: "aozora-text".into(),
             units: vec![Unit {
                 doc_id: "aozora:1".into(),
                 position: 0,

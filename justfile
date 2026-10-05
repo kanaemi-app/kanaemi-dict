@@ -70,9 +70,17 @@ additional *names:
     cargo run --release -p kanaemi-dict -- additional {{names}}
 
 # Train the ranking model into build/dictionaries/base.model on the candidates of build/dictionaries/base-train.tsv,
-# and measure the eval documents without and with it into build/ranking-evaluation.tsv.
+# paired with build/dictionaries/base.tsv (build it first), and measure the eval documents without and with it into build/ranking-evaluation.tsv.
 ranking:
     cargo run --release -p kanaemi-dict -- ranking
+
+# Put the dictionaries and the model of build/dictionaries/ into dictionaries/, once they check as they would ship.
+take:
+    cargo run --release -p kanaemi-dict -- take
+
+# Check dictionaries/ and gather each dictionary with its notice and license into build/dist/NAME/.
+dist:
+    cargo run --release -p kanaemi-dict -- dist
 
 # Run the tests that need SudachiDict full (`just sudachi` first).
 test-sudachi:

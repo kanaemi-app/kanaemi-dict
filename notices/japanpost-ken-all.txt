@@ -1,0 +1,4 @@
+日本郵便株式会社 郵便番号データ
+https://www.post.japanpost.jp/zipcode/
+
+地名の辞書の表記と読みは、郵便番号データから取った。
