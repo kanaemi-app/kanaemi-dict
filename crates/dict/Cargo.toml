@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+aho-corasick = "1.1.5"
 csv = "1.4.0"
 kanaemi-core.workspace = true
 kanaemi-engine.workspace = true

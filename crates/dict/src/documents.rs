@@ -208,6 +208,22 @@ fn cut_alone(
     Ok(())
 }
 
+/// The texts of the documents of `docs`, JSON Lines sorted by doc ID, whose
+/// doc ID is `wanted`, in order.
+pub fn document_texts(
+    docs: impl BufRead,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, DocumentsError> {
+    let mut texts = Vec::new();
+    each_document(docs, |d| {
+        if wanted(&d.doc_id) {
+            texts.push(d.text);
+        }
+        Ok::<_, DocumentsError>(())
+    })?;
+    Ok(texts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +356,26 @@ mod tests {
             ),
             "{err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+
+    #[test]
+    fn the_texts_of_the_wanted_documents_come_in_order() {
+        let docs = concat!(
+            r#"{"doc_id":"a:1","source_id":"s","text":"一"}"#,
+            "\n",
+            r#"{"doc_id":"b:2","source_id":"s","text":"二"}"#,
+            "\n",
+            r#"{"doc_id":"b:3","source_id":"s","text":"三"}"#,
+            "\n",
+        );
+
+        let texts = document_texts(docs.as_bytes(), |id| id.starts_with("b:")).unwrap();
+
+        assert_eq!(texts, ["二", "三"]);
     }
 }

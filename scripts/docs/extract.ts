@@ -66,7 +66,7 @@ export async function extractAll(
 
 const encoder = new TextEncoder();
 
-function compareUtf8(a: string, b: string): number {
+export function compareUtf8(a: string, b: string): number {
   const x = encoder.encode(a);
   const y = encoder.encode(b);
   for (let i = 0; i < Math.min(x.length, y.length); i++) {

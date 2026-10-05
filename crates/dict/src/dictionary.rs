@@ -55,13 +55,24 @@ pub struct Dictionary {
     pub report: Report,
 }
 
+/// What a line of the dictionary is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    /// A word written whole, or the stem of a conjugating word.
+    Word,
+    /// A word typed with its okurigana marked (`か*く` for 書く).
+    Okurigana,
+    /// A numeric item, with the number as a placeholder.
+    Numeric,
+}
+
 /// A dictionary text with lines Kanaemi would not read.
 #[derive(Debug, thiserror::Error)]
 #[error("Kanaemi rejects {} line(s) of the dictionary, the first being {:?}", .0.len(), .0.first())]
 pub struct RejectedLines(pub Vec<InvalidLine>);
 
 /// Stems and attested forms need this many occurrences to enter.
-const MIN_COUNT: usize = 2;
+pub(crate) const MIN_COUNT: usize = 2;
 /// Added to a UniDic word's cost when its surface occurs in the units.
 const UNIDIC_EXTRA: u32 = 1000;
 /// The cost of a UniDic word whose surface no unit shows.
@@ -181,6 +192,15 @@ impl Dictionary {
     /// a reading from the largest cost to the smallest, so a reader that
     /// ignores the costs still ranks the cheapest first.
     pub fn to_text(&self, label: impl AsRef<str>) -> String {
+        self.to_text_where(label, |_, _| true)
+    }
+
+    /// [`Dictionary::to_text`] with only the lines `keep` keeps.
+    pub fn to_text_where(
+        &self,
+        label: impl AsRef<str>,
+        keep: impl Fn(&ItemLine, LineKind) -> bool,
+    ) -> String {
         let numeric: Vec<Entry> = self
             .numeric
             .iter()
@@ -192,12 +212,12 @@ impl Dictionary {
                 })
             })
             .collect();
-        let mut lines: Vec<(&Entry, bool)> = self
+        let mut lines: Vec<(&Entry, LineKind)> = self
             .entries
             .iter()
-            .map(|e| (e, false))
-            .chain(numeric.iter().map(|e| (e, false)))
-            .chain(self.okuri.iter().map(|e| (e, true)))
+            .map(|e| (e, LineKind::Word))
+            .chain(numeric.iter().map(|e| (e, LineKind::Numeric)))
+            .chain(self.okuri.iter().map(|e| (e, LineKind::Okurigana)))
             .collect();
         lines.sort_by(|(a, _), (b, _)| {
             a.reading
@@ -208,9 +228,9 @@ impl Dictionary {
                 .then_with(|| compare_conjugations(&a.conjugation, &b.conjugation))
         });
         let mut out = format!("# Kanaemi 公式辞書・{}（kanaemi-dict）\n", label.as_ref());
-        for (entry, is_okuri) in lines {
+        for (entry, kind) in lines {
             let (reading, okurigana) = match entry.reading.rsplit_once('*') {
-                Some((stem, kana)) if is_okuri => (stem, Some(kana)),
+                Some((stem, kana)) if kind == LineKind::Okurigana => (stem, Some(kana)),
                 _ => (entry.reading.as_str(), None),
             };
             let line = ItemLine {
@@ -220,6 +240,9 @@ impl Dictionary {
                 conjugation: entry.conjugation.as_deref(),
                 cost: Some(entry.cost),
             };
+            if !keep(&line, kind) {
+                continue;
+            }
             out.push_str(&line.to_string());
             out.push('\n');
         }
@@ -268,7 +291,7 @@ fn is_glossed(surface: &str) -> bool {
 
 /// The okurigana lines of `entries`, each at the cheapest cost of the
 /// entries it follows from.
-fn okuri_lines(entries: &[Entry]) -> Vec<Entry> {
+pub(crate) fn okuri_lines(entries: &[Entry]) -> Vec<Entry> {
     let mut okuri: BTreeMap<(String, String), u32> = BTreeMap::new();
     for entry in entries {
         if let Some(key) = okuri_line(&entry.reading, &entry.surface) {
@@ -357,7 +380,7 @@ fn voicings(reading: &str) -> Vec<String> {
 }
 
 /// `-ln(count / total) × 100`, rounded.
-fn cost_of(count: usize, total: usize) -> u32 {
+pub(crate) fn cost_of(count: usize, total: usize) -> u32 {
     (-(count as f64 / total as f64).ln() * 100.0).round() as u32
 }
 

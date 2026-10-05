@@ -226,6 +226,7 @@ source = "git+https://github.com/kanaemi-app/kanaemi?rev=be95319d95dfffc629bc671
 name = "kanaemi-dict"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "csv",
  "kanaemi-core",
  "kanaemi-engine",

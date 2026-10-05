@@ -54,6 +54,21 @@ dictionary *flags:
 evaluate:
     cargo run --release -p kanaemi-dict -- evaluate
 
+# Set up this year's dictionary of new words (or YEAR's: `--year YEAR`) if it is not there, and fetch the postal code
+# data and the hot entries of every year with a dictionary into build/additional/raw.
+additional-fetch *args:
+    deno run --allow-read --allow-write --allow-net scripts/additional.ts fetch {{args}}
+
+# Write what each dictionary under additional/ is built from into build/additional/NAME/,
+# taking the Wikipedia dump and the laws out of build/raw.
+additional-docs:
+    deno run --allow-read --allow-write --allow-run=lbzip2 scripts/additional.ts docs
+
+# Build the additional dictionaries NAME (or every one) into build/dictionaries/NAME.tsv,
+# without what build/dictionaries/base.tsv already gives.
+additional *names:
+    cargo run --release -p kanaemi-dict -- additional {{names}}
+
 # Run the tests that need SudachiDict full (`just sudachi` first).
 test-sudachi:
     cargo test --workspace --release -- --ignored

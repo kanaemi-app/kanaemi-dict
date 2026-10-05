@@ -206,7 +206,7 @@ pub fn evaluate_document(
 /// The 1-based rank of the expected candidate, if it is offered at all. As
 /// Kanaemi does, the reading's katakana follows the conversion results when
 /// they lack it, with okurigana given or not.
-fn rank_of(converter: &impl Converter, query: &Query) -> Option<usize> {
+pub(crate) fn rank_of(converter: &impl Converter, query: &Query) -> Option<usize> {
     let mut surfaces: Vec<String> = converter
         .convert(&query.reading, query.okurigana.as_deref())
         .into_iter()
