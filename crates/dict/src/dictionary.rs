@@ -5,7 +5,7 @@ use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 
-use kanaemi_engine::{InvalidLine, ItemLine, TextDictionary, may_follow_stem};
+use kanaemi_engine::{InvalidLine, ItemLine, TextDictionary, mark_placeholders, may_follow_stem};
 
 use crate::kana::{is_hiragana, is_kanji};
 use crate::{UnidicWord, Unit};
@@ -49,6 +49,9 @@ pub struct Dictionary {
     /// Lines for typing with okurigana, such as 書く under `か*く`, whose
     /// reading marks the okurigana with its last `*`.
     pub okuri: Vec<Entry>,
+    /// Numeric items, whose reading and surface hold the number as a
+    /// placeholder (`{}ほん` for `{}本`).
+    pub numeric: Vec<Entry>,
     pub report: Report,
 }
 
@@ -76,6 +79,7 @@ impl Dictionary {
         // A whole form and a plain word with the same reading and surface are
         // one item, so they share one count.
         let mut counts: HashMap<Key, usize> = HashMap::new();
+        let mut numeric_counts: HashMap<(String, String), usize> = HashMap::new();
         let mut surfaces: HashMap<String, usize> = HashMap::new();
         let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
         let mut disallowed: BTreeMap<(String, String), (usize, String)> = BTreeMap::new();
@@ -83,6 +87,12 @@ impl Dictionary {
             let unit = unit.borrow();
             total += 1;
             *surfaces.entry(unit.surface.clone()).or_default() += 1;
+            if let Some(n) = &unit.numeric {
+                *numeric_counts
+                    .entry((n.reading.clone(), n.surface.clone()))
+                    .or_default() += 1;
+                continue;
+            }
             if let Some(t) = &unit.unknown_conjugation {
                 *unknown.entry(t.clone()).or_default() += 1;
                 continue;
@@ -147,6 +157,7 @@ impl Dictionary {
 
         Self {
             okuri: okuri_lines(&entries),
+            numeric: numeric_entries(numeric_counts, total),
             entries,
             report: Report {
                 unknown_conjugations: unknown.into_iter().collect(),
@@ -170,10 +181,22 @@ impl Dictionary {
     /// a reading from the largest cost to the smallest, so a reader that
     /// ignores the costs still ranks the cheapest first.
     pub fn to_text(&self, label: impl AsRef<str>) -> String {
+        let numeric: Vec<Entry> = self
+            .numeric
+            .iter()
+            .filter_map(|e| {
+                Some(Entry {
+                    reading: mark_placeholders(&e.reading)?,
+                    surface: mark_placeholders(&e.surface)?,
+                    ..e.clone()
+                })
+            })
+            .collect();
         let mut lines: Vec<(&Entry, bool)> = self
             .entries
             .iter()
             .map(|e| (e, false))
+            .chain(numeric.iter().map(|e| (e, false)))
             .chain(self.okuri.iter().map(|e| (e, true)))
             .collect();
         lines.sort_by(|(a, _), (b, _)| {
@@ -266,6 +289,73 @@ fn okuri_lines(entries: &[Entry]) -> Vec<Entry> {
         .collect()
 }
 
+/// Numeric entries from their counts, each with the readings whose first kana
+/// after the number is another of its plain, voiced and semi-voiced forms
+/// (`{}ほん` and `{}ぼん` from `{}ぽん`), as the reading changes with the
+/// number before it. A reading met more than once keeps its smallest cost.
+fn numeric_entries(counts: HashMap<(String, String), usize>, total: usize) -> Vec<Entry> {
+    let mut costs: BTreeMap<(String, String), u32> = BTreeMap::new();
+    for ((reading, surface), count) in counts {
+        if count < MIN_COUNT {
+            continue;
+        }
+        let cost = cost_of(count, total);
+        for reading in voicings(&reading) {
+            costs
+                .entry((reading, surface.clone()))
+                .and_modify(|c| *c = (*c).min(cost))
+                .or_insert(cost);
+        }
+    }
+    costs
+        .into_iter()
+        .map(|((reading, surface), cost)| Entry {
+            reading,
+            surface,
+            conjugation: None,
+            cost,
+        })
+        .collect()
+}
+
+const PLAIN: &str = "かきくけこさしすせそたちつてとはひふへほ";
+const VOICED: &str = "がぎぐげござじずぜぞだぢづでどばびぶべぼ";
+const SEMI_VOICED: &str = "ぱぴぷぺぽ";
+/// Where the は row starts in [`PLAIN`], the only row with semi-voiced forms.
+const HA_ROW: usize = 15;
+
+/// `reading` with the first kana after its first `{}` in each of its plain,
+/// voiced and semi-voiced forms; `reading` alone when that kana has no other
+/// form.
+fn voicings(reading: &str) -> Vec<String> {
+    let family = reading.split_once("{}").and_then(|(before, after)| {
+        let mut chars = after.chars();
+        let first = chars.next()?;
+        let i = [PLAIN, VOICED, SEMI_VOICED]
+            .iter()
+            .enumerate()
+            .find_map(|(row, kana)| {
+                let at = kana.chars().position(|k| k == first)?;
+                Some(if row == 2 { at + HA_ROW } else { at })
+            })?;
+        let semi_voiced = i
+            .checked_sub(HA_ROW)
+            .and_then(|j| SEMI_VOICED.chars().nth(j));
+        let rest = chars.as_str();
+        Some(
+            PLAIN
+                .chars()
+                .nth(i)
+                .into_iter()
+                .chain(VOICED.chars().nth(i))
+                .chain(semi_voiced)
+                .map(|kana| format!("{before}{{}}{kana}{rest}"))
+                .collect(),
+        )
+    });
+    family.unwrap_or_else(|| vec![reading.to_owned()])
+}
+
 /// `-ln(count / total) × 100`, rounded.
 fn cost_of(count: usize, total: usize) -> u32 {
     (-(count as f64 / total as f64).ln() * 100.0).round() as u32
@@ -304,6 +394,7 @@ mod tests {
     use kanaemi_engine::InvalidReason;
 
     use super::*;
+    use crate::Numeric;
 
     fn word(reading: &str, surface: &str) -> Unit {
         Unit {
@@ -315,6 +406,7 @@ mod tests {
             stem_surface: None,
             conjugation: None,
             unknown_conjugation: None,
+            numeric: None,
         }
     }
 
@@ -355,6 +447,124 @@ mod tests {
         entries
             .iter()
             .find(|e| e.reading == reading && e.surface == surface)
+    }
+
+    fn counted(reading: &str, surface: &str, item: (&str, &str, &str)) -> Unit {
+        Unit {
+            numeric: Some(Numeric {
+                reading: item.0.into(),
+                surface: item.1.into(),
+                value: item.2.into(),
+            }),
+            ..word(reading, surface)
+        }
+    }
+
+    #[test]
+    fn numeric_units_are_counted_across_their_values_into_numeric_entries() {
+        let units = [
+            counted("3まい", "3枚", ("{}まい", "{}枚", "3")),
+            counted("5まい", "5枚", ("{}まい", "{}枚", "5")),
+            counted("3まい", "三枚", ("{}まい", "{kanji}枚", "3")),
+            word("てがみ", "手紙"),
+        ];
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(dict.numeric, [entry("{}まい", "{}枚", None, cost(2, 4))]);
+        assert!(dict.entries.is_empty(), "{:?}", dict.entries);
+    }
+
+    #[test]
+    fn a_numeric_entry_takes_every_voicing_of_the_first_kana_after_the_number() {
+        let units: Vec<Unit> = [
+            repeat(counted("3ぽん", "3本", ("{}ぽん", "{}本", "3")), 2),
+            repeat(
+                counted("だい3かい", "第3回", ("だい{}かい", "第{}回", "3")),
+                2,
+            ),
+            repeat(counted("3がつ", "3月", ("{}がつ", "{}月", "3")), 2),
+            repeat(counted("3にん", "3人", ("{}にん", "{}人", "3")), 2),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        let mut items: Vec<(&str, &str, u32)> = dict
+            .numeric
+            .iter()
+            .map(|e| (e.reading.as_str(), e.surface.as_str(), e.cost))
+            .collect();
+        items.sort();
+        let c = cost(2, 8);
+        assert_eq!(
+            items,
+            [
+                ("{}かつ", "{}月", c),
+                ("{}がつ", "{}月", c),
+                ("{}にん", "{}人", c),
+                ("{}ほん", "{}本", c),
+                ("{}ぼん", "{}本", c),
+                ("{}ぽん", "{}本", c),
+                ("だい{}かい", "第{}回", c),
+                ("だい{}がい", "第{}回", c),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_variant_meeting_a_counted_entry_keeps_the_smaller_cost() {
+        let units: Vec<Unit> = [
+            repeat(counted("3ほん", "3本", ("{}ほん", "{}本", "3")), 5),
+            repeat(counted("3ぼん", "3本", ("{}ぼん", "{}本", "3")), 2),
+            repeat(counted("3こ", "3個", ("{}こ", "{}個", "3")), 2),
+            repeat(counted("5ご", "5個", ("{}ご", "{}個", "5")), 5),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        let cost_of = |reading, surface| find(&dict.numeric, reading, surface).unwrap().cost;
+        assert_eq!(cost_of("{}ぼん", "{}本"), cost(5, 14));
+        assert_eq!(cost_of("{}こ", "{}個"), cost(5, 14));
+        assert_eq!(cost_of("{}ご", "{}個"), cost(5, 14));
+    }
+
+    #[test]
+    fn numeric_entries_make_no_okurigana_lines() {
+        let units = repeat(
+            counted("3にちぶり", "3日ぶり", ("{}にちぶり", "{}日ぶり", "3")),
+            2,
+        );
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(dict.numeric.len(), 1);
+        assert_eq!(dict.okuri, []);
+    }
+
+    #[test]
+    fn numeric_entries_are_written_with_their_placeholders_among_the_other_lines() {
+        let dict = Dictionary {
+            entries: vec![entry("ほん", "本", None, 50)],
+            numeric: vec![
+                entry("{}ほん", "{}本", None, 300),
+                entry("だい{}かい", "第{kanji}回", None, 200),
+                entry("{}ほん", "{wide-num}本", None, 100),
+            ],
+            ..Default::default()
+        };
+
+        let text = dict.to_checked_text(BASE_LABEL).unwrap();
+
+        assert_eq!(
+            text,
+            "# Kanaemi 公式辞書・基本（kanaemi-dict）\n\
+             だい{}かい\t第{kanji}回\t\t200\n\
+             ほん\t本\t\t50\n\
+             {}ほん\t{}本\t\t300\n\
+             {}ほん\t{wide-num}本\t\t100\n"
+        );
     }
 
     #[test]

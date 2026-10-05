@@ -179,9 +179,10 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             .map_err(write_error(outputs.report))
     })?;
     println!(
-        "entries: {}, okurigana lines: {}, unknown types: {}, disallowed okurigana: {}, out: {}, report: {}",
+        "entries: {}, okurigana lines: {}, numeric lines: {}, unknown types: {}, disallowed okurigana: {}, out: {}, report: {}",
         dictionary.entries.len(),
         dictionary.okuri.len(),
+        dictionary.numeric.len(),
         dictionary.report.unknown_conjugations.len(),
         dictionary.report.disallowed_okurigana.len(),
         outputs.dictionary,
@@ -214,15 +215,16 @@ fn evaluate() -> Result<(), Error> {
         w.write_all(evaluation.to_tsv().as_bytes())
             .map_err(write_error(EVALUATION))
     })?;
-    let all = evaluation.all();
-    for (history, score) in [("off", all.fresh), ("on", all.with_history)] {
-        println!(
-            "history {history}: units {}, covered {:.2}%, first {:.2}%, mean rank {:.3}",
-            score.units,
-            percent(score.covered, score.units),
-            percent(score.first, score.units),
-            score.mean_rank(),
-        );
+    for (class, scores) in evaluation.all().classes() {
+        for (history, score) in [("off", scores.fresh), ("on", scores.with_history)] {
+            println!(
+                "{class} history {history}: units {}, covered {:.2}%, first {:.2}%, mean rank {:.3}",
+                score.units,
+                percent(score.covered, score.units),
+                percent(score.first, score.units),
+                score.mean_rank(),
+            );
+        }
     }
     println!("documents: {}, out: {EVALUATION}", docs.len());
     Ok(())

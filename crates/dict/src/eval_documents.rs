@@ -12,7 +12,7 @@ use rayon::prelude::*;
 
 use crate::documents::each_document;
 use crate::{
-    DocumentsError, Scores, Split, Unit, UnitsError, engine, evaluate_document, read_units,
+    ClassScores, DocumentsError, Split, Unit, UnitsError, engine, evaluate_document, read_units,
     split_of,
 };
 
@@ -104,35 +104,42 @@ pub fn eval_documents(
 /// Scores per kind of source, the part of a doc ID before its first `:`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Evaluation {
-    pub by_kind: BTreeMap<String, Scores>,
+    pub by_kind: BTreeMap<String, ClassScores>,
 }
 
 impl Evaluation {
     /// Every kind's scores together.
-    pub fn all(&self) -> Scores {
-        let mut all = Scores::default();
+    pub fn all(&self) -> ClassScores {
+        let mut all = ClassScores::default();
         for scores in self.by_kind.values() {
             all.merge(*scores);
         }
         all
     }
 
-    /// The table of `build/evaluation.tsv`: a header, then a row per kind and
-    /// history, kinds in the order of their UTF-8 bytes and `all` last.
+    /// The table of `build/evaluation.tsv`: a header, then a row per kind,
+    /// history and class, kinds in the order of their UTF-8 bytes and `all`
+    /// last.
     pub fn to_tsv(&self) -> String {
         let all = self.all();
-        let mut tsv = String::from("kind\thistory\tunits\tcovered\tfirst\tmean_rank\n");
+        let mut tsv = String::from("kind\thistory\tclass\tunits\tcovered\tfirst\tmean_rank\n");
         for (kind, scores) in self.by_kind.iter().chain([(&"all".to_owned(), &all)]) {
-            for (history, score) in [("off", scores.fresh), ("on", scores.with_history)] {
-                writeln!(
-                    tsv,
-                    "{kind}\t{history}\t{}\t{}\t{}\t{:.3}",
-                    score.units,
-                    score.covered,
-                    score.first,
-                    score.mean_rank(),
-                )
-                .expect("writing to a String never fails");
+            for history in ["off", "on"] {
+                for (class, class_scores) in scores.classes() {
+                    let score = match history {
+                        "off" => class_scores.fresh,
+                        _ => class_scores.with_history,
+                    };
+                    writeln!(
+                        tsv,
+                        "{kind}\t{history}\t{class}\t{}\t{}\t{}\t{:.3}",
+                        score.units,
+                        score.covered,
+                        score.first,
+                        score.mean_rank(),
+                    )
+                    .expect("writing to a String never fails");
+                }
             }
         }
         tsv
@@ -144,7 +151,7 @@ impl Evaluation {
 /// its own pair of engines, all sharing the one parsed dictionary.
 pub fn evaluate_documents(docs: &[EvalDocument], dictionary: &Arc<TextDictionary>) -> Evaluation {
     let chunk = docs.len().div_ceil(rayon::current_num_threads() * 4).max(1);
-    let per_doc: Vec<Scores> = docs
+    let per_doc: Vec<ClassScores> = docs
         .par_chunks(chunk)
         .flat_map_iter(|chunk| {
             let fresh = engine(dictionary.clone());
@@ -170,7 +177,7 @@ pub fn evaluate_documents(docs: &[EvalDocument], dictionary: &Arc<TextDictionary
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Score;
+    use crate::{Score, Scores};
 
     // Splits computed apart from this code: aozora:000001 is train,
     // aozora:000013 dev, and aozora:000004 and aozora:000015 eval.
@@ -184,6 +191,7 @@ mod tests {
             stem_surface: None,
             conjugation: None,
             unknown_conjugation: None,
+            numeric: None,
         }
     }
 
@@ -303,22 +311,29 @@ mod tests {
         }
     }
 
+    fn scores(fresh: Score, with_history: Score) -> Scores {
+        Scores {
+            fresh,
+            with_history,
+        }
+    }
+
     #[test]
-    fn the_table_has_a_row_per_kind_and_history_in_byte_order_with_all_last() {
+    fn the_table_has_a_row_per_kind_history_and_class_in_byte_order_with_all_last() {
         let evaluation = Evaluation {
             by_kind: BTreeMap::from([
                 (
                     "law".to_owned(),
-                    Scores {
-                        fresh: score(4, 3, 2, 5),
-                        with_history: score(4, 4, 3, 5),
+                    ClassScores {
+                        numeric: scores(score(1, 1, 0, 2), score(1, 1, 1, 1)),
+                        other: scores(score(3, 2, 2, 3), score(3, 3, 2, 4)),
                     },
                 ),
                 (
                     "aozora".to_owned(),
-                    Scores {
-                        fresh: score(2, 0, 0, 0),
-                        with_history: score(2, 1, 1, 1),
+                    ClassScores {
+                        numeric: Scores::default(),
+                        other: scores(score(2, 0, 0, 0), score(2, 1, 1, 1)),
                     },
                 ),
             ]),
@@ -326,13 +341,25 @@ mod tests {
 
         assert_eq!(
             evaluation.to_tsv(),
-            "kind\thistory\tunits\tcovered\tfirst\tmean_rank\n\
-             aozora\toff\t2\t0\t0\t0.000\n\
-             aozora\ton\t2\t1\t1\t1.000\n\
-             law\toff\t4\t3\t2\t1.667\n\
-             law\ton\t4\t4\t3\t1.250\n\
-             all\toff\t6\t3\t2\t1.667\n\
-             all\ton\t6\t5\t4\t1.200\n"
+            "kind\thistory\tclass\tunits\tcovered\tfirst\tmean_rank\n\
+             aozora\toff\tnumeric\t0\t0\t0\t0.000\n\
+             aozora\toff\tother\t2\t0\t0\t0.000\n\
+             aozora\toff\tall\t2\t0\t0\t0.000\n\
+             aozora\ton\tnumeric\t0\t0\t0\t0.000\n\
+             aozora\ton\tother\t2\t1\t1\t1.000\n\
+             aozora\ton\tall\t2\t1\t1\t1.000\n\
+             law\toff\tnumeric\t1\t1\t0\t2.000\n\
+             law\toff\tother\t3\t2\t2\t1.500\n\
+             law\toff\tall\t4\t3\t2\t1.667\n\
+             law\ton\tnumeric\t1\t1\t1\t1.000\n\
+             law\ton\tother\t3\t3\t2\t1.333\n\
+             law\ton\tall\t4\t4\t3\t1.250\n\
+             all\toff\tnumeric\t1\t1\t0\t2.000\n\
+             all\toff\tother\t5\t2\t2\t1.500\n\
+             all\toff\tall\t6\t3\t2\t1.667\n\
+             all\ton\tnumeric\t1\t1\t1\t1.000\n\
+             all\ton\tother\t5\t4\t3\t1.250\n\
+             all\ton\tall\t6\t5\t4\t1.200\n"
         );
     }
 
@@ -375,7 +402,7 @@ mod tests {
             .unwrap()
             .install(|| evaluate_documents(&docs, &dictionary));
 
-        let mut alone: BTreeMap<String, Scores> = BTreeMap::new();
+        let mut alone: BTreeMap<String, ClassScores> = BTreeMap::new();
         for doc in &docs {
             let scores = evaluate_document(
                 &engine(dictionary.clone()),
@@ -388,7 +415,7 @@ mod tests {
         }
         assert_eq!(evaluation.by_kind, alone);
         assert_eq!(
-            evaluation.all().fresh.units,
+            evaluation.all().all().fresh.units,
             docs.iter().map(|d| d.units.len()).sum::<usize>()
         );
     }

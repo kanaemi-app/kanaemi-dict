@@ -109,6 +109,44 @@ impl Scores {
     }
 }
 
+/// Scores of the numeric units and of the other units apart.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ClassScores {
+    pub numeric: Scores,
+    pub other: Scores,
+}
+
+impl ClassScores {
+    pub fn merge(&mut self, other: ClassScores) {
+        self.numeric.merge(other.numeric);
+        self.other.merge(other.other);
+    }
+
+    /// Every unit's scores together.
+    pub fn all(&self) -> Scores {
+        let mut all = self.numeric;
+        all.merge(self.other);
+        all
+    }
+
+    /// The table's classes in their order: `numeric`, `other`, `all`.
+    pub fn classes(&self) -> [(&'static str, Scores); 3] {
+        [
+            ("numeric", self.numeric),
+            ("other", self.other),
+            ("all", self.all()),
+        ]
+    }
+
+    fn of(&mut self, unit: &Unit) -> &mut Scores {
+        if unit.numeric.is_some() {
+            &mut self.numeric
+        } else {
+            &mut self.other
+        }
+    }
+}
+
 /// An input field the evaluation types into: a converter that learns what is
 /// committed and typed there.
 pub trait Field: Converter {
@@ -145,8 +183,8 @@ pub fn evaluate_document(
     with_history: &mut impl Field,
     units: &[Unit],
     text: impl AsRef<str>,
-) -> Scores {
-    let mut scores = Scores::default();
+) -> ClassScores {
+    let mut scores = ClassScores::default();
     with_history.start_over();
     let chars: Vec<char> = text.as_ref().chars().collect();
     let mut typed = 0;
@@ -157,8 +195,9 @@ pub fn evaluate_document(
             typed = upto;
         }
         let query = query_of(unit);
-        scores.fresh.add(rank_of(fresh, &query));
-        scores.with_history.add(rank_of(with_history, &query));
+        let class = scores.of(unit);
+        class.fresh.add(rank_of(fresh, &query));
+        class.with_history.add(rank_of(with_history, &query));
         with_history.commit(&query);
     }
     scores
@@ -209,6 +248,7 @@ mod tests {
     use kanaemi_core::Candidate;
 
     use super::*;
+    use crate::Numeric;
 
     fn unit(reading: &str, surface: &str, stem: Option<(&str, &str)>) -> Unit {
         Unit {
@@ -220,6 +260,7 @@ mod tests {
             stem_surface: stem.map(|s| s.1.into()),
             conjugation: stem.map(|_| "五段-カ行".into()),
             unknown_conjugation: None,
+            numeric: None,
         }
     }
 
@@ -394,7 +435,7 @@ mod tests {
         let scores = evaluate_document(&fake(), &mut fake(), &units, "");
 
         assert_eq!(
-            scores,
+            scores.other,
             Scores {
                 fresh: Score {
                     units: 3,
@@ -410,6 +451,37 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn numeric_units_are_scored_apart_from_the_others() {
+        let fake = || Fake {
+            candidates: vec!["3本", "手紙"],
+            ..Fake::default()
+        };
+        let mut three = unit("3ぽん", "三本", None);
+        three.numeric = Some(Numeric {
+            reading: "{}ぽん".into(),
+            surface: "{kanji}本".into(),
+            value: "3".into(),
+        });
+        let units = [three, unit("てがみ", "手紙", None)];
+
+        let scores = evaluate_document(&fake(), &mut fake(), &units, "");
+
+        let missed = Score {
+            units: 1,
+            ..Score::default()
+        };
+        let second = Score {
+            units: 1,
+            covered: 1,
+            first: 0,
+            rank_sum: 2,
+        };
+        assert_eq!(scores.numeric.fresh, missed);
+        assert_eq!(scores.other.fresh, second);
+        assert_eq!(scores.all().fresh, Score { units: 2, ..second });
     }
 
     fn dictionary(text: &str) -> Arc<TextDictionary> {
@@ -440,7 +512,7 @@ mod tests {
             rank_sum: 2,
         };
         assert_eq!(
-            scores,
+            scores.other,
             Scores {
                 fresh: all_first,
                 with_history: all_first,
@@ -467,6 +539,6 @@ mod tests {
             "",
         );
 
-        assert_eq!(scores.with_history.first, 1);
+        assert_eq!(scores.other.with_history.first, 1);
     }
 }

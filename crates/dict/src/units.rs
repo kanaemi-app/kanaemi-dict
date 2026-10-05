@@ -9,6 +9,7 @@ use crate::Token;
 use crate::analyzer::is_break;
 use crate::conjugation::{KanaemiType, kanaemi_type};
 use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana};
+use crate::numeral::{Number, read_number};
 
 /// A unit with its document and its position in the document's text, as
 /// written to `build/units.jsonl`.
@@ -26,6 +27,19 @@ pub struct Unit {
     /// A conjugation type Kanaemi's table does not know; such a unit never
     /// enters the dictionary.
     pub unknown_conjugation: Option<String>,
+    pub numeric: Option<Numeric>,
+}
+
+/// A unit that holds a number, in the form of Kanaemi's numeric items: the
+/// number's placeholder in reading and surface, and the number typed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Numeric {
+    /// The reading with `{}` for the number: `だい{}かい`.
+    pub reading: String,
+    /// The surface with the number's notation placeholder: `第{kanji}回`.
+    pub surface: String,
+    /// The number as the ASCII digits typed for it: `3` for 三.
+    pub value: String,
 }
 
 /// A line of `build/units.jsonl` that could not be read as a unit.
@@ -56,6 +70,7 @@ pub(crate) struct LineUnit {
     pub(crate) surface: String,
     pub(crate) stem: Option<Stem>,
     pub(crate) unknown_conjugation: Option<String>,
+    pub(crate) numeric: Option<Numeric>,
 }
 
 /// The stem of a word Kanaemi conjugates.
@@ -99,6 +114,7 @@ pub(crate) fn each_unit<E>(
                 stem_surface: stem.as_ref().map(|s| s.surface.clone()),
                 conjugation: stem.map(|s| s.conjugation),
                 unknown_conjugation: u.unknown_conjugation,
+                numeric: u.numeric,
             });
         }
         line_start += line.chars().count() + 1;
@@ -142,13 +158,28 @@ const OUTSIDE_TABLE: &str = "(outside the table)";
 /// Cuts one line's tokens into units.
 pub(crate) fn cut_line(tokens: &[Token]) -> Vec<LineUnit> {
     let renamed: Vec<Token> = tokens.iter().map(with_kanaemi_type).collect();
-    let tokens = join_affixes(&renamed);
+    let mut units = Vec::new();
+    let mut rest = renamed.as_slice();
+    while let Some(n) = rest.iter().position(is_numeral) {
+        let start = n - usize::from(n > 0 && rest[n - 1].pos[0] == "接頭辞");
+        units.extend(cut_words(&rest[..start]));
+        let (unit, taken) = cut_numeric(&rest[start..]);
+        units.extend(unit);
+        rest = &rest[start + taken..];
+    }
+    units.extend(cut_words(rest));
+    units
+}
+
+/// Cuts tokens holding no numeral into units.
+fn cut_words(tokens: &[Token]) -> Vec<LineUnit> {
+    let tokens = join_affixes(tokens);
     let mut units = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         let token = &tokens[i];
         i += 1;
-        if !needs_conversion(&token.surface) || is_numeral(token) {
+        if !needs_conversion(&token.surface) {
             continue;
         }
         let Some(conjugation) = conjugation_of(token) else {
@@ -188,6 +219,63 @@ pub(crate) fn cut_line(tokens: &[Token]) -> Vec<LineUnit> {
     units
 }
 
+/// Cuts the numeral at the head of `tokens`, with the prefix before it, into
+/// a numeric unit: the prefix, the number, the counter after it and the
+/// suffixes after the counter. Returns the unit, if they make one, and how
+/// many tokens it took, which it takes either way.
+fn cut_numeric(tokens: &[Token]) -> (Option<LineUnit>, usize) {
+    let number_start = usize::from(tokens[0].pos[0] == "接頭辞");
+    let after = number_start
+        + tokens[number_start..]
+            .iter()
+            .take_while(|t| is_numeral(t))
+            .count();
+    if !tokens.get(after).is_some_and(is_counter) {
+        return (None, after);
+    }
+    let taken = after
+        + 1
+        + tokens[after + 1..]
+            .iter()
+            .take_while(|t| t.pos[0] == "接尾辞")
+            .count();
+    let unit = numeric_unit(
+        &tokens[..number_start],
+        &tokens[number_start..after],
+        &tokens[after..taken],
+    );
+    (unit, taken)
+}
+
+fn numeric_unit(before: &[Token], number: &[Token], after: &[Token]) -> Option<LineUnit> {
+    let surface = |ts: &[Token]| ts.iter().map(|t| t.surface.as_str()).collect::<String>();
+    let kana = |ts: &[Token]| {
+        let reading: String = ts.iter().map(|t| t.reading.as_str()).collect();
+        reading.chars().all(is_reading_kana).then_some(reading)
+    };
+    let Number { notation, value } = read_number(surface(number))?;
+    let (kana_before, kana_after) = (kana(before)?, kana(after)?);
+    let (surface_before, surface_after) = (surface(before), surface(after));
+    let numeric = Numeric {
+        reading: format!("{kana_before}{{}}{kana_after}"),
+        surface: format!("{surface_before}{}{surface_after}", notation.placeholder()),
+        value,
+    };
+    (numeric.reading != numeric.surface).then(|| LineUnit {
+        begin: before.first().unwrap_or(&number[0]).begin,
+        reading: format!("{kana_before}{}{kana_after}", numeric.value),
+        surface: format!("{surface_before}{}{surface_after}", surface(number)),
+        stem: None,
+        unknown_conjugation: None,
+        numeric: Some(numeric),
+    })
+}
+
+/// A suffix, or a noun that can count, after a number.
+fn is_counter(token: &Token) -> bool {
+    token.pos[0] == "接尾辞" || (token.pos[0] == "名詞" && token.pos[2] == "助数詞可能")
+}
+
 fn plain(token: &Token) -> LineUnit {
     LineUnit {
         begin: token.begin,
@@ -195,6 +283,7 @@ fn plain(token: &Token) -> LineUnit {
         surface: token.surface.clone(),
         stem: None,
         unknown_conjugation: None,
+        numeric: None,
     }
 }
 
@@ -239,14 +328,14 @@ fn take_in(mut unit: LineUnit, mut okuri: usize, rest: &[Token]) -> (LineUnit, u
 }
 
 /// Joins a prefix to the content word after it and a suffix to the noun or
-/// pronoun before it, never to a numeral.
+/// pronoun before it.
 fn join_affixes(tokens: &[Token]) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::new();
     let mut prefix: Option<Token> = None;
     for token in tokens {
         let mut token = token.clone();
         if let Some(p) = prefix.take() {
-            if PREFIX_HEADS.contains(&token.pos[0].as_str()) && !is_numeral(&token) {
+            if PREFIX_HEADS.contains(&token.pos[0].as_str()) {
                 token = Token {
                     surface: p.surface + &token.surface,
                     reading: p.reading + &token.reading,
@@ -278,9 +367,8 @@ fn join_affixes(tokens: &[Token]) -> Vec<Token> {
 }
 
 fn takes_suffix(token: &Token) -> bool {
-    let noun_like = matches!(token.pos[0].as_str(), "名詞" | "代名詞")
-        || (token.pos[0] == "接尾辞" && token.pos[1] == "名詞的");
-    noun_like && !is_numeral(token)
+    matches!(token.pos[0].as_str(), "名詞" | "代名詞")
+        || (token.pos[0] == "接尾辞" && token.pos[1] == "名詞的")
 }
 
 fn conjugation_of(token: &Token) -> Option<&str> {
@@ -336,6 +424,11 @@ mod tests {
             stem_surface: None,
             conjugation: None,
             unknown_conjugation: None,
+            numeric: Some(Numeric {
+                reading: "{}ぽん".into(),
+                surface: "{kanji}本".into(),
+                value: "3".into(),
+            }),
         };
         let text = format!(
             "{}\n{{\"doc_id\":\"a:1\"}}\n",
@@ -391,6 +484,7 @@ mod tests {
             surface: surface.into(),
             stem: None,
             unknown_conjugation: None,
+            numeric: None,
         }
     }
 
@@ -631,22 +725,192 @@ mod tests {
         );
     }
 
+    fn numeric(begin: usize, typed: &str, surface: &str, item: (&str, &str, &str)) -> LineUnit {
+        LineUnit {
+            numeric: Some(Numeric {
+                reading: item.0.into(),
+                surface: item.1.into(),
+                value: item.2.into(),
+            }),
+            ..plain(begin, typed, surface)
+        }
+    }
+
+    const NUMERAL: &str = "名詞,数詞,*,*,*,*";
+    const COUNTER_SUFFIX: &str = "接尾辞,名詞的,助数詞,*,*,*";
+    const COUNTER_NOUN: &str = "名詞,普通名詞,助数詞可能,*,*,*";
+    const PREFIX: &str = "接頭辞,*,*,*,*,*";
+
     #[test]
-    fn numerals_are_not_units_and_affixes_do_not_join_them() {
+    fn a_number_and_the_counter_after_it_are_a_numeric_unit() {
         assert_eq!(
             cut(&[
-                "第/だい/接頭辞,*,*,*,*,*/第",
-                "3/さん/名詞,数詞,*,*,*,*/3",
-                "条/じょう/名詞,普通名詞,助数詞可能,*,*,*/条",
-                "の/の/助詞,格助詞,*,*,*,*/の",
-                "千/せん/名詞,数詞,*,*,*,*/千",
-                "円/えん/名詞,普通名詞,助数詞可能,*,*,*/円",
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
+            ]),
+            [numeric(0, "3ぽん", "3本", ("{}ぽん", "{}本", "3"))]
+        );
+    }
+
+    #[test]
+    fn a_noun_that_takes_a_number_counts_it() {
+        assert_eq!(
+            cut(&[
+                &format!("2026/にせんにじゅうろく/{NUMERAL}/2026"),
+                &format!("年/ねん/{COUNTER_NOUN}/年"),
+                &format!("10/じゅう/{NUMERAL}/10"),
+                &format!("月/がつ/{COUNTER_NOUN}/月"),
+                &format!("5/ご/{NUMERAL}/5"),
+                &format!("日/か/{COUNTER_SUFFIX}/日"),
             ]),
             [
-                plain(0, "だい", "第"),
-                plain(2, "じょう", "条"),
-                plain(5, "えん", "円")
+                numeric(0, "2026ねん", "2026年", ("{}ねん", "{}年", "2026")),
+                numeric(5, "10がつ", "10月", ("{}がつ", "{}月", "10")),
+                numeric(8, "5か", "5日", ("{}か", "{}日", "5")),
             ]
+        );
+    }
+
+    #[test]
+    fn the_prefix_before_a_number_and_the_suffixes_after_its_counter_join_it() {
+        assert_eq!(
+            cut(&[
+                &format!("第/だい/{PREFIX}/第"),
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("回/かい/{COUNTER_NOUN}/回"),
+                &format!("の/の/{PARTICLE}/の"),
+                &format!("3/さん/{NUMERAL}/3"),
+                "冊/さつ/接尾辞,名詞的,一般,*,*,*/冊",
+                "目/め/接尾辞,名詞的,一般,*,*,*/目",
+            ]),
+            [
+                numeric(0, "だい3かい", "第3回", ("だい{}かい", "第{}回", "3")),
+                numeric(4, "3さつめ", "3冊目", ("{}さつめ", "{}冊目", "3")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_numeric_surface_writes_the_number_as_the_text_does() {
+        let units = cut(&[
+            &format!("三/さん/{NUMERAL}/三"),
+            &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
+            &format!("３/さん/{NUMERAL}/３"),
+            &format!("個/こ/{COUNTER_SUFFIX}/個"),
+            &format!("1,000/せん/{NUMERAL}/1000"),
+            &format!("円/えん/{COUNTER_NOUN}/円"),
+            &format!("二〇二六/にぜろにろく/{NUMERAL}/二〇二六"),
+            &format!("年/ねん/{COUNTER_NOUN}/年"),
+            &format!("壱千/いっせん/{NUMERAL}/壱千"),
+            &format!("円/えん/{COUNTER_NOUN}/円"),
+        ]);
+
+        let items: Vec<_> = units
+            .iter()
+            .map(|u| {
+                let n = u.numeric.as_ref().unwrap();
+                (u.reading.as_str(), n.surface.as_str(), n.value.as_str())
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("3ぽん", "{kanji}本", "3"),
+                ("3こ", "{wide-num}個", "3"),
+                ("1000えん", "{grouped-num}円", "1000"),
+                ("2026ねん", "{kanji-num}年", "2026"),
+                ("1000えん", "{daiji}円", "1000"),
+            ]
+        );
+    }
+
+    #[test]
+    fn numerals_the_analyzer_splits_are_one_number() {
+        assert_eq!(
+            cut(&[
+                &format!("二十/にじゅう/{NUMERAL}/二十"),
+                &format!("六/ろく/{NUMERAL}/六"),
+                &format!("歳/さい/{COUNTER_SUFFIX}/歳"),
+            ]),
+            [numeric(
+                0,
+                "26さい",
+                "二十六歳",
+                ("{}さい", "{kanji}歳", "26")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_number_without_a_counter_makes_no_unit_and_takes_its_prefix_along() {
+        assert_eq!(
+            cut(&[
+                &format!("第/だい/{PREFIX}/第"),
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("の/の/{PARTICLE}/の"),
+                &format!("手紙/てがみ/{NOUN}/手紙"),
+            ]),
+            [plain(3, "てがみ", "手紙")]
+        );
+    }
+
+    #[test]
+    fn a_number_no_notation_writes_takes_its_neighbours_out_of_the_units() {
+        assert_eq!(
+            cut(&[
+                &format!("約/やく/{PREFIX}/約"),
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("万/まん/{NUMERAL}/万"),
+                &format!("円/えん/{COUNTER_NOUN}/円"),
+                &format!("1.5/いってんご/{NUMERAL}/1.5"),
+                &format!("倍/ばい/{COUNTER_SUFFIX}/倍"),
+            ]),
+            []
+        );
+    }
+
+    #[test]
+    fn a_counter_read_other_than_in_hiragana_makes_no_unit() {
+        assert_eq!(
+            cut(&[
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("Ｘ/Ｘ/{COUNTER_SUFFIX}/Ｘ"),
+            ]),
+            []
+        );
+    }
+
+    #[test]
+    fn a_numeric_unit_typed_as_its_own_surface_is_not_a_unit() {
+        assert_eq!(
+            cut(&[
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("つ/つ/{COUNTER_SUFFIX}/つ"),
+                &format!("三/さん/{NUMERAL}/三"),
+                &format!("つ/つ/{COUNTER_SUFFIX}/つ"),
+            ]),
+            [numeric(2, "3つ", "三つ", ("{}つ", "{kanji}つ", "3"))]
+        );
+    }
+
+    #[test]
+    fn a_document_s_numeric_units_carry_their_numbers() {
+        let tokenize = |_: &str| -> Result<Vec<Token>, String> {
+            Ok(line(&[
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
+            ]))
+        };
+
+        let units = cut_document("3本", tokenize).unwrap();
+
+        assert_eq!(
+            units[0].numeric,
+            Some(Numeric {
+                reading: "{}ぽん".into(),
+                surface: "{}本".into(),
+                value: "3".into(),
+            })
         );
     }
 
