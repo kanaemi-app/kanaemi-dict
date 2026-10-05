@@ -1,0 +1,3 @@
+# sha256 60a712beb620160a07c4309f74e6c3c4184727fac6a2793648a2f8829f71e6d8
+sudachidict-full
+wikipedia-ja

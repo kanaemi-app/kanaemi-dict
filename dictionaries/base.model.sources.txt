@@ -1,0 +1,12 @@
+# sha256 2280f3d8a61f7fe2ae5b2d6c452b57447938f7a5e343839a9be292ba9da28c35
+# pairs 7605f94fcf9a2b901af34eb3c8ba5588a82d0ae3a0cfa916c03bda73fa035cf2
+aozora-text
+egov-all-xml
+fineweb2-jpn
+fineweb2-jpn-train
+pydocs-ja
+rurema
+sudachidict-full
+sudachidict-small-lex
+wikinews-ja
+wikipedia-ja
