@@ -37,7 +37,8 @@ fetch *args:
 docs:
     deno run --allow-read --allow-write --allow-run=lbzip2 scripts/docs.ts
 
-# Fetch SudachiDict into build/sudachi/raw and write the analyzer's dictionary and the UniDic lexicon into build/sudachi/.
+# Fetch SudachiDict into build/sudachi/raw and write the analyzer's dictionary, the dictionary that checks its readings
+# and the UniDic lexicon into build/sudachi/.
 sudachi:
     deno run --allow-read --allow-write --allow-net scripts/sudachi.ts
 
@@ -82,7 +83,7 @@ take:
 dist:
     cargo run --release -p kanaemi-dict -- dist
 
-# Run the tests that need SudachiDict full (`just sudachi` first).
+# Run the tests that need SudachiDict (`just sudachi` first).
 test-sudachi:
     cargo test --workspace --release -- --ignored
 

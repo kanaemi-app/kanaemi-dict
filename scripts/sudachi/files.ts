@@ -1,7 +1,9 @@
 /**
  * The files the build takes from SudachiDict: the system dictionary of
- * SudachiDict full, which the analyzer reads, and the lexicon file of
- * SudachiDict small (UniDic), whose words the base dictionary takes in.
+ * SudachiDict full, which the analyzer reads, the system dictionary of
+ * SudachiDict small, which checks the analyzer's readings, and the lexicon
+ * file of SudachiDict small (UniDic), which the readings are checked against
+ * and whose words the base dictionary takes in.
  * SudachiDict is a tool of the build, not a source of documents, so its
  * records live in a raw store of their own.
  */
@@ -25,6 +27,12 @@ export const SUDACHI_FILES: SudachiFile[] = [
     url:
       "https://d2ej7fkh96fzlu.cloudfront.net/sudachidict/v1/sudachi-dictionary-20260723-full.zip",
     name: "system_full.dic",
+  },
+  {
+    sourceId: "sudachidict-small",
+    url:
+      "https://d2ej7fkh96fzlu.cloudfront.net/sudachidict/v1/sudachi-dictionary-20260723-small.zip",
+    name: "system_small.dic",
   },
   {
     sourceId: "sudachidict-small-lex",
