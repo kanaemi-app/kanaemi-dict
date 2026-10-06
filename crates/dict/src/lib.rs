@@ -5,6 +5,7 @@
 
 mod additional;
 mod analyzer;
+mod checks;
 mod conjugation;
 mod corrections;
 mod counted;
@@ -24,6 +25,7 @@ mod units;
 
 pub use additional::*;
 pub use analyzer::*;
+pub use checks::*;
 pub use corrections::*;
 pub use counted::*;
 pub use dictionary::*;

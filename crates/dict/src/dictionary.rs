@@ -76,7 +76,7 @@ pub(crate) const MIN_COUNT: usize = 2;
 /// Added to a UniDic word's cost when its surface occurs in the units.
 const UNIDIC_EXTRA: u32 = 1000;
 /// The cost of a UniDic word whose surface no unit shows.
-const UNIDIC_UNSEEN: u32 = 3000;
+pub(crate) const UNIDIC_UNSEEN: u32 = 3000;
 
 type Key = (String, String, Option<String>);
 

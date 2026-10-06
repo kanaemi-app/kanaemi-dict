@@ -83,6 +83,20 @@ take:
 dist:
     cargo run --release -p kanaemi-dict -- dist
 
+# Convert the word set evaluation/words.tsv with the base dictionary and model of dictionaries/, without and with the model,
+# into build/check-words.tsv and the words that did not come first into build/check-words-misses.tsv.
+check-words:
+    cargo run --release -p kanaemi-dict -- check-words
+
+# Sample the items of dictionaries/ by stratum into build/check-sample.tsv for people to judge.
+check-sample:
+    cargo run --release -p kanaemi-dict -- check-sample
+
+# Read the surfaces with kanji of dictionaries/ with MeCab and IPAdic, and list the items it never reads as the
+# dictionary does in build/check-readings.tsv.
+check-readings:
+    cargo run --release -p kanaemi-dict -- check-readings
+
 # Run the tests that need SudachiDict (`just sudachi` first).
 test-sudachi:
     cargo test --workspace --release -- --ignored

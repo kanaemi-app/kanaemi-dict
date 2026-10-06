@@ -10,14 +10,16 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kanaemi_dict::{
-    Analyzer, AnalyzerError, BASE_LABEL, Base, Corrections, CorrectionsError, CutError, Dictionary,
-    DistError, DocumentsError, EvalDocument, EvalDocumentsError, Evaluation, ExampleFile, Examples,
-    RejectedLines, Split, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
-    WriteError, counted_reading, counted_words, counter_words, cut_documents, document_sources,
-    document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
-    examples_of_document, field_dictionary, gather, is_word, model_file, parse_corrections,
-    place_dictionary, place_names, plain_words, read_titles, read_units, sources_file, split_of,
-    take, train, write_atomically, year_dictionary,
+    Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, Corrections, CorrectionsError, CutError,
+    Dictionary, DistError, DocumentsError, EvalDocument, EvalDocumentsError, Evaluation,
+    ExampleFile, Examples, ReadingsError, RejectedLines, Split, TitlesError, UnidicError,
+    UnidicReadings, UnidicWord, Unit, UnitsError, WordCasesError, WordResult, WriteError,
+    agreement, check_words, counted_reading, counted_words, counter_words, cut_documents,
+    dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
+    eval_documents, evaluate_documents, examples_of_document, field_dictionary, gather, is_word,
+    model_file, parse_corrections, parse_word_cases, paths_of, place_dictionary, place_names,
+    plain_words, read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file,
+    split_of, take, train, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -70,6 +72,20 @@ const BLOCK_BYTES: usize = 4_000_000;
 /// Units of each field's train documents the model also learns from, the
 /// same for every field however much text it has.
 const FIELD_UNITS: usize = 250_000;
+/// The word set people wrote, and where its scores and misses go.
+const WORDS: &str = "evaluation/words.tsv";
+const CHECK_WORDS: &str = "build/check-words.tsv";
+const CHECK_WORD_MISSES: &str = "build/check-words-misses.tsv";
+/// The model that ships with the base dictionary.
+const KEPT_MODEL: &str = "dictionaries/base.model";
+const CHECK_SAMPLE: &str = "build/check-sample.tsv";
+/// Items sampled from each stratum of the base dictionary and from each
+/// additional dictionary.
+const SAMPLE_BASE: usize = 60;
+const SAMPLE_ADDITIONAL: usize = 15;
+const CHECK_READINGS: &str = "build/check-readings.tsv";
+/// The paths of each surface MeCab gives, best first.
+const MECAB_PATHS: usize = 5;
 
 /// Where a base dictionary build writes.
 struct Outputs {
@@ -122,7 +138,19 @@ usage: kanaemi-dict units
          they check as they would ship
        kanaemi-dict dist
          check dictionaries/ and gather each dictionary with the notice of
-         its sources (from notices/) and the license into build/dist/NAME/";
+         its sources (from notices/) and the license into build/dist/NAME/
+       kanaemi-dict check-words
+         convert the words of evaluation/words.tsv with the base dictionary
+         of dictionaries/, without and with its model, and write the scores
+         per category to build/check-words.tsv and the words whose right
+         surface did not come first to build/check-words-misses.tsv
+       kanaemi-dict check-sample
+         sample the items of the dictionaries of dictionaries/ by stratum
+         into build/check-sample.tsv for people to judge
+       kanaemi-dict check-readings
+         read the surfaces with kanji of the dictionaries of dictionaries/
+         with MeCab and write the items no path of it reads as the
+         dictionary does to build/check-readings.tsv";
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -162,6 +190,15 @@ enum Error {
         path: PathBuf,
         source: kanaemi_engine::ModelError,
     },
+    #[error("{}: {source}", path.display())]
+    WordCases {
+        path: PathBuf,
+        source: WordCasesError,
+    },
+    #[error("running mecab: {0}")]
+    Mecab(io::Error),
+    #[error("mecab: {0}")]
+    MecabReadings(#[from] ReadingsError),
     #[error("reading the eval documents from {UNITS} and {DOCS}: {0}")]
     EvalDocuments(#[from] EvalDocumentsError),
     #[error(transparent)]
@@ -189,6 +226,9 @@ fn main() -> ExitCode {
         ["ranking"] => train_ranking(),
         ["take"] => take_built(),
         ["dist"] => build_dist(),
+        ["check-words"] => check_kept_words(),
+        ["check-sample"] => sample_kept(),
+        ["check-readings"] => check_kept_readings(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -367,16 +407,7 @@ fn evaluate() -> Result<(), Error> {
 
 /// The base dictionary built from the train documents, as Kanaemi reads it.
 fn train_dictionary() -> Result<Arc<TextDictionary>, Error> {
-    let path = BASE_TRAIN.dictionary;
-    let text = std::fs::read(path).map_err(read_error(path))?;
-    let (dictionary, invalid) = TextDictionary::parse(text);
-    if !invalid.is_empty() {
-        return Err(Error::Unreadable {
-            path: path.into(),
-            source: RejectedLines(invalid),
-        });
-    }
-    Ok(Arc::new(dictionary))
+    parsed_dictionary(BASE_TRAIN.dictionary)
 }
 
 fn print_scores(label: &str, evaluation: &Evaluation) {
@@ -580,6 +611,211 @@ fn take_built() -> Result<(), Error> {
     let taken = take(DICTIONARIES.as_ref(), KEPT.as_ref(), NOTICES.as_ref())?;
     println!("taken: {}, out: {KEPT}", taken.join(", "));
     Ok(())
+}
+
+/// Converts the word set with the base dictionary that ships, without and
+/// with its model.
+fn check_kept_words() -> Result<(), Error> {
+    let cases = parse_word_cases(read_to_string(WORDS)?).map_err(|source| Error::WordCases {
+        path: WORDS.into(),
+        source,
+    })?;
+    let dictionary = parsed_dictionary(&format!("{KEPT}/base.tsv"))?;
+    let model = RankingModel::open(KEPT_MODEL).map_err(|source| Error::Model {
+        path: KEPT_MODEL.into(),
+        source,
+    })?;
+    let off = check_words(&cases, &dictionary, None);
+    let on = check_words(&cases, &dictionary, Some(&Arc::new(model)));
+    let runs: [(&str, &[WordResult]); 2] = [("off", &off), ("on", &on)];
+    for (path, tsv) in [
+        (CHECK_WORDS, word_scores_tsv(&cases, &runs)),
+        (CHECK_WORD_MISSES, word_misses_tsv(&cases, &runs)),
+    ] {
+        write_atomically(path, |w| {
+            w.write_all(tsv.as_bytes()).map_err(write_error(path))
+        })?;
+    }
+    for (label, results) in runs {
+        let first = results.iter().filter(|r| r.rank == Some(1)).count();
+        let covered = results.iter().filter(|r| r.rank.is_some()).count();
+        println!(
+            "model {label}: words {}, covered {:.2}%, first {:.2}%",
+            results.len(),
+            percent(covered, results.len()),
+            percent(first, results.len()),
+        );
+    }
+    println!("out: {CHECK_WORDS}, misses: {CHECK_WORD_MISSES}");
+    Ok(())
+}
+
+/// A dictionary as Kanaemi reads it, failing on any line it rejects.
+fn parsed_dictionary(path: &str) -> Result<Arc<TextDictionary>, Error> {
+    let text = std::fs::read(path).map_err(read_error(path))?;
+    let (dictionary, invalid) = TextDictionary::parse(text);
+    if !invalid.is_empty() {
+        return Err(Error::Unreadable {
+            path: path.into(),
+            source: RejectedLines(invalid),
+        });
+    }
+    Ok(Arc::new(dictionary))
+}
+
+/// The dictionaries that ship, by name, the base first and the rest in the
+/// order of their names.
+fn kept_dictionaries() -> Result<Vec<(String, String)>, Error> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(KEPT).map_err(read_error(KEPT))? {
+        let path = entry.map_err(read_error(KEPT))?.path();
+        if path.extension().is_some_and(|e| e == "tsv")
+            && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort_by_key(|name| (name != "base", name.clone()));
+    names
+        .into_iter()
+        .map(|name| {
+            let text = read_to_string(format!("{KEPT}/{name}.tsv"))?;
+            Ok((name, text))
+        })
+        .collect()
+}
+
+/// Samples the items of the dictionaries that ship for people to judge.
+fn sample_kept() -> Result<(), Error> {
+    let dictionaries = kept_dictionaries()?;
+    let borrowed: Vec<(&str, &str)> = dictionaries
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect();
+    let tsv = sample_tsv(&borrowed, SAMPLE_BASE, SAMPLE_ADDITIONAL);
+    write_atomically(CHECK_SAMPLE, |w| {
+        w.write_all(tsv.as_bytes())
+            .map_err(write_error(CHECK_SAMPLE))
+    })?;
+    println!("items: {}, out: {CHECK_SAMPLE}", tsv.lines().count() - 1);
+    Ok(())
+}
+
+/// Reads the surfaces with kanji of the dictionaries that ship with MeCab,
+/// and lists the items no path of it reads as the dictionary does.
+fn check_kept_readings() -> Result<(), Error> {
+    let dictionaries = kept_dictionaries()?;
+    let mut items = Vec::new();
+    let mut forms: Vec<String> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (name, text) in &dictionaries {
+        for (_, line) in dictionary_lines(text) {
+            let Some((form, reading)) = reading_form(&line) else {
+                continue;
+            };
+            let at = *index.entry(form.clone()).or_insert_with(|| {
+                forms.push(form);
+                forms.len() - 1
+            });
+            items.push((name.as_str(), line, reading, at));
+        }
+    }
+    let paths = mecab_paths(&forms)?;
+    let unidic = UnidicReadings::new(unidic_words()?);
+    let mut counts: Vec<(&str, [usize; 4])> = Vec::new();
+    let mut disagreements = Vec::new();
+    for (name, line, reading, at) in &items {
+        let agreement = agreement(reading, &paths[*at]);
+        if counts.last().is_none_or(|(n, _)| n != name) {
+            counts.push((name, [0; 4]));
+        }
+        let count = &mut counts.last_mut().expect("pushed above").1;
+        match agreement {
+            Agreement::Agrees => count[0] += 1,
+            Agreement::Disagrees => {
+                count[1] += 1;
+                let known = unidic.of(&forms[*at]);
+                let suggested = shared_readings(known, &paths[*at]);
+                let likely_wrong = !suggested.is_empty() && !known.contains(reading);
+                count[3] += usize::from(likely_wrong);
+                disagreements.push((name, line, &paths[*at], suggested, likely_wrong));
+            }
+            Agreement::Unread => count[2] += 1,
+        }
+    }
+    disagreements.sort_by_key(|(name, line, _, _, likely_wrong)| {
+        (*name, !*likely_wrong, line.cost.unwrap_or(u32::MAX))
+    });
+    let mut tsv = String::from(
+        "dictionary\treading\tsurface\tconjugation\tcost\tmecab\tsuggested\tlikely_wrong\n",
+    );
+    for (name, line, paths, suggested, likely_wrong) in disagreements {
+        let mut readings: Vec<String> = Vec::new();
+        for path in paths.iter().flatten() {
+            if !readings.contains(path) {
+                readings.push(path.clone());
+            }
+        }
+        tsv.push_str(&format!(
+            "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            line.reading,
+            line.surface,
+            line.conjugation,
+            line.cost.map(|c| c.to_string()).unwrap_or_default(),
+            readings.join("|"),
+            suggested.join("|"),
+            if likely_wrong { "yes" } else { "" },
+        ));
+    }
+    write_atomically(CHECK_READINGS, |w| {
+        w.write_all(tsv.as_bytes())
+            .map_err(write_error(CHECK_READINGS))
+    })?;
+    for (name, [agrees, disagrees, unread, likely_wrong]) in counts {
+        println!(
+            "{name}: read {}, agree {agrees}, disagree {disagrees} (likely wrong {likely_wrong}), unread {unread}",
+            agrees + disagrees + unread
+        );
+    }
+    println!("out: {CHECK_READINGS}");
+    Ok(())
+}
+
+/// The n-best paths of MeCab for each of `inputs`, one per line.
+fn mecab_paths(inputs: &[String]) -> Result<Vec<Vec<Option<String>>>, Error> {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("mecab")
+        .arg(format!("-N{MECAB_PATHS}"))
+        .args(["-F", "%m\\t%f[7]\\n", "-U", "%m\\t\\n", "-E", "EOS\\n"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(Error::Mecab)?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let paths = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || -> io::Result<()> {
+            let mut stdin = io::BufWriter::new(&mut stdin);
+            for input in inputs {
+                writeln!(stdin, "{input}")?;
+            }
+            stdin.flush()
+        });
+        let paths = paths_of(inputs, BufReader::new(stdout));
+        writer
+            .join()
+            .expect("the writer does not panic")
+            .map_err(Error::Mecab)?;
+        Ok::<_, Error>(paths?)
+    })?;
+    let status = child.wait().map_err(Error::Mecab)?;
+    if !status.success() {
+        return Err(Error::Mecab(io::Error::other(format!(
+            "exited with {status}"
+        ))));
+    }
+    Ok(paths)
 }
 
 fn percent(n: usize, of: usize) -> f64 {

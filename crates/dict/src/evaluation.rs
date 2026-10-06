@@ -70,7 +70,7 @@ pub struct Score {
 }
 
 impl Score {
-    fn add(&mut self, rank: Option<usize>) {
+    pub(crate) fn add(&mut self, rank: Option<usize>) {
         self.units += 1;
         if let Some(rank) = rank {
             self.covered += 1;
@@ -207,19 +207,29 @@ pub fn evaluate_document(
 /// Kanaemi does, the reading's katakana follows the conversion results when
 /// they lack it, with okurigana given or not.
 pub(crate) fn rank_of(converter: &impl Converter, query: &Query) -> Option<usize> {
+    offered(converter, &query.reading, query.okurigana.as_deref())
+        .iter()
+        .position(|s| *s == query.expected)
+        .map(|i| i + 1)
+}
+
+/// The surfaces Kanaemi offers for `reading`, best first: the conversion
+/// results, then the reading's katakana when they lack it.
+pub(crate) fn offered(
+    converter: &impl Converter,
+    reading: &str,
+    okurigana: Option<&str>,
+) -> Vec<String> {
     let mut surfaces: Vec<String> = converter
-        .convert(&query.reading, query.okurigana.as_deref())
+        .convert(reading, okurigana)
         .into_iter()
         .map(|c| c.surface)
         .collect();
-    let katakana = hiragana_to_katakana(&query.reading);
+    let katakana = hiragana_to_katakana(reading);
     if !surfaces.contains(&katakana) {
         surfaces.push(katakana);
     }
     surfaces
-        .iter()
-        .position(|s| *s == query.expected)
-        .map(|i| i + 1)
 }
 
 /// Registrations go nowhere: the evaluation's user dictionary starts empty

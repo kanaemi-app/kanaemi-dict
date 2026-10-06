@@ -67,6 +67,14 @@ just dist                      # 配布物にまとめられるかを確かめ�
 
 `just take` のあと、`dictionaries/` の変更をコミットする。リリースは、`v<年月日>.<その日の通し番号>`（`v20260801.01`）のタグで GitHub の画面から作って公開する。公開すると、CI が辞書ごとの zip をそのリリースに付ける。
 
+`dictionaries/` の辞書は、素材の文書での評価とは別に、解析器の外の答えでも確かめられる（[辞書の確かめ](docs/spec/checks.md)）。
+
+```sh
+just check-words               # 人が書いた正解集で変換する
+just check-sample              # 人が判定する項目を層ごとに抜き出す
+just check-readings            # MeCab の読みと食い違う項目を並べる
+```
+
 `just` だけを流すと、レシピの一覧が出る。コードを変えたら `just ci` を通す。
 
 ## 文書
