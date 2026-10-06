@@ -9,6 +9,6 @@ license = "MIT"
 repository = "https://github.com/kanaemi-app/kanaemi-dict"
 
 [workspace.dependencies]
-kanaemi-core = { git = "https://github.com/kanaemi-app/kanaemi", rev = "c6acad960b025a6cfbbe227d9129c0c96e77cb11" }
-kanaemi-engine = { git = "https://github.com/kanaemi-app/kanaemi", rev = "c6acad960b025a6cfbbe227d9129c0c96e77cb11" }
-kanaemi-functions = { git = "https://github.com/kanaemi-app/kanaemi", rev = "c6acad960b025a6cfbbe227d9129c0c96e77cb11" }
+kanaemi-core = { git = "https://github.com/kanaemi-app/kanaemi", branch = "main" }
+kanaemi-engine = { git = "https://github.com/kanaemi-app/kanaemi", branch = "main" }
+kanaemi-functions = { git = "https://github.com/kanaemi-app/kanaemi", branch = "main" }

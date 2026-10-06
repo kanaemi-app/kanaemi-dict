@@ -275,7 +275,7 @@ dependencies = [
 [[package]]
 name = "kanaemi-core"
 version = "0.0.0"
-source = "git+https://github.com/kanaemi-app/kanaemi?rev=c6acad960b025a6cfbbe227d9129c0c96e77cb11#c6acad960b025a6cfbbe227d9129c0c96e77cb11"
+source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#e4b24aeaa736db9956827a0ea99c4767df9a91ca"
 
 [[package]]
 name = "kanaemi-dict"
@@ -298,7 +298,7 @@ dependencies = [
 [[package]]
 name = "kanaemi-engine"
 version = "0.0.0"
-source = "git+https://github.com/kanaemi-app/kanaemi?rev=c6acad960b025a6cfbbe227d9129c0c96e77cb11#c6acad960b025a6cfbbe227d9129c0c96e77cb11"
+source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#e4b24aeaa736db9956827a0ea99c4767df9a91ca"
 dependencies = [
  "encoding_rs",
  "fst",
@@ -313,7 +313,7 @@ dependencies = [
 [[package]]
 name = "kanaemi-functions"
 version = "0.0.0"
-source = "git+https://github.com/kanaemi-app/kanaemi?rev=c6acad960b025a6cfbbe227d9129c0c96e77cb11#c6acad960b025a6cfbbe227d9129c0c96e77cb11"
+source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#e4b24aeaa736db9956827a0ea99c4767df9a91ca"
 dependencies = [
  "getrandom",
  "kanaemi-engine",
