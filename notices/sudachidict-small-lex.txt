@@ -2,7 +2,7 @@ UniDic（SudachiDict small の語彙ファイル small_lex.csv）
 https://unidic.ninjal.ac.jp/
 https://github.com/WorksApplications/SudachiDict
 
-辞書の語の一部は、SudachiDict（Apache License 2.0）が配布する small_lex.csv から取った。small_lex.csv は UniDic の一部で、次の条件で配布されている。
+辞書の語の一部は、SudachiDict（Apache License 2.0）が配布する small_lex.csv から取った。解析器の付けた読みも、その語の読みと比べて確かめた。small_lex.csv は UniDic の一部で、次の条件で配布されている。
 
 Copyright (c) 2011-2013, The UniDic Consortium
 All rights reserved.

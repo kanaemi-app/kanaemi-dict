@@ -6,6 +6,7 @@
 mod additional;
 mod analyzer;
 mod conjugation;
+mod corrections;
 mod dictionary;
 mod dist;
 mod documents;
@@ -22,6 +23,7 @@ mod units;
 
 pub use additional::*;
 pub use analyzer::*;
+pub use corrections::*;
 pub use dictionary::*;
 pub use dist::*;
 pub use documents::*;

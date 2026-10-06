@@ -10,19 +10,23 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kanaemi_dict::{
-    Analyzer, AnalyzerError, BASE_LABEL, Base, CutError, Dictionary, DistError, DocumentsError,
-    EvalDocument, EvalDocumentsError, Evaluation, ExampleFile, Examples, RejectedLines, Split,
-    TitlesError, UnidicError, Unit, UnitsError, WriteError, cut_documents, document_sources,
-    document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
-    examples_of_document, field_dictionary, gather, model_file, place_dictionary, place_names,
-    plain_words, read_titles, read_units, sources_file, split_of, take, train, write_atomically,
-    year_dictionary,
+    Analyzer, AnalyzerError, BASE_LABEL, Base, Corrections, CorrectionsError, CutError, Dictionary,
+    DistError, DocumentsError, EvalDocument, EvalDocumentsError, Evaluation, ExampleFile, Examples,
+    RejectedLines, Split, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
+    WriteError, cut_documents, document_sources, document_texts, each_document_with_units, engine,
+    eval_documents, evaluate_documents, examples_of_document, field_dictionary, gather, model_file,
+    parse_corrections, place_dictionary, place_names, plain_words, read_titles, read_units,
+    sources_file, split_of, take, train, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
 
 const SYSTEM_DICTIONARY: &str = "build/sudachi/system_full.dic";
+/// SudachiDict small, which checks the analyzer's readings against UniDic.
+const CHECKER_DICTIONARY: &str = "build/sudachi/system_small.dic";
 const LEXICON: &str = "build/sudachi/small_lex.csv";
+/// The words the analyzer reads wrong, applied to what it reads.
+const CORRECTIONS: &str = "analyzer/corrections.tsv";
 const DOCS: &str = "build/docs.jsonl";
 const UNITS: &str = "build/units.jsonl";
 const EVALUATION: &str = "build/evaluation.tsv";
@@ -34,9 +38,13 @@ const ADDITIONAL_BUILD: &str = "build/additional";
 /// The additional dictionary built from the postal code data, not from documents.
 const PLACE: &str = "place";
 /// The sources every dictionary read with the analyzer has: the analyzer's
-/// dictionary, and for the base the UniDic lexicon too.
-const ANALYZER_SOURCE: &str = "sudachidict-full";
-const LEXICON_SOURCE: &str = "sudachidict-small-lex";
+/// dictionary, the dictionary that checks its readings, and the UniDic
+/// lexicon they are checked against and the base takes words from.
+const ANALYZER_SOURCES: [&str; 3] = [
+    "sudachidict-full",
+    "sudachidict-small",
+    "sudachidict-small-lex",
+];
 /// The source of the article titles and of the place names.
 const TITLES_SOURCE: &str = "wikipedia-ja";
 const POSTAL_SOURCE: &str = "japanpost-ken-all";
@@ -80,7 +88,10 @@ const BASE_TRAIN: Outputs = Outputs {
 const USAGE: &str = "\
 usage: kanaemi-dict units
          cut every document of build/docs.jsonl into build/units.jsonl,
-         reading them with build/sudachi/system_full.dic
+         reading them with build/sudachi/system_full.dic, checking the
+         readings against build/sudachi/small_lex.csv with
+         build/sudachi/system_small.dic, and applying the corrections of
+         analyzer/corrections.tsv
        kanaemi-dict dictionary [--train-only]
          build build/dictionaries/base.tsv from build/units.jsonl and the
          UniDic lexicon build/sudachi/small_lex.csv, reporting to
@@ -124,6 +135,11 @@ enum Error {
     Cut { path: PathBuf, source: CutError },
     #[error("{}: {source}", path.display())]
     Unidic { path: PathBuf, source: UnidicError },
+    #[error("{}: {source}", path.display())]
+    Corrections {
+        path: PathBuf,
+        source: CorrectionsError,
+    },
     #[error("{}: {source}", path.display())]
     Units { path: PathBuf, source: UnitsError },
     #[error("{}: {source}", path.display())]
@@ -186,8 +202,31 @@ fn main() -> ExitCode {
 }
 
 fn open_analyzer() -> Result<Analyzer, Error> {
-    Analyzer::open(SYSTEM_DICTIONARY).map_err(|source| Error::Analyzer {
+    let readings = UnidicReadings::new(unidic_words()?);
+    Analyzer::open(
+        SYSTEM_DICTIONARY,
+        CHECKER_DICTIONARY,
+        readings,
+        corrections()?,
+    )
+    .map_err(|source| Error::Analyzer {
         path: SYSTEM_DICTIONARY.into(),
+        source,
+    })
+}
+
+fn corrections() -> Result<Corrections, Error> {
+    parse_corrections(read_to_string(CORRECTIONS)?)
+        .map(Corrections::new)
+        .map_err(|source| Error::Corrections {
+            path: CORRECTIONS.into(),
+            source,
+        })
+}
+
+fn unidic_words() -> Result<Vec<UnidicWord>, Error> {
+    plain_words(open(LEXICON)?).map_err(|source| Error::Unidic {
+        path: LEXICON.into(),
         source,
     })
 }
@@ -206,10 +245,12 @@ fn cut_units() -> Result<(), Error> {
     let analyzer = open_analyzer()?;
     let docs = open(DOCS)?;
     let summary = write_atomically(UNITS, |out| {
-        cut_documents(docs, |text| analyzer.tokens(text), out).map_err(|source| Error::Cut {
-            path: DOCS.into(),
-            source,
-        })
+        cut_documents(docs, |text| analyzer.tokens(text), analyzer.readings(), out).map_err(
+            |source| Error::Cut {
+                path: DOCS.into(),
+                source,
+            },
+        )
     })?;
     for (kind, n) in &summary.units_by_kind {
         println!("{kind}\t{n}");
@@ -227,10 +268,7 @@ fn cut_units() -> Result<(), Error> {
 /// only when Kanaemi reads every line.
 fn build_dictionary(train_only: bool) -> Result<(), Error> {
     let outputs = if train_only { BASE_TRAIN } else { BASE };
-    let unidic = plain_words(open(LEXICON)?).map_err(|source| Error::Unidic {
-        path: LEXICON.into(),
-        source,
-    })?;
+    let unidic = unidic_words()?;
     let dictionary = {
         let mut failure = None;
         let units = read_units(open(UNITS)?)
@@ -244,10 +282,12 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 .ok()
             })
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
-        let dictionary = Dictionary::build(units, &unidic);
+        let mut dictionary = Dictionary::build(units, &unidic);
         if let Some(e) = failure {
             return Err(e);
         }
+        let corrections = corrections()?;
+        dictionary.drop_words(|surface| corrections.drops(surface));
         dictionary
     };
     let text = dictionary
@@ -270,7 +310,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 path: DOCS.into(),
                 source,
             })?;
-        sources.extend([ANALYZER_SOURCE, LEXICON_SOURCE].map(String::from));
+        sources.extend(ANALYZER_SOURCES.map(String::from));
         write_sources(outputs.dictionary, text.as_bytes(), None, &sources)?;
     }
     println!(
@@ -342,7 +382,7 @@ fn train_ranking() -> Result<(), Error> {
     })?;
     let base = std::fs::read(BASE.dictionary).map_err(read_error(BASE.dictionary))?;
     let mut taken: HashSet<String> = HashSet::new();
-    let mut sources = BTreeSet::from([ANALYZER_SOURCE.to_owned(), LEXICON_SOURCE.to_owned()]);
+    let mut sources = BTreeSet::from(ANALYZER_SOURCES.map(String::from));
     let mut add = |units: &str, docs: &str, budget: usize| -> Result<(), Error> {
         let added = add_examples(
             units,
@@ -557,10 +597,11 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             source,
         })?
     };
+    let corrections = corrections()?;
     let mut analyzer = None;
     for name in names {
         let label = read_to_string(format!("{ADDITIONAL}/{name}/label.txt"))?;
-        let (dictionary, sources) = if name == PLACE {
+        let (mut dictionary, sources) = if name == PLACE {
             (
                 place_dictionary_of(&format!("{ADDITIONAL_BUILD}/{name}/ken_all.csv"))?,
                 BTreeSet::from([POSTAL_SOURCE.to_owned()]),
@@ -571,6 +612,7 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             }
             sourced_dictionary(&name, &base, analyzer.as_ref().unwrap())?
         };
+        dictionary.drop_words(|surface| corrections.drops(surface));
         let dictionary_path = format!("{DICTIONARIES}/{name}.tsv");
         let report_path = format!("{DICTIONARIES}/{name}-report.tsv");
         let text = dictionary.to_text_where(label.trim(), |line, kind| base.keeps(line, kind));
@@ -615,11 +657,15 @@ fn sourced_dictionary(
     let dir = format!("{ADDITIONAL_BUILD}/{name}");
     let (docs, units_path) = (format!("{dir}/docs.jsonl"), format!("{dir}/units.jsonl"));
     write_atomically(&units_path, |out| {
-        cut_documents(open(&docs)?, |text| analyzer.tokens(text), out).map_err(|source| {
-            Error::Cut {
-                path: docs.clone().into(),
-                source,
-            }
+        cut_documents(
+            open(&docs)?,
+            |text| analyzer.tokens(text),
+            analyzer.readings(),
+            out,
+        )
+        .map_err(|source| Error::Cut {
+            path: docs.clone().into(),
+            source,
         })
     })?;
     let units = read_all_units(&units_path)?;
@@ -632,7 +678,7 @@ fn sourced_dictionary(
             path: docs.clone().into(),
             source,
         })?;
-    sources.insert(ANALYZER_SOURCE.to_owned());
+    sources.extend(ANALYZER_SOURCES.map(String::from));
     let titles = {
         let path = format!("{dir}/titles.tsv");
         match File::open(&path) {

@@ -43,6 +43,26 @@ pub(crate) fn has_kanji(s: &str) -> bool {
     s.chars().any(is_kanji)
 }
 
+/// The kana that have voiced forms, in the order of [`VOICED`].
+pub(crate) const PLAIN: &str = "かきくけこさしすせそたちつてとはひふへほ";
+pub(crate) const VOICED: &str = "がぎぐげござじずぜぞだぢづでどばびぶべぼ";
+pub(crate) const SEMI_VOICED: &str = "ぱぴぷぺぽ";
+/// Where the は row starts in [`PLAIN`], the only row with semi-voiced forms.
+pub(crate) const HA_ROW: usize = 15;
+
+/// Whether `voiced` is `plain` voiced or semi-voiced, as it is where words
+/// join (rendaku), ち and つ also as じ and ず the way they are written then.
+pub(crate) fn is_voicing_of(plain: char, voiced: char) -> bool {
+    let Some(i) = PLAIN.chars().position(|k| k == plain) else {
+        return false;
+    };
+    VOICED.chars().nth(i) == Some(voiced)
+        || i.checked_sub(HA_ROW)
+            .and_then(|j| SEMI_VOICED.chars().nth(j))
+            == Some(voiced)
+        || matches!((plain, voiced), ('ち', 'じ') | ('つ', 'ず'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,6 +81,17 @@ mod tests {
             hiragana_to_katakana("ぁかきゔゕゖーABCカナ漢"),
             "ァカキヴヵヶーABCカナ漢"
         );
+    }
+
+    #[test]
+    fn a_kana_voices_into_its_voiced_and_semi_voiced_forms_and_chi_tsu_also_into_ji_zu() {
+        assert!(is_voicing_of('す', 'ず'));
+        assert!(is_voicing_of('は', 'ば') && is_voicing_of('は', 'ぱ'));
+        assert!(is_voicing_of('ち', 'ぢ') && is_voicing_of('ち', 'じ'));
+        assert!(is_voicing_of('つ', 'ず'));
+        assert!(!is_voicing_of('か', 'ぱ'));
+        assert!(!is_voicing_of('ず', 'す'));
+        assert!(!is_voicing_of('あ', 'あ'));
     }
 
     #[test]

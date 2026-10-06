@@ -6,7 +6,7 @@ use std::io::{self, BufRead, Write};
 use rayon::prelude::*;
 
 use crate::units::each_unit;
-use crate::{AnalyzerError, Token};
+use crate::{AnalyzerError, Token, UnidicReadings};
 
 /// One line of `build/docs.jsonl`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -76,18 +76,21 @@ impl CutSummary {
 const BATCH_BYTES: usize = 4_000_000;
 
 /// Cuts every document of `docs`, JSON Lines sorted by doc ID, into units read
-/// with `tokenize`, and writes them to `out` as JSON Lines in document order.
+/// with `tokenize`, the words joined there checked against `readings`, and
+/// writes them to `out` as JSON Lines in document order.
 pub fn cut_documents(
     docs: impl BufRead,
     tokenize: impl Fn(&str) -> Result<Vec<Token>, AnalyzerError> + Sync,
+    readings: &UnidicReadings,
     out: impl Write,
 ) -> Result<CutSummary, CutError> {
-    cut_in_batches(docs, &tokenize, out, BATCH_BYTES)
+    cut_in_batches(docs, &tokenize, readings, out, BATCH_BYTES)
 }
 
 fn cut_in_batches(
     docs: impl BufRead,
     tokenize: &(impl Fn(&str) -> Result<Vec<Token>, AnalyzerError> + Sync),
+    readings: &UnidicReadings,
     mut out: impl Write,
     batch_bytes: usize,
 ) -> Result<CutSummary, CutError> {
@@ -97,21 +100,21 @@ fn cut_in_batches(
     each_document(docs, |d| {
         summary.documents += 1;
         if d.text.len() >= batch_bytes {
-            cut_batch(&batch, tokenize, &mut out, &mut summary)?;
+            cut_batch(&batch, tokenize, readings, &mut out, &mut summary)?;
             batch.clear();
             held = 0;
-            return cut_alone(&d, tokenize, &mut out, &mut summary);
+            return cut_alone(&d, tokenize, readings, &mut out, &mut summary);
         }
         held += d.text.len();
         batch.push(d);
         if held >= batch_bytes {
-            cut_batch(&batch, tokenize, &mut out, &mut summary)?;
+            cut_batch(&batch, tokenize, readings, &mut out, &mut summary)?;
             batch.clear();
             held = 0;
         }
         Ok(())
     })?;
-    cut_batch(&batch, tokenize, &mut out, &mut summary)?;
+    cut_batch(&batch, tokenize, readings, &mut out, &mut summary)?;
     out.flush()?;
     Ok(summary)
 }
@@ -152,6 +155,7 @@ pub(crate) fn each_document<E: From<DocumentsError>>(
 fn cut_batch(
     batch: &[Document],
     tokenize: &(impl Fn(&str) -> Result<Vec<Token>, AnalyzerError> + Sync),
+    readings: &UnidicReadings,
     out: &mut impl Write,
     summary: &mut CutSummary,
 ) -> Result<(), CutError> {
@@ -160,7 +164,7 @@ fn cut_batch(
         .map(|d| {
             let mut lines = Vec::new();
             let mut n = 0;
-            each_unit(&d.doc_id, &d.text, tokenize, |unit| {
+            each_unit(&d.doc_id, &d.text, tokenize, readings, |unit| {
                 serde_json::to_writer(&mut lines, &unit).expect("a unit serializes into memory");
                 lines.push(b'\n');
                 n += 1;
@@ -184,12 +188,13 @@ fn cut_batch(
 fn cut_alone(
     doc: &Document,
     tokenize: &impl Fn(&str) -> Result<Vec<Token>, AnalyzerError>,
+    readings: &UnidicReadings,
     out: &mut impl Write,
     summary: &mut CutSummary,
 ) -> Result<(), CutError> {
     let mut failure = None;
     let mut n = 0;
-    each_unit(&doc.doc_id, &doc.text, tokenize, |unit| {
+    each_unit(&doc.doc_id, &doc.text, tokenize, readings, |unit| {
         if failure.is_none() {
             failure = serde_json::to_writer(&mut *out, &unit)
                 .map_err(io::Error::from)
@@ -275,7 +280,13 @@ mod tests {
 
     fn cut(docs: &str, batch_bytes: usize) -> Result<(Vec<Unit>, CutSummary), CutError> {
         let mut out = Vec::new();
-        let summary = cut_in_batches(docs.as_bytes(), &tokenize, &mut out, batch_bytes)?;
+        let summary = cut_in_batches(
+            docs.as_bytes(),
+            &tokenize,
+            &UnidicReadings::default(),
+            &mut out,
+            batch_bytes,
+        )?;
         let units = String::from_utf8(out)
             .unwrap()
             .lines()

@@ -8,7 +8,7 @@ use sudachi::config::Config;
 use sudachi::dic::dictionary::JapaneseDictionary;
 use sudachi::error::SudachiError;
 
-use crate::katakana_to_hiragana;
+use crate::{Corrections, UnidicReadings, katakana_to_hiragana};
 
 /// One morpheme as the unit cutting needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,50 +31,102 @@ pub enum AnalyzerError {
     Sudachi(#[from] SudachiError),
 }
 
-/// SudachiDict's system dictionary loaded once, read in B mode with the
-/// configuration and resources sudachi.rs embeds.
+/// SudachiDict full, which reads the text, and SudachiDict small, which
+/// checks its readings against UniDic, both loaded once and read in B mode
+/// with the configuration and resources sudachi.rs embeds; and the
+/// corrections applied to what they read.
 pub struct Analyzer {
     dict: JapaneseDictionary,
+    checker: JapaneseDictionary,
+    readings: UnidicReadings,
+    corrections: Corrections,
 }
 
 impl Analyzer {
-    pub fn open(system_dictionary: impl AsRef<Path>) -> Result<Self, AnalyzerError> {
-        let config = Config::new(None, None, Some(system_dictionary.as_ref().to_path_buf()))?;
+    pub fn open(
+        system_dictionary: impl AsRef<Path>,
+        checker_dictionary: impl AsRef<Path>,
+        readings: UnidicReadings,
+        corrections: Corrections,
+    ) -> Result<Self, AnalyzerError> {
+        let open = |path: &Path| -> Result<JapaneseDictionary, AnalyzerError> {
+            let config = Config::new(None, None, Some(path.to_path_buf()))?;
+            Ok(JapaneseDictionary::from_cfg(&config)?)
+        };
         Ok(Self {
-            dict: JapaneseDictionary::from_cfg(&config)?,
+            dict: open(system_dictionary.as_ref())?,
+            checker: open(checker_dictionary.as_ref())?,
+            readings,
+            corrections,
         })
     }
 
-    /// Text that grows past Sudachi's input limit in its normalization
-    /// (㍿ becomes 株式会社) is read in halves.
+    /// UniDic's readings the analyzer checks with.
+    pub fn readings(&self) -> &UnidicReadings {
+        &self.readings
+    }
+
+    /// The tokens of `text`. A non-conjugating word read otherwise than UniDic
+    /// reads it takes the reading SudachiDict small gives the same word at the
+    /// same place, when UniDic has that one; then the corrections apply.
     pub fn tokens(&self, text: impl AsRef<str>) -> Result<Vec<Token>, AnalyzerError> {
         let text = text.as_ref();
-        let tokenizer = StatelessTokenizer::new(&self.dict);
-        let morphemes = match tokenizer.tokenize(text, Mode::B, false) {
-            Ok(morphemes) => morphemes,
-            Err(SudachiError::InputTooLong(..)) if text.chars().nth(1).is_some() => {
-                let (head, tail) = text.split_at(middle_cut(text));
-                let offset = head.chars().count();
-                let mut tokens = self.tokens(head)?;
-                tokens.extend(self.tokens(tail)?.into_iter().map(|mut t| {
-                    t.begin += offset;
-                    t
-                }));
-                return Ok(tokens);
+        let mut tokens = read(&self.dict, text)?;
+        if tokens.iter().any(|t| self.misread(t)) {
+            let checked = read(&self.checker, text)?;
+            for token in tokens.iter_mut() {
+                if !self.misread(token) {
+                    continue;
+                }
+                let known = self.readings.of(&token.surface);
+                if let Some(c) = checked.iter().find(|c| {
+                    c.begin == token.begin
+                        && c.surface == token.surface
+                        && known.contains(&c.reading)
+                }) {
+                    token.reading = c.reading.clone();
+                }
             }
-            Err(e) => return Err(e.into()),
-        };
-        Ok(morphemes
-            .iter()
-            .map(|m| Token {
-                surface: m.surface().to_string(),
-                reading: katakana_to_hiragana(m.reading_form()),
-                pos: m.part_of_speech().to_vec(),
-                dictionary_form: m.dictionary_form().to_string(),
-                begin: m.begin_c(),
-            })
-            .collect())
+        }
+        Ok(self.corrections.apply(tokens))
     }
+
+    fn misread(&self, token: &Token) -> bool {
+        let known = self.readings.of(&token.surface);
+        token.pos.get(4).is_some_and(|t| t == "*")
+            && !known.is_empty()
+            && !known.contains(&token.reading)
+    }
+}
+
+/// Text that grows past Sudachi's input limit in its normalization
+/// (㍿ becomes 株式会社) is read in halves.
+fn read(dict: &JapaneseDictionary, text: &str) -> Result<Vec<Token>, AnalyzerError> {
+    let tokenizer = StatelessTokenizer::new(dict);
+    let morphemes = match tokenizer.tokenize(text, Mode::B, false) {
+        Ok(morphemes) => morphemes,
+        Err(SudachiError::InputTooLong(..)) if text.chars().nth(1).is_some() => {
+            let (head, tail) = text.split_at(middle_cut(text));
+            let offset = head.chars().count();
+            let mut tokens = read(dict, head)?;
+            tokens.extend(read(dict, tail)?.into_iter().map(|mut t| {
+                t.begin += offset;
+                t
+            }));
+            return Ok(tokens);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(morphemes
+        .iter()
+        .map(|m| Token {
+            surface: m.surface().to_string(),
+            reading: katakana_to_hiragana(m.reading_form()),
+            pos: m.part_of_speech().to_vec(),
+            dictionary_form: m.dictionary_form().to_string(),
+            begin: m.begin_c(),
+        })
+        .collect())
 }
 
 /// Where text may be cut without splitting a word.
@@ -123,22 +175,39 @@ mod tests {
         assert_eq!((head, tail), ("、あいうえお", "かきくけこさし"));
     }
 
-    /// The system dictionary the ignored tests read: `KANAEMI_DICT_SUDACHI_DIC`
-    /// when set, else what `just sudachi` writes under the workspace root.
-    fn system_dictionary() -> PathBuf {
-        if let Some(path) = std::env::var_os("KANAEMI_DICT_SUDACHI_DIC") {
-            return path.into();
-        }
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+    fn workspace() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .find(|dir| dir.join("Cargo.lock").is_file())
-            .expect("the workspace root holds Cargo.lock");
-        workspace.join("build/sudachi/system_full.dic")
+            .expect("the workspace root holds Cargo.lock")
     }
 
-    fn analyzer() -> Analyzer {
-        let dic = system_dictionary();
-        Analyzer::open(&dic).unwrap_or_else(|e| panic!("{}: {e}", dic.display()))
+    /// Where the ignored tests find SudachiDict: `KANAEMI_DICT_SUDACHI_DIR`
+    /// when set, else where `just sudachi` writes it under the workspace root.
+    fn sudachi_dir() -> PathBuf {
+        std::env::var_os("KANAEMI_DICT_SUDACHI_DIR")
+            .map_or_else(|| workspace().join("build/sudachi"), PathBuf::from)
+    }
+
+    /// The analyzer as the build opens it, with the repository's corrections.
+    fn analyzer() -> &'static Analyzer {
+        static ANALYZER: std::sync::OnceLock<Analyzer> = std::sync::OnceLock::new();
+        ANALYZER.get_or_init(|| {
+            let dir = sudachi_dir();
+            let lexicon = std::fs::File::open(dir.join("small_lex.csv")).unwrap();
+            let readings = UnidicReadings::new(crate::plain_words(lexicon).unwrap());
+            let corrections = crate::parse_corrections(
+                std::fs::read_to_string(workspace().join("analyzer/corrections.tsv")).unwrap(),
+            )
+            .unwrap();
+            Analyzer::open(
+                dir.join("system_full.dic"),
+                dir.join("system_small.dic"),
+                readings,
+                crate::Corrections::new(corrections),
+            )
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        })
     }
 
     fn view(tokens: &[Token]) -> Vec<(&str, &str, &str, &str)> {
@@ -198,5 +267,57 @@ mod tests {
             ]
         );
         assert_eq!(tokens[0].pos[4], "五段-カ行");
+    }
+
+    fn readings_of<'a>(tokens: &'a [Token], surface: &str) -> Vec<&'a str> {
+        tokens
+            .iter()
+            .filter(|t| t.surface == surface)
+            .map(|t| t.reading.as_str())
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "needs SudachiDict full and small"]
+    fn a_word_the_corrections_add_is_read_as_one_word() {
+        let tokens = analyzer()
+            .tokens("王騎の魅力を深掘りしています。深掘りする。深掘が進行した")
+            .unwrap();
+
+        assert_eq!(readings_of(&tokens, "深掘り"), ["ふかぼり", "ふかぼり"]);
+        assert_eq!(readings_of(&tokens, "深掘"), ["ふかぼり"]);
+    }
+
+    #[test]
+    #[ignore = "needs SudachiDict full and small"]
+    fn every_correction_is_read_as_one_word_in_a_sentence() {
+        let corrections = crate::parse_corrections(
+            std::fs::read_to_string(workspace().join("analyzer/corrections.tsv")).unwrap(),
+        )
+        .unwrap();
+
+        let misread: Vec<_> = corrections
+            .iter()
+            .filter_map(|c| {
+                let reading = c.reading.as_deref()?;
+                let tokens = analyzer()
+                    .tokens(format!("その{}を見た", c.surface))
+                    .unwrap();
+                (readings_of(&tokens, &c.surface) != [reading]).then(|| {
+                    let read: Vec<_> = view(&tokens).into_iter().map(|t| (t.0, t.1)).collect();
+                    format!("{}: {read:?}", c.surface)
+                })
+            })
+            .collect();
+        assert!(misread.is_empty(), "{misread:#?}");
+    }
+
+    #[test]
+    #[ignore = "needs SudachiDict full and small"]
+    fn a_reading_unidic_does_not_have_takes_the_one_sudachidict_small_gives() {
+        let tokens = analyzer().tokens("米子市から長野に行く").unwrap();
+
+        assert_eq!(readings_of(&tokens, "米子"), ["よなご"]);
+        assert_eq!(readings_of(&tokens, "長野"), ["ながの"]);
     }
 }

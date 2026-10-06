@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use kanaemi_engine::{InvalidLine, ItemLine, TextDictionary, mark_placeholders, may_follow_stem};
 
-use crate::kana::{is_hiragana, is_kanji};
+use crate::kana::{HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji};
 use crate::{UnidicWord, Unit};
 
 /// The label of the base dictionary in its description line.
@@ -187,6 +187,13 @@ impl Dictionary {
         }
     }
 
+    /// Removes the words whose surface `drops` tells, with their okurigana
+    /// lines.
+    pub fn drop_words(&mut self, drops: impl Fn(&str) -> bool) {
+        self.entries.retain(|e| !drops(&e.surface));
+        self.okuri.retain(|e| !drops(&e.surface));
+    }
+
     /// The dictionary as Kanaemi's text dictionary, described as the official
     /// dictionary of `label`, every line with its cost: by reading, and within
     /// a reading from the largest cost to the smallest, so a reader that
@@ -341,12 +348,6 @@ fn numeric_entries(counts: HashMap<(String, String), usize>, total: usize) -> Ve
         .collect()
 }
 
-const PLAIN: &str = "かきくけこさしすせそたちつてとはひふへほ";
-const VOICED: &str = "がぎぐげござじずぜぞだぢづでどばびぶべぼ";
-const SEMI_VOICED: &str = "ぱぴぷぺぽ";
-/// Where the は row starts in [`PLAIN`], the only row with semi-voiced forms.
-const HA_ROW: usize = 15;
-
 /// `reading` with the first kana after its first `{}` in each of its plain,
 /// voiced and semi-voiced forms; `reading` alone when that kana has no other
 /// form.
@@ -481,6 +482,25 @@ mod tests {
             }),
             ..word(reading, surface)
         }
+    }
+
+    #[test]
+    fn dropped_words_leave_with_their_okurigana_lines() {
+        let mut dict = Dictionary::build(
+            [
+                repeat(word("とうつ", "十つ"), 2),
+                repeat(word("ひとつ", "一つ"), 2),
+            ]
+            .concat(),
+            &[],
+        );
+
+        dict.drop_words(|surface| surface == "十つ");
+
+        assert!(find(&dict.entries, "とうつ", "十つ").is_none());
+        assert!(find(&dict.okuri, "とう*つ", "十つ").is_none());
+        assert!(find(&dict.entries, "ひとつ", "一つ").is_some());
+        assert!(find(&dict.okuri, "ひと*つ", "一つ").is_some());
     }
 
     #[test]

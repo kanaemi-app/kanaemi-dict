@@ -1,6 +1,6 @@
 //! UniDic words from SudachiDict small's lexicon file.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 
 use crate::kana::has_kanji;
@@ -62,6 +62,26 @@ pub fn plain_words(lexicon: impl Read) -> Result<Vec<UnidicWord>, UnidicError> {
         .into_iter()
         .map(|(reading, surface)| UnidicWord { reading, surface })
         .collect())
+}
+
+/// The readings UniDic gives each surface of its words, to check a reading
+/// against.
+#[derive(Debug, Clone, Default)]
+pub struct UnidicReadings(HashMap<String, Vec<String>>);
+
+impl UnidicReadings {
+    pub fn new(words: impl IntoIterator<Item = UnidicWord>) -> Self {
+        let mut readings: HashMap<String, Vec<String>> = HashMap::new();
+        for word in words {
+            readings.entry(word.surface).or_default().push(word.reading);
+        }
+        Self(readings)
+    }
+
+    /// UniDic's readings of `surface`; none when UniDic does not have it.
+    pub fn of(&self, surface: impl AsRef<str>) -> &[String] {
+        self.0.get(surface.as_ref()).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// Decodes the lexicon's character escapes, `\uXXXX` and `\u{X…}`.
@@ -154,6 +174,19 @@ mod tests {
     #[test]
     fn an_escape_that_is_not_a_character_stays_as_written() {
         assert_eq!(unescape("a\\uZZZZb\\u{110000}"), "a\\uZZZZb\\u{110000}");
+    }
+
+    #[test]
+    fn readings_are_looked_up_by_surface() {
+        let readings = UnidicReadings::new([
+            word("よなご", "米子"),
+            word("よねこ", "米子"),
+            word("ながの", "長野"),
+        ]);
+
+        assert_eq!(readings.of("米子"), ["よなご", "よねこ"]);
+        assert_eq!(readings.of("長野"), ["ながの"]);
+        assert!(readings.of("深掘り").is_empty());
     }
 
     #[test]

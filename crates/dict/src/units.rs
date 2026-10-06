@@ -5,11 +5,11 @@ use std::io::{self, BufRead};
 
 use kanaemi_engine::{MAX_SUFFIX_KANA, terminal_ending};
 
-use crate::Token;
 use crate::analyzer::is_break;
 use crate::conjugation::{KanaemiType, kanaemi_type};
-use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana};
+use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana, is_voicing_of};
 use crate::numeral::{Number, read_number};
+use crate::{Token, UnidicReadings};
 
 /// A unit with its document and its position in the document's text, as
 /// written to `build/units.jsonl`.
@@ -92,6 +92,7 @@ pub(crate) fn each_unit<E>(
     doc_id: &str,
     text: &str,
     mut tokenize: impl FnMut(&str) -> Result<Vec<Token>, E>,
+    readings: &UnidicReadings,
     mut emit: impl FnMut(Unit),
 ) -> Result<(), E> {
     let mut line_start = 0;
@@ -103,7 +104,7 @@ pub(crate) fn each_unit<E>(
                 token
             }));
         }
-        for u in cut_line(&tokens) {
+        for u in cut_line(&tokens, readings) {
             let stem = u.stem;
             emit(Unit {
                 doc_id: doc_id.to_owned(),
@@ -149,31 +150,32 @@ fn pieces(line: &str) -> Vec<(usize, &str)> {
     out
 }
 
-/// Parts of speech a prefix joins.
-const PREFIX_HEADS: [&str; 4] = ["名詞", "動詞", "形容詞", "形状詞"];
+/// Parts of speech a prefix joins. A prefix joined to a verb or an adjective
+/// makes a word that does not exist (お願い into お願う).
+const PREFIX_HEADS: [&str; 2] = ["名詞", "形状詞"];
 /// Stands in for the conjugation type of a word outside Kanaemi's table once
 /// the token carries Kanaemi's types.
 const OUTSIDE_TABLE: &str = "(outside the table)";
 
 /// Cuts one line's tokens into units.
-pub(crate) fn cut_line(tokens: &[Token]) -> Vec<LineUnit> {
+pub(crate) fn cut_line(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
     let renamed: Vec<Token> = tokens.iter().map(with_kanaemi_type).collect();
     let mut units = Vec::new();
     let mut rest = renamed.as_slice();
     while let Some(n) = rest.iter().position(is_numeral) {
         let start = n - usize::from(n > 0 && rest[n - 1].pos[0] == "接頭辞");
-        units.extend(cut_words(&rest[..start]));
+        units.extend(cut_words(&rest[..start], readings));
         let (unit, taken) = cut_numeric(&rest[start..]);
         units.extend(unit);
         rest = &rest[start + taken..];
     }
-    units.extend(cut_words(rest));
+    units.extend(cut_words(rest, readings));
     units
 }
 
 /// Cuts tokens holding no numeral into units.
-fn cut_words(tokens: &[Token]) -> Vec<LineUnit> {
-    let tokens = join_affixes(tokens);
+fn cut_words(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
+    let tokens = join_affixes(tokens, readings);
     let mut units = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -288,11 +290,18 @@ fn plain(token: &Token) -> LineUnit {
 }
 
 /// The stem from the dictionary form, and the okurigana's kana count, when
-/// the surface and reading line up with it.
+/// the surface and reading line up with it. A godan form written without its
+/// okurigana (有 for あり) and an adjective's ウ音便 (早う) read the stem
+/// otherwise than the dictionary form does, so they make none.
 fn stem_of(token: &Token, ending: &str, conjugation: &str) -> Option<(Stem, usize)> {
     let stem = token.dictionary_form.strip_suffix(ending)?;
     let okuri = token.surface.strip_prefix(stem)?;
     if !has_kanji(stem) || !okuri.chars().all(is_reading_kana) {
+        return None;
+    }
+    if (okuri.is_empty() && conjugation.starts_with("五段"))
+        || (conjugation == "形容詞" && token.pos.get(5).is_some_and(|f| f.ends_with("ウ音便")))
+    {
         return None;
     }
     let reading = token.reading.strip_suffix(okuri)?;
@@ -328,23 +337,21 @@ fn take_in(mut unit: LineUnit, mut okuri: usize, rest: &[Token]) -> (LineUnit, u
 }
 
 /// Joins a prefix to the content word after it and a suffix to the noun or
-/// pronoun before it.
-fn join_affixes(tokens: &[Token]) -> Vec<Token> {
+/// pronoun before it, unless UniDic has the joined word and no reading of it
+/// can stand for the joined readings.
+fn join_affixes(tokens: &[Token], readings: &UnidicReadings) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::new();
     let mut prefix: Option<Token> = None;
     for token in tokens {
         let mut token = token.clone();
         if let Some(p) = prefix.take() {
-            if PREFIX_HEADS.contains(&token.pos[0].as_str()) {
-                token = Token {
-                    surface: p.surface + &token.surface,
-                    reading: p.reading + &token.reading,
-                    dictionary_form: p.dictionary_form + &token.dictionary_form,
-                    begin: p.begin,
-                    pos: token.pos,
-                };
-            } else {
-                out.push(p);
+            match PREFIX_HEADS
+                .contains(&token.pos[0].as_str())
+                .then(|| joined(&p, &token, readings))
+                .flatten()
+            {
+                Some(j) => token = j,
+                None => out.push(p),
             }
         }
         if token.pos[0] == "接頭辞" {
@@ -353,17 +360,55 @@ fn join_affixes(tokens: &[Token]) -> Vec<Token> {
         }
         if token.pos[0] == "接尾辞"
             && let Some(prev) = out.last_mut().filter(|prev| takes_suffix(prev))
+            && let Some(j) = joined(prev, &token, readings)
         {
-            prev.surface.push_str(&token.surface);
-            prev.reading.push_str(&token.reading);
-            prev.dictionary_form.push_str(&token.dictionary_form);
-            prev.pos = token.pos;
+            *prev = j;
             continue;
         }
         out.push(token);
     }
     out.extend(prefix);
     out
+}
+
+/// `head` and `tail` as one word with the part of speech of `tail`, read as
+/// UniDic reads it when UniDic has it.
+fn joined(head: &Token, tail: &Token, readings: &UnidicReadings) -> Option<Token> {
+    let surface = format!("{}{}", head.surface, tail.surface);
+    let reading = format!("{}{}", head.reading, tail.reading);
+    let reading = checked_reading(readings.of(&surface), reading, head.reading.chars().count())?;
+    Some(Token {
+        surface,
+        reading,
+        dictionary_form: format!("{}{}", head.dictionary_form, tail.dictionary_form),
+        begin: head.begin,
+        pos: tail.pos.clone(),
+    })
+}
+
+/// `reading` when UniDic does not know the word or reads it so; else UniDic's
+/// reading that differs only by voicing the kana at `seam`, or UniDic's only
+/// reading. None when neither is there.
+fn checked_reading(known: &[String], reading: String, seam: usize) -> Option<String> {
+    if known.is_empty() || known.contains(&reading) {
+        return Some(reading);
+    }
+    let voiced_at_seam = |other: &String| {
+        other.chars().count() == reading.chars().count()
+            && reading
+                .chars()
+                .zip(other.chars())
+                .enumerate()
+                .all(|(i, (a, b))| a == b || (i == seam && is_voicing_of(a, b)))
+    };
+    known
+        .iter()
+        .find(|r| voiced_at_seam(r))
+        .or(match known {
+            [only] => Some(only),
+            _ => None,
+        })
+        .cloned()
 }
 
 fn takes_suffix(token: &Token) -> bool {
@@ -376,8 +421,7 @@ fn conjugation_of(token: &Token) -> Option<&str> {
 }
 
 /// The token with its conjugation type as Kanaemi names it, or
-/// [`OUTSIDE_TABLE`], decided from its own dictionary form before any prefix
-/// joins it.
+/// [`OUTSIDE_TABLE`], decided from its dictionary form.
 fn with_kanaemi_type(token: &Token) -> Token {
     let mut token = token.clone();
     if let Some(sudachi_type) = conjugation_of(&token) {
@@ -412,6 +456,7 @@ fn after_last_kanji(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::UnidicWord;
 
     #[test]
     fn units_are_read_one_per_line_and_a_bad_line_is_an_error_with_its_number() {
@@ -474,7 +519,16 @@ mod tests {
     }
 
     fn cut(specs: &[&str]) -> Vec<LineUnit> {
-        cut_line(&line(specs))
+        cut_line(&line(specs), &UnidicReadings::default())
+    }
+
+    /// Cuts with UniDic giving `known` as (reading, surface) pairs.
+    fn cut_knowing(known: &[(&str, &str)], specs: &[&str]) -> Vec<LineUnit> {
+        let readings = UnidicReadings::new(known.iter().map(|(reading, surface)| UnidicWord {
+            reading: (*reading).into(),
+            surface: (*surface).into(),
+        }));
+        cut_line(&line(specs), &readings)
     }
 
     fn plain(begin: usize, reading: &str, surface: &str) -> LineUnit {
@@ -527,7 +581,9 @@ mod tests {
         tokenize: impl FnMut(&str) -> Result<Vec<Token>, E>,
     ) -> Result<Vec<Unit>, E> {
         let mut units = Vec::new();
-        each_unit("d", text, tokenize, |unit| units.push(unit))?;
+        each_unit("d", text, tokenize, &UnidicReadings::default(), |unit| {
+            units.push(unit)
+        })?;
         Ok(units)
     }
 
@@ -588,14 +644,21 @@ mod tests {
     }
 
     #[test]
-    fn a_prefix_does_not_hide_a_word_outside_the_table() {
+    fn a_prefix_does_not_join_a_verb_or_an_adjective() {
         assert_eq!(
             cut(&[
+                "突/とっ/接頭辞,*,*,*,*,*/突",
+                "当る/あたる/動詞,一般,*,*,五段-ラ行,終止形-一般/当る",
+                "、/、/補助記号,読点,*,*,*,*/、",
                 "超/ちょう/接頭辞,*,*,*,*,*/超",
-                "いい/いい/形容詞,非自立可能,*,*,形容詞,終止形-一般/いい",
-                "です/です/助動詞,*,*,*,助動詞-デス,終止形-一般/です",
+                "安い/やすい/形容詞,一般,*,*,形容詞,終止形-一般/安い",
             ]),
-            [plain(0, "ちょういいです", "超いいです")]
+            [
+                plain(0, "とっ", "突"),
+                conjugated(1, "あたる", "当る", ("あた", "当", "五段-ラ行")),
+                plain(4, "ちょう", "超"),
+                conjugated(5, "やすい", "安い", ("やす", "安", "形容詞")),
+            ]
         );
     }
 
@@ -615,24 +678,6 @@ mod tests {
         assert_eq!(
             pieces(&line).iter().map(|(_, p)| *p).collect::<String>(),
             line
-        );
-    }
-
-    #[test]
-    fn a_prefix_does_not_hide_the_word_kanaemi_renames() {
-        let units = cut(&[
-            "お/お/接頭辞,*,*,*,*,*/お",
-            "下さい/ください/動詞,非自立可能,*,*,五段-ラ行,連用形-イ音便/下さる",
-        ]);
-
-        assert_eq!(
-            units,
-            [conjugated(
-                0,
-                "おください",
-                "お下さい",
-                ("おくださ", "お下さ", "五段-ラ行-特殊")
-            )]
         );
     }
 
@@ -705,6 +750,30 @@ mod tests {
     }
 
     #[test]
+    fn a_form_written_without_its_okurigana_makes_no_stem() {
+        assert_eq!(
+            cut(&[
+                "有/あり/動詞,非自立可能,*,*,五段-ラ行,連用形-一般/有る",
+                "、/、/補助記号,読点,*,*,*,*/、",
+                "見/み/動詞,非自立可能,*,*,上一段-マ行,連用形-一般/見る",
+                "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
+            ]),
+            [
+                plain(0, "あり", "有"),
+                conjugated(2, "みた", "見た", ("み", "見", "上一段-マ行")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_adjective_s_u_sound_change_makes_no_stem() {
+        assert_eq!(
+            cut(&["早う/はよう/形容詞,一般,*,*,形容詞,連用形-ウ音便/早い"]),
+            [plain(0, "はよう", "早う")]
+        );
+    }
+
+    #[test]
     fn prefixes_and_suffixes_join_their_words() {
         assert_eq!(
             cut(&[
@@ -718,10 +787,66 @@ mod tests {
                 "ら/ら/接尾辞,名詞的,一般,*,*,*/ら",
             ]),
             [
-                conjugated(0, "おまち", "お待ち", ("おま", "お待", "五段-タ行")),
+                conjugated(1, "まち", "待ち", ("ま", "待", "五段-タ行")),
                 plain(4, "やまださん", "山田さん"),
                 plain(9, "かれら", "彼ら"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_joined_word_unidic_has_takes_unidic_s_reading_voiced_where_the_words_join() {
+        assert_eq!(
+            cut_knowing(
+                &[("おおずもう", "大相撲"), ("たいすもう", "大相撲")],
+                &[
+                    "大/おお/接頭辞,*,*,*,*,*/大",
+                    &format!("相撲/すもう/{NOUN}/相撲"),
+                ]
+            ),
+            [plain(0, "おおずもう", "大相撲")]
+        );
+    }
+
+    #[test]
+    fn a_joined_word_unidic_reads_one_way_takes_that_reading() {
+        assert_eq!(
+            cut_knowing(
+                &[("りゅうじょう", "粒状")],
+                &[
+                    &format!("粒/つぶ/{NOUN}/粒"),
+                    "状/じょう/接尾辞,名詞的,一般,*,*,*/状",
+                ]
+            ),
+            [plain(0, "りゅうじょう", "粒状")]
+        );
+    }
+
+    #[test]
+    fn a_joined_word_whose_reading_unidic_has_keeps_it() {
+        assert_eq!(
+            cut_knowing(
+                &[("おおずもう", "大相撲")],
+                &[
+                    "大/おお/接頭辞,*,*,*,*,*/大",
+                    &format!("相撲/ずもう/{NOUN}/相撲"),
+                ]
+            ),
+            [plain(0, "おおずもう", "大相撲")]
+        );
+    }
+
+    #[test]
+    fn a_joined_word_whose_unidic_reading_cannot_be_chosen_stays_apart() {
+        assert_eq!(
+            cut_knowing(
+                &[("さんじょう", "山上"), ("やまがみ", "山上")],
+                &[
+                    &format!("山/やま/{NOUN}/山"),
+                    "上/じょう/接尾辞,名詞的,一般,*,*,*/上",
+                ]
+            ),
+            [plain(0, "やま", "山"), plain(1, "じょう", "上")]
         );
     }
 
