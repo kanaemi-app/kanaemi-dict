@@ -13,10 +13,11 @@ use kanaemi_dict::{
     Analyzer, AnalyzerError, BASE_LABEL, Base, Corrections, CorrectionsError, CutError, Dictionary,
     DistError, DocumentsError, EvalDocument, EvalDocumentsError, Evaluation, ExampleFile, Examples,
     RejectedLines, Split, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
-    WriteError, cut_documents, document_sources, document_texts, each_document_with_units, engine,
-    eval_documents, evaluate_documents, examples_of_document, field_dictionary, gather, model_file,
-    parse_corrections, place_dictionary, place_names, plain_words, read_titles, read_units,
-    sources_file, split_of, take, train, write_atomically, year_dictionary,
+    WriteError, counted_reading, counted_words, counter_words, cut_documents, document_sources,
+    document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
+    examples_of_document, field_dictionary, gather, model_file, parse_corrections,
+    place_dictionary, place_names, plain_words, read_titles, read_units, sources_file, split_of,
+    take, train, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -94,7 +95,8 @@ usage: kanaemi-dict units
          analyzer/corrections.tsv
        kanaemi-dict dictionary [--train-only]
          build build/dictionaries/base.tsv from build/units.jsonl and the
-         UniDic lexicon build/sudachi/small_lex.csv, reporting to
+         UniDic lexicon build/sudachi/small_lex.csv, with the words of one
+         to ten with each counter read by the analyzer, reporting to
          build/dictionaries/base-report.tsv; with --train-only, from the
          units of the train documents alone into
          build/dictionaries/base-train.tsv and base-train-report.tsv
@@ -286,6 +288,26 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         if let Some(e) = failure {
             return Err(e);
         }
+        let counted = {
+            let counters =
+                UnidicReadings::new(counter_words(open(LEXICON)?).map_err(|source| {
+                    Error::Unidic {
+                        path: LEXICON.into(),
+                        source,
+                    }
+                })?);
+            let analyzer = open_analyzer()?;
+            counted_words(&dictionary.numeric, &counters, |surface| {
+                analyzer
+                    .tokens(format!("{surface}の"))
+                    .map(|tokens| counted_reading(&tokens, surface))
+            })
+            .map_err(|source| Error::Analyzer {
+                path: SYSTEM_DICTIONARY.into(),
+                source,
+            })?
+        };
+        dictionary.add_words(counted);
         let corrections = corrections()?;
         dictionary.drop_words(|surface| corrections.drops(surface));
         dictionary

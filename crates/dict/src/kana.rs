@@ -50,6 +50,15 @@ pub(crate) const SEMI_VOICED: &str = "ぱぴぷぺぽ";
 /// Where the は row starts in [`PLAIN`], the only row with semi-voiced forms.
 pub(crate) const HA_ROW: usize = 15;
 
+/// `kana` without its voicing (ぼ and ぽ to ほ); any other character as it is.
+pub(crate) fn unvoiced(kana: char) -> char {
+    let at = |s: &str| s.chars().position(|k| k == kana);
+    at(VOICED)
+        .or_else(|| at(SEMI_VOICED).map(|j| j + HA_ROW))
+        .and_then(|i| PLAIN.chars().nth(i))
+        .unwrap_or(kana)
+}
+
 /// Whether `voiced` is `plain` voiced or semi-voiced, as it is where words
 /// join (rendaku), ち and つ also as じ and ず the way they are written then.
 pub(crate) fn is_voicing_of(plain: char, voiced: char) -> bool {
@@ -92,6 +101,15 @@ mod tests {
         assert!(!is_voicing_of('か', 'ぱ'));
         assert!(!is_voicing_of('ず', 'す'));
         assert!(!is_voicing_of('あ', 'あ'));
+    }
+
+    #[test]
+    fn a_voiced_or_semi_voiced_kana_loses_its_voicing() {
+        assert_eq!(unvoiced('ぼ'), 'ほ');
+        assert_eq!(unvoiced('ぽ'), 'ほ');
+        assert_eq!(unvoiced('が'), 'か');
+        assert_eq!(unvoiced('か'), 'か');
+        assert_eq!(unvoiced('ま'), 'ま');
     }
 
     #[test]

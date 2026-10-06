@@ -24,6 +24,33 @@ pub enum UnidicError {
 /// The non-conjugating words with kanji in the lexicon, without duplicates,
 /// in reading and surface order.
 pub fn plain_words(lexicon: impl Read) -> Result<Vec<UnidicWord>, UnidicError> {
+    words_where(lexicon, |row| {
+        !matches!(row.pos[0].as_str(), "補助記号" | "空白")
+    })
+}
+
+/// The words with kanji the lexicon gives as counters (a suffix, or a noun
+/// that can count), without duplicates, in reading and surface order. Rows of
+/// cost 0, which the lexicon keeps for symbols, are left out.
+pub fn counter_words(lexicon: impl Read) -> Result<Vec<UnidicWord>, UnidicError> {
+    words_where(lexicon, |row| {
+        row.cost > 0
+            && (row.pos[0] == "接尾辞" || row.pos[1] == "助数詞" || row.pos[2] == "助数詞可能")
+    })
+}
+
+/// What [`words_where`] decides a row by: its cost and its first four
+/// part-of-speech fields.
+struct Row {
+    cost: i64,
+    pos: [String; 4],
+}
+
+/// The non-conjugating words with kanji of the rows `keep` keeps.
+fn words_where(
+    lexicon: impl Read,
+    keep: impl Fn(&Row) -> bool,
+) -> Result<Vec<UnidicWord>, UnidicError> {
     let mut reader = csv::ReaderBuilder::new()
         .flexible(true)
         .from_reader(lexicon);
@@ -34,18 +61,28 @@ pub fn plain_words(lexicon: impl Read) -> Result<Vec<UnidicWord>, UnidicError> {
             .position(|h| h == name)
             .ok_or(UnidicError::MissingColumn(name))
     };
-    let (index, head, pos1, pos5, reading) = (
+    let (index, head, cost, pos5, reading) = (
         column("IndexForm")?,
         column("Headword")?,
-        column("POS1")?,
+        column("Cost")?,
         column("POS5")?,
         column("ReadingForm")?,
     );
+    let pos = [
+        column("POS1")?,
+        column("POS2")?,
+        column("POS3")?,
+        column("POS4")?,
+    ];
     let mut words = BTreeSet::new();
     for record in reader.records() {
         let record = record?;
         let field = |i: usize| unescape(record.get(i).unwrap_or_default());
-        if field(pos5) != "*" || matches!(field(pos1).as_str(), "補助記号" | "空白") {
+        let row = Row {
+            cost: field(cost).parse().unwrap_or_default(),
+            pos: pos.map(field),
+        };
+        if field(pos5) != "*" || !keep(&row) {
             continue;
         }
         let surface = match field(head) {
@@ -147,6 +184,22 @@ mod tests {
         let words = plain_words(csv.as_bytes()).unwrap();
 
         assert_eq!(words, [word("とうきょう", "東京"), word("わたし", "私")]);
+    }
+
+    #[test]
+    fn counters_are_the_suffixes_and_the_nouns_that_can_count_with_a_cost() {
+        let csv = [
+            HEADER.to_owned(),
+            "杯,1,1,6894,,名詞,普通名詞,助数詞可能,*,*,*,ハイ,,,,,,,\n".to_owned(),
+            "匹,1,1,10509,,接尾辞,名詞的,助数詞,*,*,*,ヒキ,,,,,,,\n".to_owned(),
+            "台,1,1,11250,,名詞,普通名詞,一般,*,*,*,タイ,,,,,,,\n".to_owned(),
+            "段,1,1,0,,名詞,普通名詞,助数詞可能,*,*,*,タン,,,,,,,\n".to_owned(),
+        ]
+        .concat();
+
+        let words = counter_words(csv.as_bytes()).unwrap();
+
+        assert_eq!(words, [word("はい", "杯"), word("ひき", "匹")]);
     }
 
     #[test]

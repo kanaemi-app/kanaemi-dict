@@ -187,6 +187,37 @@ impl Dictionary {
         }
     }
 
+    /// Adds `words` that no unit made, keeping the smaller cost of a word
+    /// already there, with their okurigana lines.
+    pub fn add_words(&mut self, words: impl IntoIterator<Item = Entry>) {
+        let mut at: HashMap<Key, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                (
+                    (e.reading.clone(), e.surface.clone(), e.conjugation.clone()),
+                    i,
+                )
+            })
+            .collect();
+        for word in words {
+            let key = (
+                word.reading.clone(),
+                word.surface.clone(),
+                word.conjugation.clone(),
+            );
+            match at.get(&key) {
+                Some(&i) => self.entries[i].cost = self.entries[i].cost.min(word.cost),
+                None => {
+                    at.insert(key, self.entries.len());
+                    self.entries.push(word);
+                }
+            }
+        }
+        self.okuri = okuri_lines(&self.entries);
+    }
+
     /// Removes the words whose surface `drops` tells, with their okurigana
     /// lines.
     pub fn drop_words(&mut self, drops: impl Fn(&str) -> bool) {
@@ -482,6 +513,26 @@ mod tests {
             }),
             ..word(reading, surface)
         }
+    }
+
+    #[test]
+    fn added_words_join_the_entries_with_their_okurigana_lines_and_the_smaller_cost() {
+        let mut dict = Dictionary::build(repeat(word("ひとつ", "一つ"), 2), &[]);
+        let kept = find(&dict.entries, "ひとつ", "一つ").unwrap().cost;
+
+        dict.add_words([
+            entry("ひとつ", "一つ", None, kept + 100),
+            entry("いっぴき", "一匹", None, 900),
+        ]);
+
+        assert_eq!(find(&dict.entries, "ひとつ", "一つ").unwrap().cost, kept);
+        assert_eq!(find(&dict.entries, "いっぴき", "一匹").unwrap().cost, 900);
+        assert_eq!(dict.entries.len(), 2);
+        assert!(
+            find(&dict.okuri, "ひと*つ", "一つ").is_some(),
+            "{:?}",
+            dict.okuri
+        );
     }
 
     #[test]
