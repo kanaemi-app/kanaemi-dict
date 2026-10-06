@@ -15,6 +15,12 @@ export type Title = { doc_id: string; reading: string; surface: string };
 
 export type Articles = { docs: Document[]; titles: Title[] };
 
+/** Writes `titles` to `out` as sorted `doc_id<TAB>reading<TAB>surface` lines. */
+export async function writeTitlesTo(out: string, titles: Title[]): Promise<void> {
+  const lines = titles.map((t) => `${t.doc_id}\t${t.reading}\t${t.surface}\n`).sort();
+  await Deno.writeTextFile(out, lines.join(""));
+}
+
 /**
  * The dictionaries of `dictionaries` whose patterns one of `categories`
  * matches and whose first page ID, if any, `id` reaches.

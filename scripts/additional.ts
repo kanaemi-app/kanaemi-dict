@@ -34,7 +34,7 @@ import {
   hatenaHotentry,
   yearInJapan,
 } from "./additional/hatena.ts";
-import { articlesOf, type Title } from "./additional/wikipedia.ts";
+import { articlesOf, type Title, writeTitlesTo } from "./additional/wikipedia.ts";
 import { NoArticleYet, setUpYear } from "./additional/year.ts";
 
 const ADDITIONAL = "additional";
@@ -154,10 +154,9 @@ async function writeDocuments(name: string, docs: Document[]): Promise<void> {
 }
 
 async function writeTitles(name: string, titles: Title[]): Promise<void> {
-  const out = join(BUILD, name, "titles.tsv");
   await Deno.mkdir(join(BUILD, name), { recursive: true });
-  const lines = titles.map((t) => `${t.doc_id}\t${t.reading}\t${t.surface}\n`).sort();
-  await Deno.writeTextFile(out, lines.join(""));
+  const out = join(BUILD, name, "titles.tsv");
+  await writeTitlesTo(out, titles);
   console.log(`${name}\ttitles: ${titles.length}\tout: ${out}`);
 }
 

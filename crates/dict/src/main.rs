@@ -19,8 +19,8 @@ use kanaemi_dict::{
     eval_documents, evaluate_documents, examples_of_document, field_dictionary, gather, is_word,
     model_file, okurigana_dictionary, parse_corrections, parse_word_cases, paths_of,
     place_dictionary, place_names, plain_words, read_titles, read_units, reading_form, sample_tsv,
-    shared_readings, sources_file, split_of, take, train, word_misses_tsv, word_scores_tsv,
-    write_atomically, year_dictionary,
+    shared_readings, sources_file, split_of, take, title_entries, train, word_misses_tsv,
+    word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -32,6 +32,9 @@ const LEXICON: &str = "build/sudachi/small_lex.csv";
 /// The words the analyzer reads wrong, applied to what it reads.
 const CORRECTIONS: &str = "analyzer/corrections.tsv";
 const DOCS: &str = "build/docs.jsonl";
+/// The titles of the Wikipedia articles in the categories of
+/// base/wikipedia.txt, which `scripts/base-titles.ts` writes.
+const BASE_TITLES: &str = "build/base-titles.tsv";
 const UNITS: &str = "build/units.jsonl";
 const EVALUATION: &str = "build/evaluation.tsv";
 const DICTIONARIES: &str = "build/dictionaries";
@@ -315,7 +318,7 @@ fn cut_units() -> Result<(), Error> {
 fn build_dictionary(train_only: bool) -> Result<(), Error> {
     let outputs = if train_only { BASE_TRAIN } else { BASE };
     let unidic = unidic_words()?;
-    let dictionary = {
+    let (dictionary, took_titles) = {
         let mut failure = None;
         let units = read_units(open(UNITS)?)
             .map_while(|unit| {
@@ -328,10 +331,27 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 .ok()
             })
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
-        let mut dictionary = Dictionary::build(units, &unidic);
+        let mut total = 0usize;
+        let mut dictionary = Dictionary::build(units.inspect(|_| total += 1), &unidic);
         if let Some(e) = failure {
             return Err(e);
         }
+        let titles = {
+            let titles = read_titles(open(BASE_TITLES)?).map_err(|source| Error::Titles {
+                path: BASE_TITLES.into(),
+                source,
+            })?;
+            let texts = document_texts(open(DOCS)?, |doc_id| {
+                !train_only || split_of(doc_id) == Split::Train
+            })
+            .map_err(|source| Error::Documents {
+                path: DOCS.into(),
+                source,
+            })?;
+            title_entries(&titles, texts.iter().map(String::as_str), total)
+        };
+        let took_titles = !titles.is_empty();
+        dictionary.add_words(titles);
         let counted = {
             let counters =
                 UnidicReadings::new(counter_words(open(LEXICON)?).map_err(|source| {
@@ -356,7 +376,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         dictionary.drop_words(|reading, surface| {
             corrections.drops(surface) || !is_word(reading, surface)
         });
-        dictionary
+        (dictionary, took_titles)
     };
     let text = dictionary
         .to_checked_text(BASE_LABEL)
@@ -379,6 +399,9 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 source,
             })?;
         sources.extend(ANALYZER_SOURCES.map(String::from));
+        if took_titles {
+            sources.insert(TITLES_SOURCE.to_owned());
+        }
         write_sources(outputs.dictionary, text.as_bytes(), None, &sources)?;
     }
     println!(
