@@ -68,7 +68,8 @@ pub fn eval_documents(
 /// Calls `f` on each document `wanted` takes by its doc ID, in doc ID order,
 /// with its units from `units` and its text from `docs`, both sorted as
 /// `kanaemi-dict units` and the documents are; one document is held at a
-/// time. A document without units is no document here.
+/// time. Compounds are left out, as they overlap the units typed. A document
+/// without units is no document here.
 pub fn each_document_with_units<E: From<EvalDocumentsError>>(
     units: impl BufRead,
     docs: impl BufRead,
@@ -97,7 +98,7 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
                 });
             }
             previous = Some((unit.doc_id.clone(), unit.position));
-            if !wanted(&unit.doc_id) {
+            if unit.compound || !wanted(&unit.doc_id) {
                 continue;
             }
             if group
@@ -244,6 +245,7 @@ mod tests {
     // aozora:000013 dev, and aozora:000004 and aozora:000015 eval.
     fn unit(doc_id: &str, position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
+            compound: false,
             doc_id: doc_id.into(),
             position,
             reading: reading.into(),
@@ -310,6 +312,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn compounds_are_left_out_of_the_documents_units() {
+        let parts = [
+            unit("aozora:000004", 0, "ろてん", "露天"),
+            unit("aozora:000004", 2, "ふろ", "風呂"),
+        ];
+        let compound = Unit {
+            compound: true,
+            ..unit("aozora:000004", 0, "ろてんぶろ", "露天風呂")
+        };
+        let units = [parts[0].clone(), compound, parts[1].clone()];
+        let docs = docs_jsonl(&[("aozora:000004", "露天風呂")]);
+
+        let read = eval_documents(units_jsonl(&units).as_bytes(), docs.as_bytes()).unwrap();
+
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].units, parts);
     }
 
     #[test]
@@ -546,6 +567,7 @@ mod model_tests {
             doc_id: "aozora:1".into(),
             source_id: "aozora-text".into(),
             units: vec![Unit {
+                compound: false,
                 doc_id: "aozora:1".into(),
                 position: 0,
                 reading: "てがみ".into(),

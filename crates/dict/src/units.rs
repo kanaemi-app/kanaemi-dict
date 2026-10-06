@@ -9,7 +9,7 @@ use crate::analyzer::is_break;
 use crate::conjugation::{KanaemiType, kanaemi_type};
 use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana, is_voicing_of};
 use crate::numeral::{Number, read_number};
-use crate::{Token, UnidicReadings, is_word, katakana_to_hiragana};
+use crate::{Token, UnidicReadings, Words, is_word, katakana_to_hiragana};
 
 /// A unit with its document and its position in the document's text, as
 /// written to `build/units.jsonl`.
@@ -28,6 +28,11 @@ pub struct Unit {
     /// enters the dictionary.
     pub unknown_conjugation: Option<String>,
     pub numeric: Option<Numeric>,
+    /// A compound the analyzer groups from the units at its place, which it
+    /// overlaps: it counts as a word, but is no unit typed in the evaluation
+    /// or the model's training.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compound: bool,
 }
 
 /// A unit that holds a number, in the form of Kanaemi's numeric items: the
@@ -88,23 +93,38 @@ pub(crate) const MAX_ANALYZER_BYTES: usize = 40_000;
 /// Cuts a document's text into units line by line, reading each line with
 /// `tokenize`, and hands each unit to `emit` as its line is cut so a long
 /// document's units need not be held at once.
-pub(crate) fn each_unit<E>(
+pub(crate) fn each_unit<W: Into<Words>, E>(
     doc_id: &str,
     text: &str,
-    mut tokenize: impl FnMut(&str) -> Result<Vec<Token>, E>,
+    mut tokenize: impl FnMut(&str) -> Result<W, E>,
     readings: &UnidicReadings,
     mut emit: impl FnMut(Unit),
 ) -> Result<(), E> {
     let mut line_start = 0;
     for line in text.split('\n') {
-        let mut tokens = Vec::new();
+        let mut words = Words::default();
         for (piece_start, piece) in pieces(line) {
-            tokens.extend(tokenize(piece)?.into_iter().map(|mut token| {
+            let shift = |mut token: Token| {
                 token.begin += piece_start;
                 token
-            }));
+            };
+            let piece_words: Words = tokenize(piece)?.into();
+            words
+                .tokens
+                .extend(piece_words.tokens.into_iter().map(shift));
+            words
+                .compounds
+                .extend(piece_words.compounds.into_iter().map(shift));
         }
-        for u in cut_line(&tokens, readings) {
+        let units = cut_line(&words.tokens, readings);
+        let compounds = compound_units(&words, &units);
+        let mut line_units: Vec<(LineUnit, bool)> = units
+            .into_iter()
+            .map(|u| (u, false))
+            .chain(compounds.into_iter().map(|u| (u, true)))
+            .collect();
+        line_units.sort_by_key(|(u, _)| u.begin);
+        for (u, compound) in line_units {
             let stem = u.stem;
             emit(Unit {
                 doc_id: doc_id.to_owned(),
@@ -116,11 +136,37 @@ pub(crate) fn each_unit<E>(
                 conjugation: stem.map(|s| s.conjugation),
                 unknown_conjugation: u.unknown_conjugation,
                 numeric: u.numeric,
+                compound,
             });
         }
         line_start += line.chars().count() + 1;
     }
     Ok(())
+}
+
+/// The compounds of `words` that make words: nouns with kanji or katakana
+/// and no numeral among their tokens, read in plain kana, other than a unit
+/// already cut at the same place.
+fn compound_units(words: &Words, units: &[LineUnit]) -> Vec<LineUnit> {
+    words
+        .compounds
+        .iter()
+        .filter(|c| {
+            let end = c.begin + c.surface.chars().count();
+            c.pos[0] == "名詞"
+                && needs_conversion(&c.surface)
+                && is_plain_reading(&c.reading)
+                && is_word(&c.reading, &c.surface)
+                && !words
+                    .tokens
+                    .iter()
+                    .any(|t| t.begin >= c.begin && t.begin < end && is_numeral(t))
+                && !units
+                    .iter()
+                    .any(|u| u.begin == c.begin && u.surface == c.surface)
+        })
+        .map(plain)
+        .collect()
 }
 
 /// `line` in pieces the analyzer accepts, each with its character offset.
@@ -493,6 +539,7 @@ mod tests {
     #[test]
     fn units_are_read_one_per_line_and_a_bad_line_is_an_error_with_its_number() {
         let unit = Unit {
+            compound: false,
             doc_id: "a:1".into(),
             position: 3,
             reading: "ã¦ãã¿".into(),
@@ -608,9 +655,9 @@ mod tests {
             .collect())
     }
 
-    fn cut_document<E>(
+    fn cut_document<W: Into<Words>, E>(
         text: &str,
-        tokenize: impl FnMut(&str) -> Result<Vec<Token>, E>,
+        tokenize: impl FnMut(&str) -> Result<W, E>,
     ) -> Result<Vec<Unit>, E> {
         let mut units = Vec::new();
         each_unit("d", text, tokenize, &UnidicReadings::default(), |unit| {
@@ -1221,5 +1268,107 @@ mod tests {
         let result = cut_document("漢\n字", |_| Err::<Vec<Token>, _>("broken"));
 
         assert_eq!(result, Err("broken"));
+    }
+
+    /// The units of `text` read as `specs`, with the compounds `compounds`
+    /// as `(surface, reading, pos)` at the place their surface first shows.
+    fn cut_with_compounds(
+        text: &str,
+        specs: &[&str],
+        compounds: &[(&str, &str, &str)],
+    ) -> Vec<(usize, String, String, bool)> {
+        let words = Words {
+            tokens: line(specs),
+            compounds: compounds
+                .iter()
+                .map(|(surface, reading, pos)| {
+                    let at = text.find(surface).unwrap();
+                    tok(
+                        &format!("{surface}/{reading}/{pos}/{surface}"),
+                        text[..at].chars().count(),
+                    )
+                })
+                .collect(),
+        };
+        let units = cut_document(text, |_| Ok::<_, ()>(words.clone())).unwrap();
+        units
+            .into_iter()
+            .map(|u| (u.position, u.reading, u.surface, u.compound))
+            .collect()
+    }
+
+    #[test]
+    fn a_noun_compound_is_a_unit_of_its_own_beside_its_parts_in_position_order() {
+        let units = cut_with_compounds(
+            "露天風呂に入る",
+            &[
+                &format!("露天/ろてん/{NOUN}/露天"),
+                &format!("風呂/ふろ/{NOUN}/風呂"),
+                &format!("に/に/{PARTICLE}/に"),
+                "入る/はいる/動詞,一般,*,*,五段-ラ行,終止形-一般/入る",
+            ],
+            &[("露天風呂", "ろてんぶろ", NOUN)],
+        );
+
+        assert_eq!(
+            units,
+            [
+                (0, "ろてん".into(), "露天".into(), false),
+                (0, "ろてんぶろ".into(), "露天風呂".into(), true),
+                (2, "ふろ".into(), "風呂".into(), false),
+                (5, "はいる".into(), "入る".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_compound_that_is_no_noun_holds_a_numeral_or_is_a_unit_already_is_left_out() {
+        let numeral = "名詞,数詞,*,*,*,*";
+        let suffix = "接尾辞,名詞的,一般,*,*,*";
+        let units = cut_with_compounds(
+            "取り扱う第三章山田さん",
+            &[
+                "取り/とり/動詞,一般,*,*,五段-ラ行,連用形-一般/取る",
+                "扱う/あつかう/動詞,一般,*,*,五段-ワア行,終止形-一般/扱う",
+                "第/だい/接頭辞,*,*,*,*,*/第",
+                &format!("三/さん/{numeral}/三"),
+                &format!("章/しょう/{NOUN}/章"),
+                "山田/やまだ/名詞,固有名詞,人名,姓,*,*/山田",
+                &format!("さん/さん/{suffix}/さん"),
+            ],
+            &[
+                (
+                    "取り扱う",
+                    "とりあつかう",
+                    "動詞,一般,*,*,五段-ワア行,終止形-一般",
+                ),
+                ("第三章", "だいさんしょう", NOUN),
+                ("山田さん", "やまださん", NOUN),
+            ],
+        );
+
+        assert!(units.iter().all(|u| !u.3), "{units:?}");
+    }
+
+    #[test]
+    fn a_compound_unit_keeps_its_mark_through_a_units_line_and_others_write_none() {
+        let mut unit = Unit {
+            compound: true,
+            doc_id: "a:1".into(),
+            position: 0,
+            reading: "ろてんぶろ".into(),
+            surface: "露天風呂".into(),
+            stem_reading: None,
+            stem_surface: None,
+            conjugation: None,
+            unknown_conjugation: None,
+            numeric: None,
+        };
+
+        let line = serde_json::to_string(&unit).unwrap();
+        assert_eq!(read_units(line.as_bytes()).next().unwrap().unwrap(), unit);
+
+        unit.compound = false;
+        assert!(!serde_json::to_string(&unit).unwrap().contains("compound"));
     }
 }

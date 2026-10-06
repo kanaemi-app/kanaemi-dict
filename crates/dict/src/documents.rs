@@ -6,7 +6,7 @@ use std::io::{self, BufRead, Write};
 use rayon::prelude::*;
 
 use crate::units::each_unit;
-use crate::{AnalyzerError, Token, UnidicReadings};
+use crate::{AnalyzerError, UnidicReadings, Words};
 
 /// One line of `build/docs.jsonl`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -80,7 +80,7 @@ const BATCH_BYTES: usize = 4_000_000;
 /// writes them to `out` as JSON Lines in document order.
 pub fn cut_documents(
     docs: impl BufRead,
-    tokenize: impl Fn(&str) -> Result<Vec<Token>, AnalyzerError> + Sync,
+    tokenize: impl Fn(&str) -> Result<Words, AnalyzerError> + Sync,
     readings: &UnidicReadings,
     out: impl Write,
 ) -> Result<CutSummary, CutError> {
@@ -89,7 +89,7 @@ pub fn cut_documents(
 
 fn cut_in_batches(
     docs: impl BufRead,
-    tokenize: &(impl Fn(&str) -> Result<Vec<Token>, AnalyzerError> + Sync),
+    tokenize: &(impl Fn(&str) -> Result<Words, AnalyzerError> + Sync),
     readings: &UnidicReadings,
     mut out: impl Write,
     batch_bytes: usize,
@@ -154,7 +154,7 @@ pub(crate) fn each_document<E: From<DocumentsError>>(
 /// Each document's units are held only as their JSON lines.
 fn cut_batch(
     batch: &[Document],
-    tokenize: &(impl Fn(&str) -> Result<Vec<Token>, AnalyzerError> + Sync),
+    tokenize: &(impl Fn(&str) -> Result<Words, AnalyzerError> + Sync),
     readings: &UnidicReadings,
     out: &mut impl Write,
     summary: &mut CutSummary,
@@ -187,7 +187,7 @@ fn cut_batch(
 /// cut instead of holding them.
 fn cut_alone(
     doc: &Document,
-    tokenize: &impl Fn(&str) -> Result<Vec<Token>, AnalyzerError>,
+    tokenize: &impl Fn(&str) -> Result<Words, AnalyzerError>,
     readings: &UnidicReadings,
     out: &mut impl Write,
     summary: &mut CutSummary,
@@ -249,24 +249,25 @@ pub fn document_texts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Unit;
+    use crate::{Token, Unit};
 
     /// One noun per kanji, each read as "よみ".
-    fn tokenize(text: &str) -> Result<Vec<Token>, AnalyzerError> {
-        Ok(text
-            .chars()
-            .enumerate()
-            .filter(|(_, c)| crate::kana::is_kanji(*c))
-            .map(|(begin, c)| Token {
-                surface: c.to_string(),
-                reading: "よみ".into(),
-                pos: ["名詞", "普通名詞", "一般", "*", "*", "*"]
-                    .map(str::to_owned)
-                    .to_vec(),
-                dictionary_form: c.to_string(),
-                begin,
-            })
-            .collect())
+    fn tokenize(text: &str) -> Result<Words, AnalyzerError> {
+        Ok(Words::from(
+            text.chars()
+                .enumerate()
+                .filter(|(_, c)| crate::kana::is_kanji(*c))
+                .map(|(begin, c)| Token {
+                    surface: c.to_string(),
+                    reading: "よみ".into(),
+                    pos: ["名詞", "普通名詞", "一般", "*", "*", "*"]
+                        .map(str::to_owned)
+                        .to_vec(),
+                    dictionary_form: c.to_string(),
+                    begin,
+                })
+                .collect::<Vec<_>>(),
+        ))
     }
 
     fn jsonl(docs: &[(&str, &str)]) -> String {

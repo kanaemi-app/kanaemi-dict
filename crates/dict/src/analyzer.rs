@@ -2,12 +2,14 @@
 
 use std::path::Path;
 
+use sudachi::analysis::morpheme::Morpheme;
 use sudachi::analysis::stateless_tokenizer::StatelessTokenizer;
 use sudachi::analysis::{Mode, Tokenize};
 use sudachi::config::Config;
 use sudachi::dic::dictionary::JapaneseDictionary;
 use sudachi::error::SudachiError;
 
+use crate::kana::unvoiced;
 use crate::{Corrections, UnidicReadings, katakana_to_hiragana};
 
 /// One morpheme as the unit cutting needs it.
@@ -66,14 +68,27 @@ impl Analyzer {
         &self.readings
     }
 
-    /// The tokens of `text`. A non-conjugating word read otherwise than UniDic
-    /// reads it takes the reading SudachiDict small gives the same word at the
-    /// same place, when UniDic has that one; then the corrections apply.
+    /// The tokens of `text`, as [`Analyzer::words`] reads them.
     pub fn tokens(&self, text: impl AsRef<str>) -> Result<Vec<Token>, AnalyzerError> {
+        Ok(self.words(text)?.tokens)
+    }
+
+    /// The B-mode tokens of `text` and the compounds C mode groups them
+    /// into. A non-conjugating word read otherwise than UniDic reads it takes
+    /// the reading SudachiDict small gives the same word at the same place,
+    /// when UniDic has that one; a noun inside a compound, not at its head,
+    /// voiced at its first kana takes the unvoiced reading when UniDic has it
+    /// (風呂 of 露天風呂); then the corrections apply, to the compounds by
+    /// their surface.
+    pub fn words(&self, text: impl AsRef<str>) -> Result<Words, AnalyzerError> {
         let text = text.as_ref();
-        let mut tokens = read(&self.dict, text)?;
+        let Read {
+            mut tokens,
+            compounds,
+            inner,
+        } = read(&self.dict, text)?;
         if tokens.iter().any(|t| self.misread(t)) {
-            let checked = read(&self.checker, text)?;
+            let checked = read(&self.checker, text)?.tokens;
             for token in tokens.iter_mut() {
                 if !self.misread(token) {
                     continue;
@@ -88,7 +103,27 @@ impl Analyzer {
                 }
             }
         }
-        Ok(self.corrections.apply(tokens))
+        for (token, inside) in tokens.iter_mut().zip(&inner) {
+            if *inside && token.pos[0] == "名詞" {
+                let known = self.readings.of(&token.surface);
+                if let Some(plain) = unvoiced_head(&token.reading).filter(|r| known.contains(r)) {
+                    token.reading = plain;
+                }
+            }
+        }
+        let compounds = compounds
+            .into_iter()
+            .map(|mut c| {
+                if let Some(reading) = self.corrections.reading_of(&c.surface) {
+                    c.reading = reading.to_owned();
+                }
+                c
+            })
+            .collect();
+        Ok(Words {
+            tokens: self.corrections.apply(tokens),
+            compounds,
+        })
     }
 
     fn misread(&self, token: &Token) -> bool {
@@ -99,34 +134,94 @@ impl Analyzer {
     }
 }
 
-/// Text that grows past Sudachi's input limit in its normalization
-/// (㍿ becomes 株式会社) is read in halves.
-fn read(dict: &JapaneseDictionary, text: &str) -> Result<Vec<Token>, AnalyzerError> {
+/// The B-mode tokens of a text and the compounds C mode groups them into.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Words {
+    pub tokens: Vec<Token>,
+    /// The C-mode words that group two or more tokens, in text order.
+    pub compounds: Vec<Token>,
+}
+
+impl From<Vec<Token>> for Words {
+    fn from(tokens: Vec<Token>) -> Self {
+        Self {
+            tokens,
+            compounds: Vec::new(),
+        }
+    }
+}
+
+/// What one dictionary reads: the words, and for each token whether it sits
+/// inside a compound after its head.
+struct Read {
+    tokens: Vec<Token>,
+    compounds: Vec<Token>,
+    inner: Vec<bool>,
+}
+
+/// Reads `text` in C mode and splits each word into its B-mode tokens. Text
+/// that grows past Sudachi's input limit in its normalization (㍿ becomes
+/// 株式会社) is read in halves.
+fn read(dict: &JapaneseDictionary, text: &str) -> Result<Read, AnalyzerError> {
     let tokenizer = StatelessTokenizer::new(dict);
-    let morphemes = match tokenizer.tokenize(text, Mode::B, false) {
+    let morphemes = match tokenizer.tokenize(text, Mode::C, false) {
         Ok(morphemes) => morphemes,
         Err(SudachiError::InputTooLong(..)) if text.chars().nth(1).is_some() => {
             let (head, tail) = text.split_at(middle_cut(text));
             let offset = head.chars().count();
-            let mut tokens = read(dict, head)?;
-            tokens.extend(read(dict, tail)?.into_iter().map(|mut t| {
+            let mut read_head = read(dict, head)?;
+            let read_tail = read(dict, tail)?;
+            let shift = |mut t: Token| {
                 t.begin += offset;
                 t
-            }));
-            return Ok(tokens);
+            };
+            read_head
+                .tokens
+                .extend(read_tail.tokens.into_iter().map(shift));
+            read_head
+                .compounds
+                .extend(read_tail.compounds.into_iter().map(shift));
+            read_head.inner.extend(read_tail.inner);
+            return Ok(read_head);
         }
         Err(e) => return Err(e.into()),
     };
-    Ok(morphemes
-        .iter()
-        .map(|m| Token {
-            surface: m.surface().to_string(),
-            reading: katakana_to_hiragana(m.reading_form()),
-            pos: m.part_of_speech().to_vec(),
-            dictionary_form: m.dictionary_form().to_string(),
-            begin: m.begin_c(),
-        })
-        .collect())
+    let token = |m: &Morpheme<&JapaneseDictionary>| Token {
+        surface: m.surface().to_string(),
+        reading: katakana_to_hiragana(m.reading_form()),
+        pos: m.part_of_speech().to_vec(),
+        dictionary_form: m.dictionary_form().to_owned(),
+        begin: m.begin_c(),
+    };
+    let mut out = Read {
+        tokens: Vec::new(),
+        compounds: Vec::new(),
+        inner: Vec::new(),
+    };
+    let mut parts = morphemes.empty_clone();
+    for word in morphemes.iter() {
+        let whole = token(&word);
+        parts.clear();
+        if !word.split_into(Mode::B, &mut parts)? || parts.len() < 2 {
+            out.tokens.push(whole);
+            out.inner.push(false);
+            continue;
+        }
+        out.compounds.push(whole);
+        for (i, part) in parts.iter().enumerate() {
+            out.tokens.push(token(&part));
+            out.inner.push(i > 0);
+        }
+    }
+    Ok(out)
+}
+
+/// `reading` with its first kana unvoiced (ぶろ → ふろ), when it is voiced.
+fn unvoiced_head(reading: &str) -> Option<String> {
+    let mut chars = reading.chars();
+    let first = chars.next()?;
+    let plain = unvoiced(first);
+    (plain != first).then(|| std::iter::once(plain).chain(chars).collect())
 }
 
 /// Where text may be cut without splitting a word.
@@ -310,6 +405,31 @@ mod tests {
             })
             .collect();
         assert!(misread.is_empty(), "{misread:#?}");
+    }
+
+    #[test]
+    #[ignore = "needs SudachiDict full and small"]
+    fn compounds_come_with_their_own_readings_and_their_parts_read_alone() {
+        let words = analyzer()
+            .words("露天風呂と平安時代の株式会社。風呂に入る")
+            .unwrap();
+
+        let compounds: Vec<_> = words
+            .compounds
+            .iter()
+            .map(|c| (c.surface.as_str(), c.reading.as_str(), c.begin))
+            .collect();
+        assert_eq!(
+            compounds,
+            [
+                ("露天風呂", "ろてんぶろ", 0),
+                ("平安時代", "へいあんじだい", 5),
+                ("株式会社", "かぶしきがいしゃ", 10),
+            ]
+        );
+        assert_eq!(readings_of(&words.tokens, "風呂"), ["ふろ", "ふろ"]);
+        assert_eq!(readings_of(&words.tokens, "会社"), ["かいしゃ"]);
+        assert_eq!(readings_of(&words.tokens, "時代"), ["じだい"]);
     }
 
     #[test]

@@ -262,6 +262,7 @@ mod tests {
 
     fn unit(reading: &str, surface: &str, stem: Option<(&str, &str)>) -> Unit {
         Unit {
+            compound: false,
             doc_id: "d".into(),
             position: 0,
             reading: reading.into(),

@@ -483,6 +483,7 @@ mod tests {
 
     fn word(reading: &str, surface: &str) -> Unit {
         Unit {
+            compound: false,
             doc_id: "d".into(),
             position: 0,
             reading: reading.into(),

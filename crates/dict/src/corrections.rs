@@ -104,6 +104,11 @@ impl Corrections {
         }
     }
 
+    /// The reading a correction gives `surface`, if one does.
+    pub fn reading_of(&self, surface: impl AsRef<str>) -> Option<&str> {
+        self.readings.get(surface.as_ref()).map(String::as_str)
+    }
+
     /// Whether `surface` is no word and stays out of the dictionaries.
     pub fn drops(&self, surface: impl AsRef<str>) -> bool {
         self.dropped.contains(surface.as_ref())

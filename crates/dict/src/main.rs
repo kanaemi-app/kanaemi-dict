@@ -287,7 +287,7 @@ fn cut_units() -> Result<(), Error> {
     let analyzer = open_analyzer()?;
     let docs = open(DOCS)?;
     let summary = write_atomically(UNITS, |out| {
-        cut_documents(docs, |text| analyzer.tokens(text), analyzer.readings(), out).map_err(
+        cut_documents(docs, |text| analyzer.words(text), analyzer.readings(), out).map_err(
             |source| Error::Cut {
                 path: DOCS.into(),
                 source,
@@ -921,7 +921,7 @@ fn sourced_dictionary(
     write_atomically(&units_path, |out| {
         cut_documents(
             open(&docs)?,
-            |text| analyzer.tokens(text),
+            |text| analyzer.words(text),
             analyzer.readings(),
             out,
         )

@@ -531,6 +531,7 @@ mod build_tests {
 
     fn word(reading: &str, surface: &str) -> Unit {
         Unit {
+            compound: false,
             doc_id: "wikipedia:1".into(),
             position: 0,
             reading: reading.into(),
