@@ -26,10 +26,12 @@ pub struct Number {
 }
 
 impl Notation {
-    /// The placeholder that writes a number in this notation.
+    /// The placeholder that writes a number in this notation. ASCII digits
+    /// take `half-num`, as `{}` gives the number as typed, full-width when
+    /// the typist enters it so.
     pub fn placeholder(self) -> &'static str {
         match self {
-            Self::Plain => "{}",
+            Self::Plain => "{half-num}",
             Self::WideNum => "{wide-num}",
             Self::KanjiNum => "{kanji-num}",
             Self::Kanji => "{kanji}",
@@ -198,7 +200,7 @@ mod tests {
         assert_eq!(
             placeholders,
             [
-                "{}",
+                "{half-num}",
                 "{wide-num}",
                 "{kanji-num}",
                 "{kanji}",

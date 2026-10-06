@@ -2,10 +2,12 @@
 //! each unit's surface ranks among the candidates.
 
 use std::io;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use kanaemi_core::{Converter, Effect};
 use kanaemi_engine::{Engine, LineSink, Selections, Slot, TextDictionary};
+use kanaemi_functions::LuauFunctions;
 
 use crate::Unit;
 use crate::dictionary::okuri_line;
@@ -242,15 +244,22 @@ impl LineSink for Discard {
     }
 }
 
+/// A path that names no folder, so [`LuauFunctions`] reads only Kanaemi's
+/// built-in functions, as a typist who has added none has.
+const NO_FUNCTIONS_FOLDER: &str = "";
+
 /// A Kanaemi engine with `dictionary` as its only dictionary besides an
-/// empty user custom dictionary. Engines on several threads share one parsed
-/// dictionary.
+/// empty user custom dictionary, filling placeholders with the built-in
+/// functions. Engines on several threads share one parsed dictionary; each
+/// has functions of its own, which stay on its thread.
 pub fn engine(dictionary: Arc<TextDictionary>) -> Engine {
-    Engine::new(
+    let mut engine = Engine::new(
         [Slot::Dictionary(Box::new(dictionary))],
         TextDictionary::default(),
         Discard,
-    )
+    );
+    engine.set_functions(Some(Rc::new(LuauFunctions::open(NO_FUNCTIONS_FOLDER))));
+    engine
 }
 
 #[cfg(test)]
@@ -529,6 +538,27 @@ mod tests {
                 fresh: all_first,
                 with_history: all_first,
             }
+        );
+    }
+
+    #[test]
+    fn kanaemi_writes_numbers_with_its_built_in_notations() {
+        let dictionary = dictionary("{}ほん\t{kanji}本\n{}ほん\t{half-num}本\n");
+        let surfaces = |reading: &str| -> Vec<String> {
+            let mut surfaces: Vec<String> = engine(dictionary.clone())
+                .convert(reading, None)
+                .into_iter()
+                .map(|c| c.surface)
+                .collect();
+            surfaces.sort();
+            surfaces
+        };
+
+        assert_eq!(surfaces("3ほん"), ["3本", "三本"]);
+        assert_eq!(
+            surfaces("３ほん"),
+            ["3本", "三本"],
+            "half-num writes half-width"
         );
     }
 

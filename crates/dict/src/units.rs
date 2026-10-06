@@ -8,7 +8,7 @@ use kanaemi_engine::{MAX_SUFFIX_KANA, terminal_ending};
 use crate::analyzer::is_break;
 use crate::conjugation::{KanaemiType, kanaemi_type};
 use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana, is_voicing_of};
-use crate::numeral::{Number, read_number};
+use crate::numeral::{Notation, Number, read_number};
 use crate::{Token, UnidicReadings, Words, is_word, katakana_to_hiragana};
 
 /// A unit with its document and its position in the document's text, as
@@ -368,12 +368,16 @@ fn numeric_unit(before: &[Token], number: &[Token], after: &[Token]) -> Option<L
     let Number { notation, value } = read_number(surface(number))?;
     let (kana_before, kana_after) = (kana(before)?, kana(after)?);
     let (surface_before, surface_after) = (surface(before), surface(after));
+    // ASCII digits between kana written as typed (3つ) give back the text
+    // typed for them, which needs no converting.
+    let typed_back =
+        notation == Notation::Plain && surface_before == kana_before && surface_after == kana_after;
     let numeric = Numeric {
         reading: format!("{kana_before}{{}}{kana_after}"),
         surface: format!("{surface_before}{}{surface_after}", notation.placeholder()),
         value,
     };
-    (numeric.reading != numeric.surface).then(|| LineUnit {
+    (!typed_back).then(|| LineUnit {
         begin: before.first().unwrap_or(&number[0]).begin,
         reading: format!("{kana_before}{}{kana_after}", numeric.value),
         surface: format!("{surface_before}{}{surface_after}", surface(number)),
@@ -1011,7 +1015,7 @@ mod tests {
                 &format!("3/さん/{NUMERAL}/3"),
                 &format!("ヶ/か/{COUNTER_SUFFIX}/ヶ"),
             ]),
-            [numeric(0, "3か", "3ヶ", ("{}か", "{}ヶ", "3"))]
+            [numeric(0, "3か", "3ヶ", ("{}か", "{half-num}ヶ", "3"))]
         );
     }
 
@@ -1133,7 +1137,7 @@ mod tests {
                 &format!("3/さん/{NUMERAL}/3"),
                 &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
             ]),
-            [numeric(0, "3ぽん", "3本", ("{}ぽん", "{}本", "3"))]
+            [numeric(0, "3ぽん", "3本", ("{}ぽん", "{half-num}本", "3"))]
         );
     }
 
@@ -1149,9 +1153,9 @@ mod tests {
                 &format!("日/か/{COUNTER_SUFFIX}/日"),
             ]),
             [
-                numeric(0, "2026ねん", "2026年", ("{}ねん", "{}年", "2026")),
-                numeric(5, "10がつ", "10月", ("{}がつ", "{}月", "10")),
-                numeric(8, "5か", "5日", ("{}か", "{}日", "5")),
+                numeric(0, "2026ねん", "2026年", ("{}ねん", "{half-num}年", "2026")),
+                numeric(5, "10がつ", "10月", ("{}がつ", "{half-num}月", "10")),
+                numeric(8, "5か", "5日", ("{}か", "{half-num}日", "5")),
             ]
         );
     }
@@ -1169,8 +1173,13 @@ mod tests {
                 "目/め/接尾辞,名詞的,一般,*,*,*/目",
             ]),
             [
-                numeric(0, "だい3かい", "第3回", ("だい{}かい", "第{}回", "3")),
-                numeric(4, "3さつめ", "3冊目", ("{}さつめ", "{}冊目", "3")),
+                numeric(
+                    0,
+                    "だい3かい",
+                    "第3回",
+                    ("だい{}かい", "第{half-num}回", "3")
+                ),
+                numeric(4, "3さつめ", "3冊目", ("{}さつめ", "{half-num}冊目", "3")),
             ]
         );
     }
@@ -1188,8 +1197,13 @@ mod tests {
                 rank,
             ]),
             [
-                numeric(0, "3さいくらい", "3歳位", ("{}さいくらい", "{}歳位", "3")),
-                numeric(4, "3い", "3位", ("{}い", "{}位", "3")),
+                numeric(
+                    0,
+                    "3さいくらい",
+                    "3歳位",
+                    ("{}さいくらい", "{half-num}歳位", "3")
+                ),
+                numeric(4, "3い", "3位", ("{}い", "{half-num}位", "3")),
             ]
         );
     }
@@ -1312,7 +1326,7 @@ mod tests {
             units[0].numeric,
             Some(Numeric {
                 reading: "{}ぽん".into(),
-                surface: "{}本".into(),
+                surface: "{half-num}本".into(),
                 value: "3".into(),
             })
         );
