@@ -1,5 +1,5 @@
-# sha256 2280f3d8a61f7fe2ae5b2d6c452b57447938f7a5e343839a9be292ba9da28c35
-# pairs 7605f94fcf9a2b901af34eb3c8ba5588a82d0ae3a0cfa916c03bda73fa035cf2
+# sha256 64d1e603318f5e9ea0272579ff4403b66f6d18b1c21ff646b50c2bc397b58b1e
+# pairs d40dc00f9b7a12d7a037acbed0d2f137581fbfa91533d9d00adaae3d6ad5564c
 aozora-text
 egov-all-xml
 fineweb2-jpn
@@ -7,6 +7,7 @@ fineweb2-jpn-train
 pydocs-ja
 rurema
 sudachidict-full
+sudachidict-small
 sudachidict-small-lex
 wikinews-ja
 wikipedia-ja

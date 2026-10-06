@@ -279,4 +279,6 @@ hatena-hotentry:20261002
 hatena-hotentry:20261003
 hatena-hotentry:20261004
 sudachidict-full
+sudachidict-small
+sudachidict-small-lex
 wikipedia-ja
