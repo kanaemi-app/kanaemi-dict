@@ -9,7 +9,7 @@ use crate::analyzer::is_break;
 use crate::conjugation::{KanaemiType, kanaemi_type};
 use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana, is_voicing_of};
 use crate::numeral::{Number, read_number};
-use crate::{Token, UnidicReadings};
+use crate::{Token, UnidicReadings, is_word, katakana_to_hiragana};
 
 /// A unit with its document and its position in the document's text, as
 /// written to `build/units.jsonl`.
@@ -159,7 +159,10 @@ const OUTSIDE_TABLE: &str = "(outside the table)";
 
 /// Cuts one line's tokens into units.
 pub(crate) fn cut_line(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
-    let renamed: Vec<Token> = tokens.iter().map(with_kanaemi_type).collect();
+    let renamed: Vec<Token> = tokens
+        .iter()
+        .map(|t| with_kanaemi_type(&read_as_written(t)))
+        .collect();
     let mut units = Vec::new();
     let mut rest = renamed.as_slice();
     while let Some(n) = rest.iter().position(is_numeral) {
@@ -181,7 +184,8 @@ fn cut_words(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
     while i < tokens.len() {
         let token = &tokens[i];
         i += 1;
-        if !needs_conversion(&token.surface) {
+        if !needs_conversion(&token.surface) || matches!(token.pos[0].as_str(), "補助記号" | "空白")
+        {
             continue;
         }
         let Some(conjugation) = conjugation_of(token) else {
@@ -212,13 +216,41 @@ fn cut_words(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
                 i += taken;
                 units.push(unit);
             }
+            // Cut short at a small つ (ハマっ), the form is no word.
+            None if token.reading.ends_with('っ') => {}
             None => units.push(plain(token)),
         }
     }
     units.retain(|u| {
-        is_plain_reading(&u.reading) && u.stem.as_ref().is_none_or(|s| is_plain_reading(&s.reading))
+        is_plain_reading(&u.reading)
+            && u.stem.as_ref().is_none_or(|s| is_plain_reading(&s.reading))
+            && is_word(&u.reading, &u.surface)
     });
     units
+}
+
+/// The token read as its katakana is written (ランウェイ as らんうぇい), when it
+/// is written in katakana alone: the analyzer gives a variant spelling the
+/// reading of the usual one (らんうえい). ヵ and ヶ stand for kanji (3ヶ月),
+/// read か or が, and ヷ, ヸ, ヹ and ヺ have no hiragana, so a surface with
+/// any of them keeps the analyzer's reading.
+fn read_as_written(token: &Token) -> Token {
+    let mut token = token.clone();
+    let katakana_only = !token.surface.is_empty()
+        && token.surface.chars().all(|c| {
+            (is_katakana(c) && !matches!(c, 'ヵ' | 'ヶ' | 'ヷ' | 'ヸ' | 'ヹ' | 'ヺ')) || c == 'ー'
+        });
+    if katakana_only {
+        token.reading = katakana_to_hiragana(&token.surface)
+            .chars()
+            .map(|c| match c {
+                'ゐ' => 'い',
+                'ゑ' => 'え',
+                c => c,
+            })
+            .collect();
+    }
+    token
 }
 
 /// Cuts the numeral at the head of `tokens`, with the prefix before it, into
@@ -742,10 +774,10 @@ mod tests {
     fn a_surface_off_its_stem_becomes_a_plain_unit_alone() {
         assert_eq!(
             cut(&[
-                "逝っ/いっ/動詞,非自立可能,*,*,五段-カ行,連用形-促音便/行く",
-                "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
+                "逝き/いき/動詞,非自立可能,*,*,五段-カ行,連用形-一般/行く",
+                "ます/ます/助動詞,*,*,*,助動詞-マス,終止形-一般/ます",
             ]),
-            [plain(0, "いっ", "逝っ")]
+            [plain(0, "いき", "逝き")]
         );
     }
 
@@ -791,6 +823,80 @@ mod tests {
                 plain(4, "やまださん", "山田さん"),
                 plain(9, "かれら", "彼ら"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_katakana_word_is_read_as_it_is_written() {
+        assert_eq!(
+            cut(&[
+                &format!("ランウェイ/らんうえい/{NOUN}/ランウェイ"),
+                &format!("キターーー/きたー/{NOUN}/キターーー"),
+                &format!("ヱビス/えびす/{NOUN}/ヱビス"),
+            ]),
+            [
+                plain(0, "らんうぇい", "ランウェイ"),
+                plain(5, "きたーーー", "キターーー"),
+                plain(10, "えびす", "ヱビス"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_katakana_word_with_a_letter_hiragana_lacks_keeps_the_analyzer_s_reading() {
+        assert_eq!(
+            cut(&[&format!("ヷイオリン/ゔぁいおりん/{NOUN}/ヷイオリン")]),
+            [plain(0, "ゔぁいおりん", "ヷイオリン")]
+        );
+    }
+
+    #[test]
+    fn a_small_ke_counter_keeps_the_analyzer_s_reading() {
+        assert_eq!(
+            cut(&[
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("ヶ/か/{COUNTER_SUFFIX}/ヶ"),
+            ]),
+            [numeric(0, "3か", "3ヶ", ("{}か", "{}ヶ", "3"))]
+        );
+    }
+
+    #[test]
+    fn a_piece_read_from_a_small_kana_a_moraic_nasal_or_a_long_vowel_is_not_a_unit() {
+        assert_eq!(
+            cut(&[
+                &format!("ッス/っす/{NOUN}/ッス"),
+                &format!("ンな/んな/{NOUN}/ンな"),
+                &format!("放/っぱなし/{NOUN}/放"),
+                &format!("ァ/ぁ/{NOUN}/ァ"),
+                &format!("手紙/てがみ/{NOUN}/手紙"),
+            ]),
+            [plain(6, "てがみ", "手紙")]
+        );
+    }
+
+    #[test]
+    fn a_conjugating_word_without_a_stem_cut_short_at_a_small_tsu_is_not_a_unit() {
+        assert_eq!(
+            cut(&[
+                "ハマっ/はまっ/動詞,一般,*,*,五段-ラ行,連用形-促音便/ハマる",
+                "、/、/補助記号,読点,*,*,*,*/、",
+                &format!("パッ/ぱっ/{NOUN}/パッ"),
+            ]),
+            [plain(4, "ぱっ", "パッ")]
+        );
+    }
+
+    #[test]
+    fn a_symbol_a_spaced_surface_and_a_loose_voicing_mark_are_not_units() {
+        assert_eq!(
+            cut(&[
+                "☆彡/きごう/補助記号,一般,*,*,*,*/☆彡",
+                &format!("美 少年/びしょうねん/{NOUN}/美 少年"),
+                &format!("ヘ゛ヒ゛ー/べびー/{NOUN}/ヘ゛ヒ゛ー"),
+                &format!("手紙/てがみ/{NOUN}/手紙"),
+            ]),
+            [plain(11, "てがみ", "手紙")]
         );
     }
 

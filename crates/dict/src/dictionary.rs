@@ -122,9 +122,12 @@ impl Dictionary {
                 Some(conjugation.clone()),
             );
             *counts.entry(stem).or_default() += 1;
-            *counts
-                .entry((unit.reading.clone(), unit.surface.clone(), None))
-                .or_default() += 1;
+            // A form cut short at a small つ (ハマっ) is no word; its stem is.
+            if !unit.reading.ends_with('っ') {
+                *counts
+                    .entry((unit.reading.clone(), unit.surface.clone(), None))
+                    .or_default() += 1;
+            }
             let okuri = unit
                 .surface
                 .strip_prefix(stem_surface.as_str())
@@ -157,7 +160,9 @@ impl Dictionary {
         drop(surfaces);
         let entries: Vec<Entry> = costs
             .into_iter()
-            .filter(|((_, surface, _), _)| !is_glossed(surface))
+            .filter(|((reading, surface, conjugation), _)| {
+                !is_glossed(surface) && (conjugation.is_some() || !is_cut_short(reading, surface))
+            })
             .map(|((reading, surface, conjugation), cost)| Entry {
                 reading,
                 surface,
@@ -218,11 +223,11 @@ impl Dictionary {
         self.okuri = okuri_lines(&self.entries);
     }
 
-    /// Removes the words whose surface `drops` tells, with their okurigana
-    /// lines.
-    pub fn drop_words(&mut self, drops: impl Fn(&str) -> bool) {
-        self.entries.retain(|e| !drops(&e.surface));
-        self.okuri.retain(|e| !drops(&e.surface));
+    /// Removes the words `drops` tells by their reading and surface, with
+    /// their okurigana lines.
+    pub fn drop_words(&mut self, drops: impl Fn(&str, &str) -> bool) {
+        self.entries.retain(|e| !drops(&e.reading, &e.surface));
+        self.okuri.retain(|e| !drops(&e.reading, &e.surface));
     }
 
     /// The dictionary as Kanaemi's text dictionary, described as the official
@@ -325,6 +330,31 @@ impl Report {
 /// a word.
 fn is_glossed(surface: &str) -> bool {
     surface.contains(['（', '）', '(', ')'])
+}
+
+/// Whether `reading` and `surface` can be a word, whichever way it came in: a
+/// piece cut from inside a word, read from a small kana, a moraic nasal or a
+/// long vowel (ッて, ンな, っ放し), is not; nor is text broken by a space, a
+/// loose voicing mark or a comma (美 少年, ヘ゛ヒ゛ー, 一、二塁間), or left
+/// open by a dash or a wave dash at its end (インター-, カーポーカー〜).
+pub fn is_word(reading: impl AsRef<str>, surface: impl AsRef<str>) -> bool {
+    let surface = surface.as_ref();
+    let starts_a_word = reading
+        .as_ref()
+        .chars()
+        .next()
+        .is_some_and(|c| !"ぁぃぅぇぉゃゅょゎゕゖっんー".contains(c));
+    starts_a_word
+        && !surface
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '゛' | '゜' | '、'))
+        && !surface.ends_with(['-', '－', '〜', '～'])
+}
+
+/// A form with kanji cut short at a small つ (知らなかっ), where a unit
+/// stopped taking in what follows; its word comes from its stem.
+fn is_cut_short(reading: &str, surface: &str) -> bool {
+    reading.ends_with('っ') && surface.chars().any(is_kanji)
 }
 
 /// The okurigana lines of `entries`, each at the cheapest cost of the
@@ -536,6 +566,56 @@ mod tests {
     }
 
     #[test]
+    fn a_form_cut_short_at_a_small_tsu_is_no_word_but_its_stem_is() {
+        let units = [
+            repeat(
+                conj("しらなかっ", "知らなかっ", ("し", "知"), "五段-ラ行"),
+                2,
+            ),
+            repeat(conj("はまっ", "ハマっ", ("はま", "ハマ"), "五段-ラ行"), 2),
+            repeat(word("ぱっ", "パッ"), 2),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert!(find(&dict.entries, "しらなかっ", "知らなかっ").is_none());
+        assert!(find(&dict.entries, "し", "知").is_some());
+        assert!(find(&dict.entries, "はまっ", "ハマっ").is_none());
+        assert!(find(&dict.entries, "ぱっ", "パッ").is_some());
+    }
+
+    #[test]
+    fn a_surface_broken_by_spaces_marks_or_commas_or_left_open_is_no_word() {
+        for broken in [
+            "美 少年",
+            "ヘ゛ヒ゛ー",
+            "一、二塁間",
+            "インター-",
+            "カーポーカー〜",
+            "ハ～",
+        ] {
+            assert!(!is_word("よみ", broken), "{broken}");
+        }
+        for word in ["手紙", "セブン-イレブン", "まどか☆マギカ", "Wi-Fi"] {
+            assert!(is_word("よみ", word), "{word}");
+        }
+    }
+
+    #[test]
+    fn a_reading_from_a_small_kana_a_moraic_nasal_or_a_long_vowel_is_no_word() {
+        for (reading, surface) in [
+            ("っぱなし", "放し"),
+            ("って", "ッて"),
+            ("んな", "ンな"),
+            ("ぁ", "ァ"),
+        ] {
+            assert!(!is_word(reading, surface), "{surface}");
+        }
+        assert!(is_word("ぱっ", "パッ"));
+    }
+
+    #[test]
     fn dropped_words_leave_with_their_okurigana_lines() {
         let mut dict = Dictionary::build(
             [
@@ -546,7 +626,7 @@ mod tests {
             &[],
         );
 
-        dict.drop_words(|surface| surface == "十つ");
+        dict.drop_words(|_, surface| surface == "十つ");
 
         assert!(find(&dict.entries, "とうつ", "十つ").is_none());
         assert!(find(&dict.okuri, "とう*つ", "十つ").is_none());

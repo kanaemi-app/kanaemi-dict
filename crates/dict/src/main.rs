@@ -15,7 +15,7 @@ use kanaemi_dict::{
     RejectedLines, Split, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
     WriteError, counted_reading, counted_words, counter_words, cut_documents, document_sources,
     document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
-    examples_of_document, field_dictionary, gather, model_file, parse_corrections,
+    examples_of_document, field_dictionary, gather, is_word, model_file, parse_corrections,
     place_dictionary, place_names, plain_words, read_titles, read_units, sources_file, split_of,
     take, train, write_atomically, year_dictionary,
 };
@@ -309,7 +309,9 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         };
         dictionary.add_words(counted);
         let corrections = corrections()?;
-        dictionary.drop_words(|surface| corrections.drops(surface));
+        dictionary.drop_words(|reading, surface| {
+            corrections.drops(surface) || !is_word(reading, surface)
+        });
         dictionary
     };
     let text = dictionary
@@ -634,7 +636,9 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             }
             sourced_dictionary(&name, &base, analyzer.as_ref().unwrap())?
         };
-        dictionary.drop_words(|surface| corrections.drops(surface));
+        dictionary.drop_words(|reading, surface| {
+            corrections.drops(surface) || !is_word(reading, surface)
+        });
         let dictionary_path = format!("{DICTIONARIES}/{name}.tsv");
         let report_path = format!("{DICTIONARIES}/{name}-report.tsv");
         let text = dictionary.to_text_where(label.trim(), |line, kind| base.keeps(line, kind));
