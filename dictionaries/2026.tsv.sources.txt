@@ -1,4 +1,4 @@
-# sha256 3edebafc467dbdc1313cc0cf7679bcc6a2151c20155b78be3ff5fdc2d616664e
+# sha256 feb1aa917fb47b14333095bf5d8dea054d4d27fccfeac851fac4bc777f63e57b
 aozora-text
 egov-all-xml
 hatena-hotentry:20260101
