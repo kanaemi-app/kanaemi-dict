@@ -264,6 +264,10 @@ fn cut_words(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
             }
             // Cut short at a small つ (ハマっ), the form is no word.
             None if token.reading.ends_with('っ') => {}
+            // Kanji alone the analyzer reads as a conjugated form (補 as
+            // おぎなえ) is mostly misread; UniDic vouches for the true ones.
+            None if after_last_kanji(&token.surface) == 0
+                && !readings.of(&token.surface).contains(&token.reading) => {}
             None => units.push(plain(token)),
         }
     }
@@ -319,12 +323,31 @@ fn cut_numeric(tokens: &[Token]) -> (Option<LineUnit>, usize) {
             .iter()
             .take_while(|t| t.pos[0] == "接尾辞")
             .count();
+    let suffixes: Vec<Token> = tokens[after..taken]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| Token {
+            reading: reading_after_number(i, t).to_owned(),
+            ..t.clone()
+        })
+        .collect();
     let unit = numeric_unit(
         &tokens[..number_start],
         &tokens[number_start..after],
-        &tokens[after..taken],
+        &suffixes,
     );
     (unit, taken)
+}
+
+/// The reading of `token`, the `i`th of the counter and the suffixes after a
+/// number. 位 right after the number ranks (3位, い); after the counter it
+/// approximates (3歳位, くらい), which the analyzer reads as the rank too.
+pub(crate) fn reading_after_number(i: usize, token: &Token) -> &str {
+    if i > 0 && token.surface == "位" && token.reading == "い" {
+        "くらい"
+    } else {
+        &token.reading
+    }
 }
 
 fn numeric_unit(before: &[Token], number: &[Token], after: &[Token]) -> Option<LineUnit> {
@@ -383,6 +406,13 @@ fn stem_of(token: &Token, ending: &str, conjugation: &str) -> Option<(Stem, usiz
         return None;
     }
     let reading = token.reading.strip_suffix(okuri)?;
+    // A verb's stem written with no okurigana reads a kana or so per character
+    // (見, 出来); more (補 as おぎなえ) means okurigana left out, or a
+    // misreading. An adjective's stem stands alone so (浅 of 浅すぎる).
+    if okuri.is_empty() && conjugation != "形容詞" && reading.chars().count() > stem.chars().count()
+    {
+        return None;
+    }
     let stem = Stem {
         reading: reading.to_owned(),
         surface: stem.to_owned(),
@@ -829,17 +859,40 @@ mod tests {
     }
 
     #[test]
-    fn a_form_written_without_its_okurigana_makes_no_stem() {
+    fn a_form_written_without_its_okurigana_makes_no_stem_and_is_a_word_only_when_unidic_has_it() {
+        let specs = [
+            "有/あり/動詞,非自立可能,*,*,五段-ラ行,連用形-一般/有る",
+            "、/、/補助記号,読点,*,*,*,*/、",
+            "補/おぎなえ/動詞,一般,*,*,下一段-ア行,連用形-一般/補える",
+            "、/、/補助記号,読点,*,*,*,*/、",
+            "見/み/動詞,非自立可能,*,*,上一段-マ行,連用形-一般/見る",
+            "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
+        ];
+        let seen = conjugated(4, "みた", "見た", ("み", "見", "上一段-マ行"));
+
+        assert_eq!(cut(&specs), std::slice::from_ref(&seen));
         assert_eq!(
-            cut(&[
-                "有/あり/動詞,非自立可能,*,*,五段-ラ行,連用形-一般/有る",
-                "、/、/補助記号,読点,*,*,*,*/、",
-                "見/み/動詞,非自立可能,*,*,上一段-マ行,連用形-一般/見る",
-                "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
-            ]),
+            cut_knowing(&[("あり", "有")], &specs),
+            [plain(0, "あり", "有"), seen]
+        );
+    }
+
+    #[test]
+    fn a_verb_of_kanji_alone_read_as_more_kana_than_it_has_characters_makes_no_stem() {
+        let specs = [
+            "補/おぎなえ/動詞,一般,*,*,下一段-ア行,連用形-一般/補る",
+            "、/、/補助記号,読点,*,*,*,*/、",
+            "浅/あさ/形容詞,一般,*,*,形容詞,語幹-一般/浅い",
+            "、/、/補助記号,読点,*,*,*,*/、",
+            "出来/でき/動詞,非自立可能,*,*,上一段-カ行,連用形-一般/出来る",
+            "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
+        ];
+
+        assert_eq!(
+            cut(&specs),
             [
-                plain(0, "あり", "有"),
-                conjugated(2, "みた", "見た", ("み", "見", "上一段-マ行")),
+                conjugated(2, "あさ", "浅", ("あさ", "浅", "形容詞")),
+                conjugated(4, "できた", "出来た", ("でき", "出来", "上一段-カ行")),
             ]
         );
     }
@@ -1064,6 +1117,25 @@ mod tests {
             [
                 numeric(0, "だい3かい", "第3回", ("だい{}かい", "第{}回", "3")),
                 numeric(4, "3さつめ", "3冊目", ("{}さつめ", "{}冊目", "3")),
+            ]
+        );
+    }
+
+    #[test]
+    fn i_after_a_counter_reads_kurai_and_right_after_the_number_reads_i() {
+        let rank = "位/い/接尾辞,名詞的,助数詞,*,*,*/位";
+        assert_eq!(
+            cut(&[
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("歳/さい/{COUNTER_SUFFIX}/歳"),
+                rank,
+                &format!("の/の/{PARTICLE}/の"),
+                &format!("3/さん/{NUMERAL}/3"),
+                rank,
+            ]),
+            [
+                numeric(0, "3さいくらい", "3歳位", ("{}さいくらい", "{}歳位", "3")),
+                numeric(4, "3い", "3位", ("{}い", "{}位", "3")),
             ]
         );
     }

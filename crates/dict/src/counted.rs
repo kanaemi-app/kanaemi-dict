@@ -8,6 +8,7 @@ use crate::kana::{
     HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji, is_katakana, is_reading_kana,
     unvoiced,
 };
+use crate::units::reading_after_number;
 use crate::{Entry, Token, UnidicReadings};
 
 /// The numbers the words are made for, as kanji.
@@ -56,10 +57,22 @@ pub fn counted_reading(tokens: &[Token], surface: &str) -> Option<CountedReading
     let [head, rest @ ..] = within.as_slice() else {
         return None;
     };
-    let rest: String = rest.iter().map(|t| t.reading.as_str()).collect();
+    // The tokens after the number and its counter, a common noun at the head
+    // holding both (一人).
+    let read_after = |counter_at: usize| -> String {
+        rest.iter()
+            .enumerate()
+            .map(|(i, t)| reading_after_number(i + counter_at, t))
+            .collect()
+    };
     if head.pos[0] == "名詞" && head.pos[1] == "普通名詞" {
-        Some(CountedReading::Word(format!("{}{rest}", head.reading)))
+        Some(CountedReading::Word(format!(
+            "{}{}",
+            head.reading,
+            read_after(1)
+        )))
     } else if head.pos[1] == "数詞" && !rest.is_empty() {
+        let rest = read_after(0);
         Some(CountedReading::Counted {
             number: head.reading.clone(),
             counter: rest,
@@ -298,6 +311,38 @@ mod tests {
                 number: "みっ".into(),
                 counter: "か".into()
             })
+        );
+    }
+
+    #[test]
+    fn i_after_the_counter_reads_kurai() {
+        let tokens = [
+            tok("六", "ろく", NUMERAL, 0),
+            tok("秒", "びょう", SUFFIX, 1),
+            tok("位", "い", SUFFIX, 2),
+            tok("の", "の", PARTICLE, 3),
+        ];
+
+        assert_eq!(
+            counted_reading(&tokens, "六秒位"),
+            Some(CountedReading::Counted {
+                number: "ろく".into(),
+                counter: "びょうくらい".into()
+            })
+        );
+    }
+
+    #[test]
+    fn i_after_a_noun_that_holds_the_counter_reads_kurai() {
+        let tokens = [
+            tok("一人", "ひとり", NOUN, 0),
+            tok("位", "い", SUFFIX, 2),
+            tok("の", "の", PARTICLE, 3),
+        ];
+
+        assert_eq!(
+            counted_reading(&tokens, "一人位"),
+            Some(CountedReading::Word("ひとりくらい".into()))
         );
     }
 
