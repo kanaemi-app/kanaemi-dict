@@ -33,6 +33,11 @@ pub struct Unit {
     /// or the model's training.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compound: bool,
+    /// A conjugating word spelled with other okurigana than its normalized
+    /// form (小い for 小さい): kept out of every dictionary but the one of
+    /// such spellings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub okurigana_variant: bool,
 }
 
 /// A unit that holds a number, in the form of Kanaemi's numeric items: the
@@ -76,6 +81,9 @@ pub(crate) struct LineUnit {
     pub(crate) stem: Option<Stem>,
     pub(crate) unknown_conjugation: Option<String>,
     pub(crate) numeric: Option<Numeric>,
+    /// A conjugating word spelled with other okurigana than its normalized
+    /// form (小い for 小さい), whether it makes a stem or not.
+    pub(crate) okurigana_variant: bool,
 }
 
 /// The stem of a word Kanaemi conjugates.
@@ -133,6 +141,7 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
                 surface: u.surface,
                 stem_reading: stem.as_ref().map(|s| s.reading.clone()),
                 stem_surface: stem.as_ref().map(|s| s.surface.clone()),
+                okurigana_variant: u.okurigana_variant,
                 conjugation: stem.map(|s| s.conjugation),
                 unknown_conjugation: u.unknown_conjugation,
                 numeric: u.numeric,
@@ -371,6 +380,7 @@ fn numeric_unit(before: &[Token], number: &[Token], after: &[Token]) -> Option<L
         stem: None,
         unknown_conjugation: None,
         numeric: Some(numeric),
+        okurigana_variant: false,
     })
 }
 
@@ -387,6 +397,8 @@ fn plain(token: &Token) -> LineUnit {
         stem: None,
         unknown_conjugation: None,
         numeric: None,
+        okurigana_variant: conjugation_of(token).is_some()
+            && is_okurigana_variant(&token.dictionary_form, &token.normalized_form),
     }
 }
 
@@ -419,6 +431,14 @@ fn stem_of(token: &Token, ending: &str, conjugation: &str) -> Option<(Stem, usiz
         conjugation: conjugation.to_owned(),
     };
     Some((stem, okuri.chars().count()))
+}
+
+/// Whether `form` spells the word of `normalized` with the same kanji and
+/// other kana (小い for 小さい, 行なう for 行う), not with other kanji (附く for
+/// 付く) or no kanji at all.
+fn is_okurigana_variant(form: &str, normalized: &str) -> bool {
+    let kanji = |s: &str| s.chars().filter(|c| is_kanji(*c)).collect::<String>();
+    form != normalized && has_kanji(normalized) && kanji(form) == kanji(normalized)
 }
 
 /// Takes in the auxiliaries and the conjunctive て/で that follow, while the
@@ -489,6 +509,7 @@ fn joined(head: &Token, tail: &Token, readings: &UnidicReadings) -> Option<Token
         surface,
         reading,
         dictionary_form: format!("{}{}", head.dictionary_form, tail.dictionary_form),
+        normalized_form: format!("{}{}", head.normalized_form, tail.normalized_form),
         begin: head.begin,
         pos: tail.pos.clone(),
     })
@@ -570,6 +591,7 @@ mod tests {
     fn units_are_read_one_per_line_and_a_bad_line_is_an_error_with_its_number() {
         let unit = Unit {
             compound: false,
+            okurigana_variant: false,
             doc_id: "a:1".into(),
             position: 3,
             reading: "ã¦ãã¿".into(),
@@ -599,18 +621,22 @@ mod tests {
         );
     }
 
-    /// A token from `surface/reading/pos/dictionary_form`, `pos` being the six
-    /// comma-separated fields.
+    /// A token from `surface/reading/pos/dictionary_form[/normalized_form]`,
+    /// `pos` being the six comma-separated fields; the normalized form is the
+    /// dictionary form when not given.
     fn tok(spec: &str, begin: usize) -> Token {
-        let [surface, reading, pos, dictionary_form] = spec.split('/').collect::<Vec<_>>()[..]
-        else {
-            panic!("{spec}");
+        let fields: Vec<&str> = spec.split('/').collect();
+        let (surface, reading, pos, dictionary_form, normalized_form) = match fields[..] {
+            [s, r, p, d] => (s, r, p, d, d),
+            [s, r, p, d, n] => (s, r, p, d, n),
+            _ => panic!("{spec}"),
         };
         Token {
             surface: surface.into(),
             reading: reading.into(),
             pos: pos.split(',').map(str::to_owned).collect(),
             dictionary_form: dictionary_form.into(),
+            normalized_form: normalized_form.into(),
             begin,
         }
     }
@@ -648,6 +674,7 @@ mod tests {
             stem: None,
             unknown_conjugation: None,
             numeric: None,
+            okurigana_variant: false,
         }
     }
 
@@ -680,6 +707,7 @@ mod tests {
                 reading: "よみ".into(),
                 pos: NOUN.split(',').map(str::to_owned).collect(),
                 dictionary_form: c.to_string(),
+                normalized_form: c.to_string(),
                 begin,
             })
             .collect())
@@ -893,6 +921,32 @@ mod tests {
             [
                 conjugated(2, "あさ", "浅", ("あさ", "浅", "形容詞")),
                 conjugated(4, "できた", "出来た", ("でき", "出来", "上一段-カ行")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_word_spelled_with_other_okurigana_than_the_normalized_form_is_marked() {
+        let units = cut(&[
+            "小い/ちいさい/形容詞,一般,*,*,形容詞,終止形-一般/小い/小さい",
+            "行なう/おこなう/動詞,一般,*,*,五段-ワア行,終止形-一般/行なう/行う",
+            "恥しゅう/はずかしゅう/形容詞,一般,*,*,形容詞,連用形-ウ音便/恥しい/恥ずかしい",
+            "書く/かく/動詞,一般,*,*,五段-カ行,終止形-一般/書く/書く",
+            "附く/つく/動詞,一般,*,*,五段-カ行,終止形-一般/附く/付く",
+        ]);
+
+        let marked: Vec<(&str, bool, bool)> = units
+            .iter()
+            .map(|u| (u.surface.as_str(), u.stem.is_some(), u.okurigana_variant))
+            .collect();
+        assert_eq!(
+            marked,
+            [
+                ("小い", true, true),
+                ("行なう", true, true),
+                ("恥しゅう", false, true),
+                ("書く", true, false),
+                ("附く", true, false)
             ]
         );
     }
@@ -1426,6 +1480,7 @@ mod tests {
     fn a_compound_unit_keeps_its_mark_through_a_units_line_and_others_write_none() {
         let mut unit = Unit {
             compound: true,
+            okurigana_variant: false,
             doc_id: "a:1".into(),
             position: 0,
             reading: "ろてんぶろ".into(),

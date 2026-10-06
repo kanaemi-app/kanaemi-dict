@@ -264,6 +264,7 @@ mod tests {
                         .map(str::to_owned)
                         .to_vec(),
                     dictionary_form: c.to_string(),
+                    normalized_form: c.to_string(),
                     begin,
                 })
                 .collect::<Vec<_>>(),

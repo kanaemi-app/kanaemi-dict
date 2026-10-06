@@ -97,6 +97,9 @@ impl Dictionary {
         for unit in units {
             let unit = unit.borrow();
             total += 1;
+            if unit.okurigana_variant {
+                continue;
+            }
             *surfaces.entry(unit.surface.clone()).or_default() += 1;
             if let Some(n) = &unit.numeric {
                 *numeric_counts
@@ -332,6 +335,22 @@ fn is_glossed(surface: &str) -> bool {
     surface.contains(['（', '）', '(', ')'])
 }
 
+/// The dictionary of the words `units` spell with other okurigana than their
+/// normalized form (小い, 行なう), which every other dictionary leaves out,
+/// costing against those units alone.
+pub fn okurigana_dictionary(units: impl IntoIterator<Item = Unit>) -> Dictionary {
+    Dictionary::build(
+        units
+            .into_iter()
+            .filter(|u| u.okurigana_variant)
+            .map(|u| Unit {
+                okurigana_variant: false,
+                ..u
+            }),
+        &[],
+    )
+}
+
 /// Whether `reading` and `surface` can be a word, whichever way it came in: a
 /// piece cut from inside a word, read from a small kana, a moraic nasal or a
 /// long vowel (ッて, ンな, っ放し), is not; nor is text broken by a space, a
@@ -484,6 +503,7 @@ mod tests {
     fn word(reading: &str, surface: &str) -> Unit {
         Unit {
             compound: false,
+            okurigana_variant: false,
             doc_id: "d".into(),
             position: 0,
             reading: reading.into(),
@@ -563,6 +583,41 @@ mod tests {
             find(&dict.okuri, "ひと*つ", "一つ").is_some(),
             "{:?}",
             dict.okuri
+        );
+    }
+
+    #[test]
+    fn a_word_spelled_with_variant_okurigana_makes_no_entry_but_counts_toward_the_total() {
+        let variant = Unit {
+            okurigana_variant: true,
+            ..conj("ちいさい", "小い", ("ちいさ", "小"), "形容詞")
+        };
+        let mut units = repeat(variant, 2);
+        units.extend(repeat(word("てがみ", "手紙"), 2));
+
+        let dict = Dictionary::build(units, &[]);
+
+        assert_eq!(dict.entries, [entry("てがみ", "手紙", None, cost(2, 4))]);
+    }
+
+    #[test]
+    fn the_okurigana_dictionary_holds_the_variant_spellings_alone() {
+        let variant = Unit {
+            okurigana_variant: true,
+            ..conj("ちいさい", "小い", ("ちいさ", "小"), "形容詞")
+        };
+        let mut units = repeat(variant, 2);
+        units.extend(repeat(word("てがみ", "手紙"), 2));
+
+        let mut entries = okurigana_dictionary(units).entries;
+        entries.sort_by(|a, b| a.reading.cmp(&b.reading));
+
+        assert_eq!(
+            entries,
+            [
+                entry("ちいさ", "小", Some("形容詞"), cost(2, 2)),
+                entry("ちいさい", "小い", None, cost(2, 2)),
+            ]
         );
     }
 

@@ -246,6 +246,7 @@ mod tests {
     fn unit(doc_id: &str, position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
             compound: false,
+            okurigana_variant: false,
             doc_id: doc_id.into(),
             position,
             reading: reading.into(),
@@ -322,6 +323,7 @@ mod tests {
         ];
         let compound = Unit {
             compound: true,
+            okurigana_variant: false,
             ..unit("aozora:000004", 0, "ろてんぶろ", "露天風呂")
         };
         let units = [parts[0].clone(), compound, parts[1].clone()];
@@ -568,6 +570,7 @@ mod model_tests {
             source_id: "aozora-text".into(),
             units: vec![Unit {
                 compound: false,
+                okurigana_variant: false,
                 doc_id: "aozora:1".into(),
                 position: 0,
                 reading: "てがみ".into(),

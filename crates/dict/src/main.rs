@@ -17,9 +17,10 @@ use kanaemi_dict::{
     agreement, check_words, counted_reading, counted_words, counter_words, cut_documents,
     dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
     eval_documents, evaluate_documents, examples_of_document, field_dictionary, gather, is_word,
-    model_file, parse_corrections, parse_word_cases, paths_of, place_dictionary, place_names,
-    plain_words, read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file,
-    split_of, take, train, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    model_file, okurigana_dictionary, parse_corrections, parse_word_cases, paths_of,
+    place_dictionary, place_names, plain_words, read_titles, read_units, reading_form, sample_tsv,
+    shared_readings, sources_file, split_of, take, train, word_misses_tsv, word_scores_tsv,
+    write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -40,6 +41,9 @@ const ADDITIONAL: &str = "additional";
 const ADDITIONAL_BUILD: &str = "build/additional";
 /// The additional dictionary built from the postal code data, not from documents.
 const PLACE: &str = "place";
+/// The additional dictionary of the words the base dictionary's documents
+/// spell with other okurigana than the usual, which the base leaves out.
+const OKURIGANA: &str = "okurigana";
 /// The sources every dictionary read with the analyzer has: the analyzer's
 /// dictionary, the dictionary that checks its readings, and the UniDic
 /// lexicon they are checked against and the base takes words from.
@@ -866,6 +870,27 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
                 place_dictionary_of(&format!("{ADDITIONAL_BUILD}/{name}/ken_all.csv"))?,
                 BTreeSet::from([POSTAL_SOURCE.to_owned()]),
             )
+        } else if name == OKURIGANA {
+            let mut sources =
+                document_sources(open(DOCS)?, |_| true).map_err(|source| Error::Documents {
+                    path: DOCS.into(),
+                    source,
+                })?;
+            sources.extend(ANALYZER_SOURCES.map(String::from));
+            let mut failure = None;
+            let dictionary = okurigana_dictionary(read_units(open(UNITS)?).map_while(|unit| {
+                unit.map_err(|source| {
+                    failure = Some(Error::Units {
+                        path: UNITS.into(),
+                        source,
+                    })
+                })
+                .ok()
+            }));
+            if let Some(e) = failure {
+                return Err(e);
+            }
+            (dictionary, sources)
         } else {
             if analyzer.is_none() {
                 analyzer = Some(open_analyzer()?);

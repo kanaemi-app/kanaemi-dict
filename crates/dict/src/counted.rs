@@ -288,6 +288,7 @@ mod tests {
             reading: reading.into(),
             pos: pos.split(',').map(str::to_owned).collect(),
             dictionary_form: surface.into(),
+            normalized_form: surface.into(),
             begin,
         }
     }

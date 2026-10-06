@@ -146,6 +146,7 @@ impl Corrections {
                     let surface: String = run.iter().map(|t| t.surface.as_str()).collect();
                     Token {
                         dictionary_form: surface.clone(),
+                        normalized_form: surface.clone(),
                         surface,
                         reading: reading.to_owned(),
                         pos: JOINED_POS.map(str::to_owned).to_vec(),
@@ -234,6 +235,7 @@ mod tests {
             reading: reading.into(),
             pos: pos.split(',').map(str::to_owned).collect(),
             dictionary_form: surface.into(),
+            normalized_form: surface.into(),
             begin,
         }
     }

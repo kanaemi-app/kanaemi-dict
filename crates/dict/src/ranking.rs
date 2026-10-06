@@ -367,6 +367,7 @@ mod tests {
     fn unit(position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
             compound: false,
+            okurigana_variant: false,
             doc_id: "d".into(),
             position,
             reading: reading.into(),

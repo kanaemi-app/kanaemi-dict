@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use sudachi::analysis::morpheme::Morpheme;
+use sudachi::analysis::morpheme::{Morpheme, MorphemeView};
 use sudachi::analysis::stateless_tokenizer::StatelessTokenizer;
 use sudachi::analysis::{Mode, Tokenize};
 use sudachi::config::Config;
@@ -21,6 +21,10 @@ pub struct Token {
     /// The six part-of-speech fields; the fifth is the conjugation type.
     pub pos: Vec<String>,
     pub dictionary_form: String,
+    /// A conjugating word's dictionary form as Sudachi normalizes its
+    /// spelling (小い to 小さい, 行なう to 行う), when that reads the same;
+    /// else the dictionary form.
+    pub normalized_form: String,
     /// Characters from the start of the analyzed text.
     pub begin: usize,
 }
@@ -186,12 +190,15 @@ fn read(dict: &JapaneseDictionary, text: &str) -> Result<Read, AnalyzerError> {
         }
         Err(e) => return Err(e.into()),
     };
-    let token = |m: &Morpheme<&JapaneseDictionary>| Token {
-        surface: m.surface().to_string(),
-        reading: katakana_to_hiragana(m.reading_form()),
-        pos: m.part_of_speech().to_vec(),
-        dictionary_form: m.dictionary_form().to_owned(),
-        begin: m.begin_c(),
+    let token = |m: &Morpheme<&JapaneseDictionary>| -> Result<Token, SudachiError> {
+        Ok(Token {
+            surface: m.surface().to_string(),
+            reading: katakana_to_hiragana(m.reading_form()),
+            pos: m.part_of_speech().to_vec(),
+            dictionary_form: m.dictionary_form().to_owned(),
+            normalized_form: respelled(m)?,
+            begin: m.begin_c(),
+        })
     };
     let mut out = Read {
         tokens: Vec::new(),
@@ -200,7 +207,7 @@ fn read(dict: &JapaneseDictionary, text: &str) -> Result<Read, AnalyzerError> {
     };
     let mut parts = morphemes.empty_clone();
     for word in morphemes.iter() {
-        let whole = token(&word);
+        let whole = token(&word)?;
         parts.clear();
         if !word.split_into(Mode::B, &mut parts)? || parts.len() < 2 {
             out.tokens.push(whole);
@@ -209,11 +216,29 @@ fn read(dict: &JapaneseDictionary, text: &str) -> Result<Read, AnalyzerError> {
         }
         out.compounds.push(whole);
         for (i, part) in parts.iter().enumerate() {
-            out.tokens.push(token(&part));
+            out.tokens.push(token(&part)?);
             out.inner.push(i > 0);
         }
     }
     Ok(out)
+}
+
+/// The dictionary form of a conjugating word as Sudachi normalizes its
+/// spelling, when the normalized word reads the same (小い as 小さい); else
+/// the dictionary form, as for a word normalized to another word (使える to
+/// 使う, 見れる to 見る) or one that does not conjugate.
+fn respelled(m: &Morpheme<&JapaneseDictionary>) -> Result<String, SudachiError> {
+    if m.part_of_speech().get(4).is_none_or(|t| t == "*") {
+        return Ok(m.dictionary_form().to_owned());
+    }
+    let reads_the_same = m.normalized_form_morpheme()?.reading_form()
+        == m.dictionary_form_morpheme()?.reading_form();
+    let form = if reads_the_same {
+        m.normalized_form()
+    } else {
+        m.dictionary_form()
+    };
+    Ok(form.to_owned())
 }
 
 /// `reading` with its first kana unvoiced (ぶろ → ふろ), when it is voiced.
@@ -430,6 +455,25 @@ mod tests {
         assert_eq!(readings_of(&words.tokens, "風呂"), ["ふろ", "ふろ"]);
         assert_eq!(readings_of(&words.tokens, "会社"), ["かいしゃ"]);
         assert_eq!(readings_of(&words.tokens, "時代"), ["じだい"]);
+    }
+
+    #[test]
+    #[ignore = "needs SudachiDict full and small"]
+    fn a_word_is_respelled_only_as_a_normalized_form_that_reads_the_same() {
+        let tokens = analyzer()
+            .tokens("小い犬を行なう。使える。見れる。")
+            .unwrap();
+        let normalized = |surface: &str| {
+            tokens
+                .iter()
+                .find(|t| t.surface.starts_with(surface))
+                .map(|t| (t.dictionary_form.as_str(), t.normalized_form.as_str()))
+        };
+
+        assert_eq!(normalized("小"), Some(("小い", "小さい")));
+        assert_eq!(normalized("行な"), Some(("行なう", "行う")));
+        assert_eq!(normalized("使え"), Some(("使える", "使える")));
+        assert_eq!(normalized("見れ"), Some(("見れる", "見れる")));
     }
 
     #[test]
