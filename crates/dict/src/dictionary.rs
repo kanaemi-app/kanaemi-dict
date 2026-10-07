@@ -561,6 +561,7 @@ mod tests {
                 reading: item.0.into(),
                 surface: item.1.into(),
                 value: item.2.into(),
+                kana: String::new(),
             }),
             ..word(reading, surface)
         }

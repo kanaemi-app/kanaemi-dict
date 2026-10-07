@@ -485,6 +485,7 @@ mod tests {
             reading: "{}ぽん".into(),
             surface: "{kanji}本".into(),
             value: "3".into(),
+            kana: String::new(),
         });
         let units = [three, unit("てがみ", "手紙", None)];
 

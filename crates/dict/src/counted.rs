@@ -183,11 +183,11 @@ fn base_reading_of(known: &[String], read: &str) -> String {
     }
 }
 
-/// The reading of numerals read `numeral` that write no number (なん, すうじゅう)
-/// and the counter `surface` after them, read `read` by the analyzer: the
-/// counter from its UniDic counter reading, changed as after 三 when the
-/// numerals end in ん, after 十 when in じゅう and after 六 when in ひゃく,
-/// びゃく or ぴゃく.
+/// The reading of numerals read `numeral` (なん, にじゅういち) and the counter
+/// `surface` after them, read `read` by the analyzer: the counter from its
+/// UniDic counter reading, changed as after 三 when the numerals end in ん,
+/// after 十 when in じゅう, after 六 when in ひゃく, びゃく or ぴゃく, and
+/// after 一, 六 or 八 when in いち, ろく or はち.
 pub(crate) fn reading_counted_after(
     numeral: &str,
     surface: &str,
@@ -201,6 +201,9 @@ pub(crate) fn reading_counted_after(
         ("ひゃく", "ろく"),
         ("びゃく", "ろく"),
         ("ぴゃく", "ろく"),
+        ("いち", "いち"),
+        ("ろく", "ろく"),
+        ("はち", "はち"),
     ] {
         let Some(head) = numeral.strip_suffix(ending) else {
             continue;
@@ -365,6 +368,25 @@ mod tests {
         assert_eq!(
             reading_counted_after("さんぴゃく", "匹", "ひき", &unidic),
             "さんぴゃっぴき"
+        );
+    }
+
+    #[test]
+    fn a_counter_after_numerals_ending_in_ichi_roku_or_hachi_changes_as_after_them() {
+        let unidic = as_counters(&[("ほん", "本"), ("はつ", "発"), ("こ", "個")]);
+
+        assert_eq!(
+            reading_counted_after("いち", "発", "はつ", &unidic),
+            "いっぱつ"
+        );
+        assert_eq!(
+            reading_counted_after("にじゅういち", "本", "ぽん", &unidic),
+            "にじゅういっぽん"
+        );
+        assert_eq!(reading_counted_after("ろく", "個", "こ", &unidic), "ろっこ");
+        assert_eq!(
+            reading_counted_after("さんじゅうはち", "本", "ぽん", &unidic),
+            "さんじゅうはっぽん"
         );
     }
 

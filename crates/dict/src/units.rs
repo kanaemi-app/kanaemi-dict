@@ -51,6 +51,10 @@ pub struct Numeric {
     pub surface: String,
     /// The number as the ASCII digits typed for it: `3` for 三.
     pub value: String,
+    /// The unit read in kana, the counter changed by the number before it:
+    /// `いっぱつ` for 一発. A word chain reads its numeric part so.
+    #[serde(default)]
+    pub kana: String,
 }
 
 /// A line of `build/units.jsonl` that could not be read as a unit.
@@ -373,6 +377,7 @@ fn cut_numeric(tokens: &[Token], readings: &UnidicReadings) -> (Option<LineUnit>
         &tokens[..number_start],
         &tokens[number_start..after],
         &suffixes,
+        readings,
     );
     (unit, taken)
 }
@@ -433,7 +438,12 @@ pub(crate) fn reading_after_number(i: usize, token: &Token) -> &str {
     }
 }
 
-fn numeric_unit(before: &[Token], number: &[Token], after: &[Token]) -> Option<LineUnit> {
+fn numeric_unit(
+    before: &[Token],
+    number: &[Token],
+    after: &[Token],
+    readings: &UnidicReadings,
+) -> Option<LineUnit> {
     let surface = |ts: &[Token]| ts.iter().map(|t| t.surface.as_str()).collect::<String>();
     let kana = |ts: &[Token]| {
         let reading: String = ts.iter().map(|t| t.reading.as_str()).collect();
@@ -446,10 +456,19 @@ fn numeric_unit(before: &[Token], number: &[Token], after: &[Token]) -> Option<L
     // typed for them, which needs no converting.
     let typed_back =
         notation == Notation::Plain && surface_before == kana_before && surface_after == kana_after;
+    let read_out = {
+        let number_kana: String = number.iter().map(|t| t.reading.as_str()).collect();
+        let (counter, suffixes) = after.split_first()?;
+        let counted =
+            reading_counted_after(&number_kana, &counter.surface, &counter.reading, readings);
+        let suffixes: String = suffixes.iter().map(|t| t.reading.as_str()).collect();
+        format!("{kana_before}{counted}{suffixes}")
+    };
     let numeric = Numeric {
         reading: format!("{kana_before}{{}}{kana_after}"),
         surface: format!("{surface_before}{}{surface_after}", notation.placeholder()),
         value,
+        kana: read_out,
     };
     (!typed_back).then(|| LineUnit {
         begin: before.first().unwrap_or(&number[0]).begin,
@@ -682,6 +701,7 @@ mod tests {
                 reading: "{}ぽん".into(),
                 surface: "{kanji}本".into(),
                 value: "3".into(),
+                kana: "さんぼん".into(),
             }),
         };
         let text = format!(
@@ -1089,7 +1109,12 @@ mod tests {
                 &format!("3/さん/{NUMERAL}/3"),
                 &format!("ヶ/か/{COUNTER_SUFFIX}/ヶ"),
             ]),
-            [numeric(0, "3か", "3ヶ", ("{}か", "{half-num}ヶ", "3"))]
+            [numeric(
+                0,
+                "3か",
+                "3ヶ",
+                ("{}か", "{half-num}ヶ", "3", "さんか")
+            )]
         );
     }
 
@@ -1188,12 +1213,18 @@ mod tests {
         );
     }
 
-    fn numeric(begin: usize, typed: &str, surface: &str, item: (&str, &str, &str)) -> LineUnit {
+    fn numeric(
+        begin: usize,
+        typed: &str,
+        surface: &str,
+        item: (&str, &str, &str, &str),
+    ) -> LineUnit {
         LineUnit {
             numeric: Some(Numeric {
                 reading: item.0.into(),
                 surface: item.1.into(),
                 value: item.2.into(),
+                kana: item.3.into(),
             }),
             ..plain(begin, typed, surface)
         }
@@ -1211,8 +1242,39 @@ mod tests {
                 &format!("3/さん/{NUMERAL}/3"),
                 &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
             ]),
-            [numeric(0, "3ぽん", "3本", ("{}ぽん", "{half-num}本", "3"))]
+            [numeric(
+                0,
+                "3ぽん",
+                "3本",
+                ("{}ぽん", "{half-num}本", "3", "さんぽん")
+            )]
         );
+    }
+
+    #[test]
+    fn a_numeric_unit_carries_its_kana_with_the_counter_s_sound_change() {
+        let counters = UnidicReadings::default().with_counters(
+            [("はつ", "発"), ("ほん", "本")].map(|(reading, surface)| UnidicWord {
+                reading: reading.into(),
+                surface: surface.into(),
+            }),
+        );
+        let units = cut_line(
+            &line(&[
+                &format!("一/いち/{NUMERAL}/一"),
+                &format!("発/はつ/{COUNTER_SUFFIX}/発"),
+                &format!("の/の/{PARTICLE}/の"),
+                &format!("三/さん/{NUMERAL}/三"),
+                &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
+            ]),
+            &counters,
+        );
+
+        let kana: Vec<&str> = units
+            .iter()
+            .map(|u| u.numeric.as_ref().unwrap().kana.as_str())
+            .collect();
+        assert_eq!(kana, ["いっぱつ", "さんぼん"]);
     }
 
     #[test]
@@ -1227,9 +1289,19 @@ mod tests {
                 &format!("日/か/{COUNTER_SUFFIX}/日"),
             ]),
             [
-                numeric(0, "2026ねん", "2026年", ("{}ねん", "{half-num}年", "2026")),
-                numeric(5, "10がつ", "10月", ("{}がつ", "{half-num}月", "10")),
-                numeric(8, "5か", "5日", ("{}か", "{half-num}日", "5")),
+                numeric(
+                    0,
+                    "2026ねん",
+                    "2026年",
+                    ("{}ねん", "{half-num}年", "2026", "にせんにじゅうろくねん")
+                ),
+                numeric(
+                    5,
+                    "10がつ",
+                    "10月",
+                    ("{}がつ", "{half-num}月", "10", "じゅうがつ")
+                ),
+                numeric(8, "5か", "5日", ("{}か", "{half-num}日", "5", "ごか")),
             ]
         );
     }
@@ -1251,9 +1323,14 @@ mod tests {
                     0,
                     "だい3かい",
                     "第3回",
-                    ("だい{}かい", "第{half-num}回", "3")
+                    ("だい{}かい", "第{half-num}回", "3", "だいさんかい")
                 ),
-                numeric(4, "3さつめ", "3冊目", ("{}さつめ", "{half-num}冊目", "3")),
+                numeric(
+                    4,
+                    "3さつめ",
+                    "3冊目",
+                    ("{}さつめ", "{half-num}冊目", "3", "さんさつめ")
+                ),
             ]
         );
     }
@@ -1275,9 +1352,9 @@ mod tests {
                     0,
                     "3さいくらい",
                     "3歳位",
-                    ("{}さいくらい", "{half-num}歳位", "3")
+                    ("{}さいくらい", "{half-num}歳位", "3", "さんさいくらい")
                 ),
-                numeric(4, "3い", "3位", ("{}い", "{half-num}位", "3")),
+                numeric(4, "3い", "3位", ("{}い", "{half-num}位", "3", "さんい")),
             ]
         );
     }
@@ -1328,7 +1405,7 @@ mod tests {
                 0,
                 "26さい",
                 "二十六歳",
-                ("{}さい", "{kanji}歳", "26")
+                ("{}さい", "{kanji}歳", "26", "にじゅうろくさい")
             )]
         );
     }
@@ -1518,7 +1595,12 @@ mod tests {
                 &format!("三/さん/{NUMERAL}/三"),
                 &format!("つ/つ/{COUNTER_SUFFIX}/つ"),
             ]),
-            [numeric(2, "3つ", "三つ", ("{}つ", "{kanji}つ", "3"))]
+            [numeric(
+                2,
+                "3つ",
+                "三つ",
+                ("{}つ", "{kanji}つ", "3", "さんつ")
+            )]
         );
     }
 
@@ -1539,6 +1621,7 @@ mod tests {
                 reading: "{}ぽん".into(),
                 surface: "{half-num}本".into(),
                 value: "3".into(),
+                kana: "さんぽん".into(),
             })
         );
     }

@@ -70,10 +70,15 @@ impl<'a> ChainCounter<'a> {
             self.flush();
             self.doc_id.clone_from(&unit.doc_id);
         }
+        // A numeric unit reads its number in digits; its kana reads it out.
+        let reading = match &unit.numeric {
+            Some(numeric) => numeric.kana.clone(),
+            None => unit.reading.clone(),
+        };
         let piece = Piece {
             position: unit.position,
             surface: unit.surface.clone(),
-            reading: unit.reading.clone(),
+            reading,
             numeric: unit.numeric.is_some(),
         };
         if unit.compound {
@@ -121,11 +126,14 @@ impl<'a> ChainCounter<'a> {
     }
 
     /// Counts every two and three units in a row of `run` that the names
-    /// hold, leaving out those with a number.
+    /// hold, leaving out those that end in a numeric unit (一月一日, 平成十年),
+    /// which numeric items count, and those with a unit not read in kana.
     fn count_run(&mut self, run: &[&Piece]) {
         for len in 2..=3 {
             for window in run.windows(len) {
-                if window.iter().any(|u| u.numeric) {
+                if window.last().is_some_and(|u| u.numeric)
+                    || window.iter().any(|u| u.reading.is_empty())
+                {
                     continue;
                 }
                 let surface: String = window.iter().map(|u| u.surface.as_str()).collect();
@@ -554,8 +562,8 @@ mod tests {
     }
 
     #[test]
-    fn kana_a_gap_or_a_number_breaks_a_chain() {
-        let names = names(&["多種多様", "第二多様"]);
+    fn kana_or_a_gap_breaks_a_chain() {
+        let names = names(&["多種多様"]);
         let mut units = Vec::new();
         for i in 0..5 {
             let doc = format!("d{i}");
@@ -566,18 +574,57 @@ mod tests {
             // 多種 多様: a gap.
             units.push(unit(&doc, 10, "たしゅ", "多種"));
             units.push(unit(&doc, 13, "たよう", "多様"));
-            // 第二多様: a number.
-            units.push(Unit {
-                numeric: Some(Numeric {
-                    reading: "だい{}".into(),
-                    surface: "第{kanji}".into(),
-                    value: "2".into(),
-                }),
-                ..unit(&doc, 20, "だいに", "第二")
-            });
-            units.push(unit(&doc, 22, "たよう", "多様"));
         }
-        let text = [apart("多種多様", 8), apart("第二多様", 8)].concat();
+        let text = apart("多種多様", 8);
+
+        assert!(titles(&count(&names, &units), &[text]).is_empty());
+    }
+
+    fn numeric(doc_id: &str, position: usize, surface: &str, item: (&str, &str, &str)) -> Unit {
+        let (reading, value, kana) = item;
+        Unit {
+            numeric: Some(Numeric {
+                reading: reading.into(),
+                surface: format!(
+                    "{{kanji}}{}",
+                    &surface[surface.char_indices().nth(1).unwrap().0..]
+                ),
+                value: value.into(),
+                kana: kana.into(),
+            }),
+            ..unit(doc_id, position, &reading.replace("{}", value), surface)
+        }
+    }
+
+    #[test]
+    fn a_numeric_unit_and_a_word_after_it_chain_read_by_the_unit_s_kana() {
+        let names = names(&["二次会"]);
+        let mut units = Vec::new();
+        for i in 0..5 {
+            let doc = format!("d{i}");
+            units.push(numeric(&doc, 0, "二次", ("{}じ", "2", "にじ")));
+            units.push(unit(&doc, 2, "かい", "会"));
+        }
+        let text = apart("二次会", 8);
+
+        assert_eq!(
+            titles(&count(&names, &units), &[text]),
+            [("にじかい".to_owned(), "二次会".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_chain_that_ends_in_a_numeric_unit_is_not_taken() {
+        let names = names(&["一月一日", "平成十年"]);
+        let mut units = Vec::new();
+        for i in 0..5 {
+            let doc = format!("d{i}");
+            units.push(numeric(&doc, 0, "一月", ("{}がつ", "1", "いちがつ")));
+            units.push(numeric(&doc, 2, "一日", ("{}にち", "1", "いちにち")));
+            units.push(unit(&doc, 10, "へいせい", "平成"));
+            units.push(numeric(&doc, 12, "十年", ("{}ねん", "10", "じゅうねん")));
+        }
+        let text = [apart("一月一日", 8), apart("平成十年", 8)].concat();
 
         assert!(titles(&count(&names, &units), &[text]).is_empty());
     }

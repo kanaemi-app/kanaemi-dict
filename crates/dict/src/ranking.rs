@@ -436,6 +436,7 @@ mod tests {
                 reading: "{}ほん".into(),
                 surface: "{}本".into(),
                 value: "3".into(),
+                kana: String::new(),
             }),
             ..unit(0, "3ほん", "3本")
         };
