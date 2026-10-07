@@ -1,6 +1,7 @@
 //! Conversion units: the pieces of text Kanaemi converts in one go, cut from
 //! Sudachi's morphemes.
 
+use std::collections::HashSet;
 use std::io::{self, BufRead};
 
 use kanaemi_engine::{MAX_SUFFIX_KANA, terminal_ending};
@@ -129,11 +130,12 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
                 .compounds
                 .extend(piece_words.compounds.into_iter().map(shift));
         }
-        let units = cut_line(&words.tokens, readings);
+        let (units, joined) = cut_line(&words.tokens, readings);
         let compounds = compound_units(&words, &units, readings);
         let mut line_units: Vec<(LineUnit, bool)> = units
             .into_iter()
             .map(|u| (u, false))
+            .chain(joined.into_iter().map(|u| (u, true)))
             .chain(compounds.into_iter().map(|u| (u, true)))
             .collect();
         line_units.sort_by_key(|(u, _)| u.begin);
@@ -236,28 +238,46 @@ const PREFIX_HEADS: [&str; 2] = ["名詞", "形状詞"];
 /// the token carries Kanaemi's types.
 const OUTSIDE_TABLE: &str = "(outside the table)";
 
-/// Cuts one line's tokens into units.
-pub(crate) fn cut_line(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
+/// Cuts one line's tokens into units, and the words auxiliary verbs and
+/// suffixes make with the word before them beside the units (see
+/// [`cut_words`]).
+fn cut_line(tokens: &[Token], readings: &UnidicReadings) -> (Vec<LineUnit>, Vec<LineUnit>) {
     let renamed: Vec<Token> = tokens
         .iter()
         .map(|t| with_kanaemi_type(&read_as_written(t)))
         .collect();
-    let mut units = Vec::new();
+    let (mut units, mut joined) = (Vec::new(), Vec::new());
+    let mut words = |tokens: &[Token], units: &mut Vec<LineUnit>| {
+        let (u, j) = cut_words(tokens, readings);
+        units.extend(u);
+        joined.extend(j);
+    };
     let mut rest = renamed.as_slice();
     while let Some(n) = rest.iter().position(is_numeral) {
         let start = n - usize::from(n > 0 && rest[n - 1].pos[0] == "接頭辞");
-        units.extend(cut_words(&rest[..start], readings));
+        words(&rest[..start], &mut units);
         let (unit, taken) = cut_numeric(&rest[start..], readings);
         units.extend(unit);
         rest = &rest[start + taken..];
     }
-    units.extend(cut_words(rest, readings));
-    units
+    words(rest, &mut units);
+    (units, joined)
 }
 
-/// Cuts tokens holding no numeral into units.
-fn cut_words(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
+/// Cuts tokens holding no numeral into units, and the words their auxiliary
+/// verbs and suffixes make with the word before (多すぎる), which overlap the
+/// units they join.
+fn cut_words(tokens: &[Token], readings: &UnidicReadings) -> (Vec<LineUnit>, Vec<LineUnit>) {
     let tokens = join_affixes(tokens, readings);
+    let (joined_tokens, joined_at) = join_auxiliaries(tokens.clone());
+    let joined = units_of(&joined_tokens, readings)
+        .into_iter()
+        .filter(|u| joined_at.contains(&u.begin))
+        .collect();
+    (units_of(&tokens, readings), joined)
+}
+
+fn units_of(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
     let mut units = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -646,6 +666,76 @@ fn takes_suffix(token: &Token) -> bool {
         || (token.pos[0] == "接尾辞" && token.pos[1] == "名詞的")
 }
 
+/// Joins a verb that does not stand alone (すぎる, 始める) or an adjectival or
+/// verbal suffix (やすい, がる) to the verb's conjunctive form, the
+/// adjective's stem or the adjectival noun right before it, as one word that
+/// conjugates as the one joined does: 多すぎる, 読みやすい, 書き始める.
+/// Returns the tokens and where the joined ones begin.
+fn join_auxiliaries(tokens: Vec<Token>) -> (Vec<Token>, HashSet<usize>) {
+    let mut out: Vec<Token> = Vec::new();
+    let mut joined = HashSet::new();
+    for token in tokens {
+        // お, ご or 御 before the verb, which the analyzer may read as a filler,
+        // makes a polite phrase (お願いします, お待ち
+        // ください), no word.
+        let honorific = out.len() >= 2 && {
+            let (before, head) = (&out[out.len() - 2], &out[out.len() - 1]);
+            matches!(before.surface.as_str(), "お" | "ご" | "御")
+                && before.begin + before.surface.chars().count() == head.begin
+        };
+        if is_auxiliary(&token)
+            && !honorific
+            && let Some(head) = out.last_mut().filter(|head| {
+                takes_auxiliary(head) && head.begin + head.surface.chars().count() == token.begin
+            })
+        {
+            let dictionary_form = format!("{}{}", head.surface, token.dictionary_form);
+            *head = Token {
+                surface: format!("{}{}", head.surface, token.surface),
+                reading: format!("{}{}", head.reading, token.reading),
+                normalized_form: dictionary_form.clone(),
+                dictionary_form,
+                begin: head.begin,
+                pos: token.pos,
+            };
+            joined.insert(head.begin);
+            continue;
+        }
+        out.push(token);
+    }
+    (out, joined)
+}
+
+fn takes_auxiliary(token: &Token) -> bool {
+    let form = token.pos.get(5).map_or("", String::as_str);
+    (token.pos[0] == "動詞" && form.starts_with("連用形"))
+        || (token.pos[0] == "形容詞" && form.starts_with("語幹"))
+        || (token.pos[0] == "形状詞" && token.pos[1] == "一般")
+}
+
+fn is_auxiliary(token: &Token) -> bool {
+    (token.pos[0] == "動詞"
+        && token.pos[1] == "非自立可能"
+        && !POLITE_VERBS.contains(&token.dictionary_form.as_str()))
+        || (token.pos[0] == "接尾辞" && matches!(token.pos[1].as_str(), "形容詞的" | "動詞的"))
+}
+
+/// The verbs that make the polite phrases お…する, お…いたす, お…ください and
+/// お…いただく after a verb's conjunctive form, with or without the お
+/// (ご注意願います): the verb and they make no word.
+const POLITE_VERBS: [&str; 10] = [
+    "する",
+    "いたす",
+    "致す",
+    "くださる",
+    "下さる",
+    "いただく",
+    "頂く",
+    "戴く",
+    "いただける",
+    "頂ける",
+];
+
 fn conjugation_of(token: &Token) -> Option<&str> {
     token.pos.get(4).map(String::as_str).filter(|t| *t != "*")
 }
@@ -756,7 +846,12 @@ mod tests {
     }
 
     fn cut(specs: &[&str]) -> Vec<LineUnit> {
-        cut_line(&line(specs), &UnidicReadings::default())
+        cut_line(&line(specs), &UnidicReadings::default()).0
+    }
+
+    /// The words auxiliary verbs and suffixes make in the line of `specs`.
+    fn joined(specs: &[&str]) -> Vec<LineUnit> {
+        cut_line(&line(specs), &UnidicReadings::default()).1
     }
 
     /// Cuts with UniDic giving `known` as (reading, surface) pairs.
@@ -765,7 +860,7 @@ mod tests {
             reading: (*reading).into(),
             surface: (*surface).into(),
         }));
-        cut_line(&line(specs), &readings)
+        cut_line(&line(specs), &readings).0
     }
 
     fn plain(begin: usize, reading: &str, surface: &str) -> LineUnit {
@@ -1203,6 +1298,85 @@ mod tests {
         );
     }
 
+    const ADJECTIVE_STEM: &str = "形容詞,一般,*,*,形容詞,語幹-一般";
+    const SUGIRU: &str = "動詞,非自立可能,*,*,上一段-ガ行";
+
+    #[test]
+    fn the_units_an_auxiliary_verb_joins_stay_units() {
+        assert_eq!(
+            cut(&[
+                &format!("多/おお/{ADJECTIVE_STEM}/多い"),
+                &format!("すぎる/すぎる/{SUGIRU},終止形-一般/すぎる"),
+            ]),
+            [conjugated(0, "おお", "多", ("おお", "多", "形容詞"))]
+        );
+    }
+
+    #[test]
+    fn an_auxiliary_verb_after_an_adjective_stem_makes_one_conjugating_word() {
+        assert_eq!(
+            joined(&[
+                &format!("多/おお/{ADJECTIVE_STEM}/多い"),
+                &format!("すぎる/すぎる/{SUGIRU},終止形-一般/すぎる"),
+            ]),
+            [conjugated(
+                0,
+                "おおすぎる",
+                "多すぎる",
+                ("おおすぎ", "多すぎ", "上一段-ガ行")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_joined_auxiliary_verb_takes_in_the_auxiliaries_after_it() {
+        assert_eq!(
+            joined(&[
+                &format!("高/たか/{ADJECTIVE_STEM}/高い"),
+                &format!("すぎ/すぎ/{SUGIRU},連用形-一般/すぎる"),
+                "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
+            ]),
+            [conjugated(
+                0,
+                "たかすぎた",
+                "高すぎた",
+                ("たかすぎ", "高すぎ", "上一段-ガ行")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_suffix_after_a_verb_s_conjunctive_form_makes_one_conjugating_word() {
+        assert_eq!(
+            joined(&[
+                "読み/よみ/動詞,一般,*,*,五段-マ行,連用形-一般/読む",
+                "やすい/やすい/接尾辞,形容詞的,*,*,形容詞,連体形-一般/やすい",
+            ]),
+            [conjugated(
+                0,
+                "よみやすい",
+                "読みやすい",
+                ("よみやす", "読みやす", "形容詞")
+            )]
+        );
+    }
+
+    #[test]
+    fn an_auxiliary_verb_after_an_adjectival_noun_makes_one_conjugating_word() {
+        assert_eq!(
+            joined(&[
+                "静か/しずか/形状詞,一般,*,*,*,*/静か",
+                &format!("すぎる/すぎる/{SUGIRU},終止形-一般/すぎる"),
+            ]),
+            [conjugated(
+                0,
+                "しずかすぎる",
+                "静かすぎる",
+                ("しずかすぎ", "静かすぎ", "上一段-ガ行")
+            )]
+        );
+    }
+
     #[test]
     fn a_conjunctive_form_whose_stem_ends_in_kana_makes_its_stem() {
         assert_eq!(
@@ -1216,6 +1390,69 @@ mod tests {
                 "考えた",
                 ("かんがえ", "考え", "下一段-ア行")
             )]
+        );
+    }
+
+    #[test]
+    fn an_auxiliary_verb_after_an_honorific_prefix_and_a_verb_stays_apart() {
+        assert_eq!(
+            joined(&[
+                &format!("お/お/{PREFIX}/お"),
+                "願い/ねがい/動詞,一般,*,*,五段-ア行,連用形-一般/願う",
+                "し/し/動詞,非自立可能,*,*,サ行変格,連用形-一般/する",
+                "ます/ます/助動詞,*,*,*,助動詞-マス,終止形-一般/ます",
+            ]),
+            []
+        );
+        // The analyzer reads お as a filler at times.
+        assert_eq!(
+            joined(&[
+                "お/お/感動詞,フィラー,*,*,*,*/お",
+                "選び/えらび/動詞,一般,*,*,五段-バ行,連用形-一般/選ぶ",
+                "ください/ください/動詞,非自立可能,*,*,五段-ラ行,命令形/くださる",
+            ]),
+            []
+        );
+    }
+
+    #[test]
+    fn a_verb_that_makes_a_polite_phrase_stays_apart_even_without_o() {
+        assert_eq!(
+            joined(&[
+                "出し/だし/動詞,一般,*,*,五段-サ行,連用形-一般/出す",
+                "し/し/動詞,非自立可能,*,*,サ行変格,連用形-一般/する",
+                "て/て/助詞,接続助詞,*,*,*,*/て",
+                "付け/つけ/動詞,一般,*,*,下一段-カ行,連用形-一般/付ける",
+                "ください/ください/動詞,非自立可能,*,*,五段-ラ行,命令形/くださる",
+                "致し/いたし/動詞,非自立可能,*,*,五段-サ行,連用形-一般/致す",
+                "ます/ます/助動詞,*,*,*,助動詞-マス,終止形-一般/ます",
+                "書き込み/かきこみ/動詞,一般,*,*,五段-マ行,連用形-一般/書き込む",
+                "いただけ/いただけ/動詞,非自立可能,*,*,下一段-カ行,未然形-一般/いただける",
+            ]),
+            []
+        );
+    }
+
+    #[test]
+    fn nasai_after_a_verb_makes_one_word() {
+        assert_eq!(
+            joined(&[
+                "書き/かき/動詞,一般,*,*,五段-カ行,連用形-一般/書く",
+                "なさい/なさい/動詞,非自立可能,*,*,五段-ラ行,命令形/なさる",
+            ])
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_auxiliary_verb_after_a_noun_stays_apart() {
+        assert_eq!(
+            joined(&[
+                &format!("時間/じかん/{NOUN}/時間"),
+                &format!("すぎ/すぎ/{SUGIRU},連用形-一般/すぎる"),
+            ]),
+            []
         );
     }
 
@@ -1288,7 +1525,8 @@ mod tests {
                 &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
             ]),
             &counters,
-        );
+        )
+        .0;
 
         let kana: Vec<&str> = units
             .iter()
@@ -1562,7 +1800,8 @@ mod tests {
                     &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
                 ]),
                 &counters
-            ),
+            )
+            .0,
             [plain(0, "なんびき", "何匹"), plain(3, "すうほん", "数本")]
         );
     }
