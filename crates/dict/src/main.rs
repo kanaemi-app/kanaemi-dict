@@ -19,12 +19,12 @@ use kanaemi_dict::{
     document_sources, document_texts, each_document_with_units, engine, eval_documents,
     evaluate_documents, examples_of_document, excluded_readings, field_dictionary, gather, is_word,
     kanji_entries, listed_dictionary, mismatches_tsv, model_file, mozc_emoji, mozc_emoticons,
-    mozc_readings, mozc_symbols, name_readings, okurigana_dictionary, parse_corrections,
-    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
-    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
-    shared_readings, sources_file, split_of, take, title_entries, train, unihan_readings,
-    wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv,
-    write_atomically, year_dictionary,
+    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
+    parse_corrections, parse_word_cases, paths_of, person_dictionary, place_dictionary,
+    place_names, plain_words, read_names, read_title_entries, read_titles, read_units,
+    reading_form, sample_tsv, shared_readings, sources_file, split_of, take, title_entries, train,
+    unihan_readings, wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv,
+    word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -445,6 +445,9 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             })?
         };
         dictionary.add_words(counted);
+        let nihon = nihon_readings(&dictionary.entries);
+        println!("nihon: {}", nihon.len());
+        dictionary.add_words(nihon);
         let (kanji, took_unihan) = {
             let excluded =
                 excluded_readings(&read_to_string(KANJI_EXCLUDED)?).map_err(|source| {
@@ -1088,7 +1091,10 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             if analyzer.is_none() {
                 analyzer = Some(open_analyzer()?);
             }
-            sourced_dictionary(&name, &base, analyzer.as_ref().unwrap())?
+            let (mut dictionary, sources) =
+                sourced_dictionary(&name, &base, analyzer.as_ref().unwrap())?;
+            dictionary.add_words(nihon_readings(&dictionary.entries));
+            (dictionary, sources)
         };
         // Symbols and emoticons are not words, and may hold spaces or end in 〜.
         dictionary.drop_words(|reading, surface| {

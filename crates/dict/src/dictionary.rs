@@ -3,7 +3,7 @@
 
 use std::borrow::Borrow;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use kanaemi_engine::{InvalidLine, ItemLine, TextDictionary, mark_placeholders, may_follow_stem};
 
@@ -378,6 +378,32 @@ fn is_cut_short(reading: &str, surface: &str) -> bool {
     reading.ends_with('っ') && surface.chars().any(is_kanji)
 }
 
+/// The にほん readings of the words of `entries` that read their 日本 only as
+/// にっぽん, at the cost of that reading. The analyzer reads 日本 inside a
+/// longer word as にっぽん most of the time (日本時間 にっぽんじかん), though
+/// many such words are typed with にほん; names that are にっぽん by right
+/// (日本銀行) keep that reading too.
+pub fn nihon_readings(entries: &[Entry]) -> Vec<Entry> {
+    let nihon: HashSet<&str> = entries
+        .iter()
+        .filter(|e| e.conjugation.is_none() && e.reading.contains("にほん"))
+        .map(|e| e.surface.as_str())
+        .collect();
+    entries
+        .iter()
+        .filter(|e| {
+            e.conjugation.is_none()
+                && !nihon.contains(e.surface.as_str())
+                && e.reading.contains("にっぽん")
+                && e.reading.matches("にっぽん").count() <= e.surface.matches("日本").count()
+        })
+        .map(|e| Entry {
+            reading: e.reading.replace("にっぽん", "にほん"),
+            ..e.clone()
+        })
+        .collect()
+}
+
 /// The okurigana lines of `entries`, each at the cheapest cost of the
 /// entries it follows from.
 pub(crate) fn okuri_lines(entries: &[Entry]) -> Vec<Entry> {
@@ -501,6 +527,37 @@ mod tests {
 
     use super::*;
     use crate::Numeric;
+
+    #[test]
+    fn a_word_of_nippon_alone_is_also_read_with_nihon_at_its_cost() {
+        let entry = |reading, surface, cost| entry(reading, surface, None, cost);
+        let entries = [
+            entry("にっぽんじかん", "日本時間", 1078),
+            entry("にっぽんぎんこう", "日本銀行", 1217),
+            entry("にっぽんし", "日本史", 1230),
+            entry("にほんし", "日本史", 1500),
+            entry("にっぽん", "日本", 626),
+            entry("にほん", "日本", 600),
+            entry("にっぽんにっぽん", "日本人", 3000),
+            entry("にっぽん", "ニッポン", 900),
+        ];
+
+        let nihon = nihon_readings(&entries);
+
+        let lines: Vec<(&str, &str, u32)> = nihon
+            .iter()
+            .map(|e| (e.reading.as_str(), e.surface.as_str(), e.cost))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("にほんじかん", "日本時間", 1078),
+                ("にほんぎんこう", "日本銀行", 1217),
+            ],
+            "日本史 and 日本 read にほん already, ニッポン has no 日本, \
+             and にっぽんにっぽん 日本人 reads にっぽん more often than it holds 日本"
+        );
+    }
 
     fn word(reading: &str, surface: &str) -> Unit {
         Unit {
