@@ -89,9 +89,10 @@ dist:
     cargo run --release -p kanaemi-dict -- dist
 
 # Convert the word set evaluation/words.tsv with the base dictionary and model of dictionaries/, without and with the model,
-# into build/check-words.tsv and the words that did not come first into build/check-words-misses.tsv.
-check-words:
-    cargo run --release -p kanaemi-dict -- check-words
+# into build/check-words.tsv and the words that did not come first into build/check-words-misses.tsv;
+# `--build` converts build/dictionaries/base.tsv instead, without a model.
+check-words *flags:
+    cargo run --release -p kanaemi-dict -- check-words {{flags}}
 
 # Sample the items of dictionaries/ by stratum into build/check-sample.tsv for people to judge.
 check-sample:

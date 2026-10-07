@@ -14,7 +14,7 @@ use kanaemi_dict::{
     CorrectionsError, CutError, Dictionary, DistError, DocumentsError, EvalDocument,
     EvalDocumentsError, Evaluation, ExampleFile, Examples, ReadingsError, RejectedLines, Split,
     TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
-    WordCasesError, WordResult, WriteError, agreement, check_words, counted_reading,
+    WordCase, WordCasesError, WordResult, WriteError, agreement, check_words, counted_reading,
     counted_words, counter_words, cut_documents, dictionary_lines, document_sources,
     document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
     examples_of_document, field_dictionary, gather, is_word, model_file, okurigana_dictionary,
@@ -154,6 +154,8 @@ usage: kanaemi-dict units
          of dictionaries/, without and with its model, and write the scores
          per category to build/check-words.tsv and the words whose right
          surface did not come first to build/check-words-misses.tsv
+       kanaemi-dict check-words --build
+         the same with build/dictionaries/base.tsv, without a model
        kanaemi-dict check-sample
          sample the items of the dictionaries of dictionaries/ by stratum
          into build/check-sample.tsv for people to judge
@@ -237,6 +239,7 @@ fn main() -> ExitCode {
         ["take"] => take_built(),
         ["dist"] => build_dist(),
         ["check-words"] => check_kept_words(),
+        ["check-words", "--build"] => check_built_words(),
         ["check-sample"] => sample_kept(),
         ["check-readings"] => check_kept_readings(),
         _ => {
@@ -677,10 +680,7 @@ fn take_built() -> Result<(), Error> {
 /// Converts the word set with the base dictionary that ships, without and
 /// with its model.
 fn check_kept_words() -> Result<(), Error> {
-    let cases = parse_word_cases(read_to_string(WORDS)?).map_err(|source| Error::WordCases {
-        path: WORDS.into(),
-        source,
-    })?;
+    let cases = word_cases()?;
     let dictionary = parsed_dictionary(&format!("{KEPT}/base.tsv"))?;
     let model = RankingModel::open(KEPT_MODEL).map_err(|source| Error::Model {
         path: KEPT_MODEL.into(),
@@ -688,16 +688,35 @@ fn check_kept_words() -> Result<(), Error> {
     })?;
     let off = check_words(&cases, &dictionary, None);
     let on = check_words(&cases, &dictionary, Some(&Arc::new(model)));
-    let runs: [(&str, &[WordResult]); 2] = [("off", &off), ("on", &on)];
+    write_word_checks(&cases, &[("off", &off), ("on", &on)])
+}
+
+/// [`check_kept_words`] with the base dictionary just built, which has no
+/// model paired with it until the model is trained again.
+fn check_built_words() -> Result<(), Error> {
+    let cases = word_cases()?;
+    let dictionary = parsed_dictionary(BASE.dictionary)?;
+    let off = check_words(&cases, &dictionary, None);
+    write_word_checks(&cases, &[("off", &off)])
+}
+
+fn word_cases() -> Result<Vec<WordCase>, Error> {
+    parse_word_cases(read_to_string(WORDS)?).map_err(|source| Error::WordCases {
+        path: WORDS.into(),
+        source,
+    })
+}
+
+fn write_word_checks(cases: &[WordCase], runs: &[(&str, &[WordResult])]) -> Result<(), Error> {
     for (path, tsv) in [
-        (CHECK_WORDS, word_scores_tsv(&cases, &runs)),
-        (CHECK_WORD_MISSES, word_misses_tsv(&cases, &runs)),
+        (CHECK_WORDS, word_scores_tsv(cases, runs)),
+        (CHECK_WORD_MISSES, word_misses_tsv(cases, runs)),
     ] {
         write_atomically(path, |w| {
             w.write_all(tsv.as_bytes()).map_err(write_error(path))
         })?;
     }
-    for (label, results) in runs {
+    for &(label, results) in runs {
         let first = results.iter().filter(|r| r.rank == Some(1)).count();
         let covered = results.iter().filter(|r| r.rank.is_some()).count();
         println!(
