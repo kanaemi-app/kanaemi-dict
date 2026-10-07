@@ -251,7 +251,11 @@ fn main() -> ExitCode {
 }
 
 fn open_analyzer() -> Result<Analyzer, Error> {
-    let readings = UnidicReadings::new(unidic_words()?);
+    let counters = counter_words(open(LEXICON)?).map_err(|source| Error::Unidic {
+        path: LEXICON.into(),
+        source,
+    })?;
+    let readings = UnidicReadings::new(unidic_words()?).with_counters(counters);
     Analyzer::open(
         SYSTEM_DICTIONARY,
         CHECKER_DICTIONARY,

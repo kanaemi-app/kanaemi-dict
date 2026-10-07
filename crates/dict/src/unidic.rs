@@ -102,23 +102,50 @@ fn words_where(
 }
 
 /// The readings UniDic gives each surface of its words, to check a reading
-/// against.
+/// against, and of its counters, which a counter's sound changes start from.
 #[derive(Debug, Clone, Default)]
-pub struct UnidicReadings(HashMap<String, Vec<String>>);
+pub struct UnidicReadings {
+    words: HashMap<String, Vec<String>>,
+    counters: HashMap<String, Vec<String>>,
+}
 
 impl UnidicReadings {
     pub fn new(words: impl IntoIterator<Item = UnidicWord>) -> Self {
-        let mut readings: HashMap<String, Vec<String>> = HashMap::new();
-        for word in words {
-            readings.entry(word.surface).or_default().push(word.reading);
+        Self {
+            words: by_surface(words),
+            counters: HashMap::new(),
         }
-        Self(readings)
+    }
+
+    /// These readings with `counters`, UniDic's words read as counters (see
+    /// [`counter_words`]).
+    pub fn with_counters(self, counters: impl IntoIterator<Item = UnidicWord>) -> Self {
+        Self {
+            counters: by_surface(counters),
+            ..self
+        }
     }
 
     /// UniDic's readings of `surface`; none when UniDic does not have it.
     pub fn of(&self, surface: impl AsRef<str>) -> &[String] {
-        self.0.get(surface.as_ref()).map_or(&[], Vec::as_slice)
+        self.words.get(surface.as_ref()).map_or(&[], Vec::as_slice)
     }
+
+    /// UniDic's readings of `surface` as a counter; none when UniDic does not
+    /// read it so, or these readings were made without counters.
+    pub fn as_counter(&self, surface: impl AsRef<str>) -> &[String] {
+        self.counters
+            .get(surface.as_ref())
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+fn by_surface(words: impl IntoIterator<Item = UnidicWord>) -> HashMap<String, Vec<String>> {
+    let mut readings: HashMap<String, Vec<String>> = HashMap::new();
+    for word in words {
+        readings.entry(word.surface).or_default().push(word.reading);
+    }
+    readings
 }
 
 /// Decodes the lexicon's character escapes, `\uXXXX` and `\u{X…}`.

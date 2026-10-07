@@ -314,8 +314,9 @@ mod tests {
         static ANALYZER: std::sync::OnceLock<Analyzer> = std::sync::OnceLock::new();
         ANALYZER.get_or_init(|| {
             let dir = sudachi_dir();
-            let lexicon = std::fs::File::open(dir.join("small_lex.csv")).unwrap();
-            let readings = UnidicReadings::new(crate::plain_words(lexicon).unwrap());
+            let lexicon = || std::fs::File::open(dir.join("small_lex.csv")).unwrap();
+            let readings = UnidicReadings::new(crate::plain_words(lexicon()).unwrap())
+                .with_counters(crate::counter_words(lexicon()).unwrap());
             let corrections = crate::parse_corrections(
                 std::fs::read_to_string(workspace().join("analyzer/corrections.tsv")).unwrap(),
             )
