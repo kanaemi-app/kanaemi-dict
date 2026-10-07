@@ -42,6 +42,10 @@ docs:
 sudachi:
     deno run --allow-read --allow-write --allow-net scripts/sudachi.ts
 
+# Fetch Mozc's single kanji table and the Unihan readings into build/kanji/raw and write them into build/kanji/.
+kanji:
+    deno run --allow-read --allow-write --allow-net scripts/kanji.ts
+
 # Write the titles of the Wikipedia articles into build/base-titles.tsv and the names of every article and redirect
 # into build/base-names.txt, taking the Wikipedia dump out of build/raw.
 base-titles:
