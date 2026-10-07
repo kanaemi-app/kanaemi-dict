@@ -166,7 +166,11 @@ fn counters(numeric: &[Entry]) -> BTreeMap<String, u32> {
 /// ばい), else `read` when UniDic gives it (倍 stays ばい), else UniDic's only
 /// reading (話 as わ for はなし); `read` when none of them is there.
 fn base_reading(surface: &str, read: &str, counters: &UnidicReadings) -> String {
-    let known = counters.of(surface);
+    base_reading_of(counters.of(surface), read)
+}
+
+/// [`base_reading`] of a counter read `read`, UniDic reading it `known`.
+fn base_reading_of(known: &[String], read: &str) -> String {
     let mut chars = read.chars();
     let plain = chars
         .next()
@@ -177,6 +181,47 @@ fn base_reading(surface: &str, read: &str, counters: &UnidicReadings) -> String 
         (_, [only]) => only.clone(),
         _ => read.to_owned(),
     }
+}
+
+/// The reading of numerals read `numeral` that write no number (なん, すうじゅう)
+/// and the counter `surface` after them, read `read` by the analyzer: the
+/// counter from its UniDic counter reading, changed as after 三 when the
+/// numerals end in ん, after 十 when in じゅう and after 六 when in ひゃく,
+/// びゃく or ぴゃく.
+pub(crate) fn reading_counted_after(
+    numeral: &str,
+    surface: &str,
+    read: &str,
+    readings: &UnidicReadings,
+) -> String {
+    let counter = base_reading_of(readings.as_counter(surface), read);
+    for (ending, number) in [
+        ("ん", "さん"),
+        ("じゅう", "じゅう"),
+        ("ひゃく", "ろく"),
+        ("びゃく", "ろく"),
+        ("ぴゃく", "ろく"),
+    ] {
+        let Some(head) = numeral.strip_suffix(ending) else {
+            continue;
+        };
+        let changed = sound_changes(number, &counter);
+        if let Some(rest) = changed.strip_prefix(&geminated(number)) {
+            return format!("{head}{}{rest}", geminated(ending));
+        }
+        if let Some(rest) = changed.strip_prefix(number) {
+            return format!("{head}{ending}{rest}");
+        }
+    }
+    format!("{numeral}{counter}")
+}
+
+/// `kana` with its last kana made a small っ (じゅう as じゅっ).
+fn geminated(kana: &str) -> String {
+    let mut s = kana.to_owned();
+    s.pop();
+    s.push('っ');
+    s
 }
 
 /// The reading of `number`, read in Sino-Japanese, before a counter read
@@ -280,6 +325,78 @@ mod tests {
         assert_eq!(base_reading("台", "だい", &unidic), "だい");
         assert_eq!(base_reading("話", "はなし", &unidic), "わ");
         assert_eq!(base_reading("匹", "ひき", &unidic), "ひき");
+    }
+
+    fn as_counters(words: &[(&str, &str)]) -> UnidicReadings {
+        UnidicReadings::default().with_counters(words.iter().map(|(reading, surface)| UnidicWord {
+            reading: (*reading).into(),
+            surface: (*surface).into(),
+        }))
+    }
+
+    #[test]
+    fn a_counter_after_numerals_ending_in_n_ju_or_hyaku_changes_as_after_three_ten_or_six() {
+        let unidic = as_counters(&[("ほん", "本"), ("ひき", "匹"), ("かい", "回")]);
+
+        assert_eq!(
+            reading_counted_after("なん", "匹", "ひき", &unidic),
+            "なんびき"
+        );
+        assert_eq!(
+            reading_counted_after("なん", "本", "ぽん", &unidic),
+            "なんぼん"
+        );
+        assert_eq!(
+            reading_counted_after("すうじゅう", "本", "ぽん", &unidic),
+            "すうじゅっぽん"
+        );
+        assert_eq!(
+            reading_counted_after("すうひゃく", "回", "かい", &unidic),
+            "すうひゃっかい"
+        );
+        assert_eq!(
+            reading_counted_after("すうひゃく", "本", "ぽん", &unidic),
+            "すうひゃっぽん"
+        );
+        assert_eq!(
+            reading_counted_after("なんびゃく", "本", "ぽん", &unidic),
+            "なんびゃっぽん"
+        );
+        assert_eq!(
+            reading_counted_after("さんぴゃく", "匹", "ひき", &unidic),
+            "さんぴゃっぴき"
+        );
+    }
+
+    #[test]
+    fn a_counter_after_other_numerals_keeps_its_unidic_counter_reading() {
+        let unidic = as_counters(&[("ほん", "本"), ("ばい", "倍")]);
+
+        assert_eq!(
+            reading_counted_after("すう", "本", "ぽん", &unidic),
+            "すうほん"
+        );
+        assert_eq!(
+            reading_counted_after("いく", "本", "ぽん", &unidic),
+            "いくほん"
+        );
+        assert_eq!(
+            reading_counted_after("なん", "倍", "ばい", &unidic),
+            "なんばい"
+        );
+    }
+
+    #[test]
+    fn a_counter_starts_from_unidic_s_counter_readings_not_its_other_words() {
+        let unidic = readings(&[("たい", "台")]).with_counters([UnidicWord {
+            reading: "だい".into(),
+            surface: "台".into(),
+        }]);
+
+        assert_eq!(
+            reading_counted_after("すう", "台", "だい", &unidic),
+            "すうだい"
+        );
     }
 
     fn tok(surface: &str, reading: &str, pos: &str, begin: usize) -> Token {

@@ -7,6 +7,7 @@ use kanaemi_engine::{MAX_SUFFIX_KANA, terminal_ending};
 
 use crate::analyzer::is_break;
 use crate::conjugation::{KanaemiType, kanaemi_type};
+use crate::counted::reading_counted_after;
 use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana, is_voicing_of};
 use crate::numeral::{Notation, Number, read_number};
 use crate::{Token, UnidicReadings, Words, is_word, katakana_to_hiragana};
@@ -223,7 +224,7 @@ pub(crate) fn cut_line(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineU
     while let Some(n) = rest.iter().position(is_numeral) {
         let start = n - usize::from(n > 0 && rest[n - 1].pos[0] == "接頭辞");
         units.extend(cut_words(&rest[..start], readings));
-        let (unit, taken) = cut_numeric(&rest[start..]);
+        let (unit, taken) = cut_numeric(&rest[start..], readings);
         units.extend(unit);
         rest = &rest[start + taken..];
     }
@@ -314,24 +315,33 @@ fn read_as_written(token: &Token) -> Token {
 
 /// Cuts the numeral at the head of `tokens`, with the prefix before it, into
 /// a numeric unit: the prefix, the number, the counter after it and the
-/// suffixes after the counter. Returns the unit, if they make one, and how
+/// suffixes after the counter. A numeral that writes no number (数, 何) makes
+/// them a plain word instead. Returns the unit, if they make one, and how
 /// many tokens it took, which it takes either way.
-fn cut_numeric(tokens: &[Token]) -> (Option<LineUnit>, usize) {
+fn cut_numeric(tokens: &[Token], readings: &UnidicReadings) -> (Option<LineUnit>, usize) {
     let number_start = usize::from(tokens[0].pos[0] == "接頭辞");
     let after = number_start
         + tokens[number_start..]
             .iter()
             .take_while(|t| is_numeral(t))
             .count();
-    if !tokens.get(after).is_some_and(is_counter) {
+    let counted = tokens.get(after).is_some_and(is_counter);
+    let taken = if counted {
+        after
+            + 1
+            + tokens[after + 1..]
+                .iter()
+                .take_while(|t| t.pos[0] == "接尾辞")
+                .count()
+    } else {
+        after
+    };
+    if writes_no_number(&tokens[number_start..after]) {
+        return (word_of_numeral(&tokens[..taken], after, readings), taken);
+    }
+    if !counted {
         return (None, after);
     }
-    let taken = after
-        + 1
-        + tokens[after + 1..]
-            .iter()
-            .take_while(|t| t.pos[0] == "接尾辞")
-            .count();
     let suffixes: Vec<Token> = tokens[after..taken]
         .iter()
         .enumerate()
@@ -346,6 +356,51 @@ fn cut_numeric(tokens: &[Token]) -> (Option<LineUnit>, usize) {
         &suffixes,
     );
     (unit, taken)
+}
+
+/// Whether the numerals are kanji with one that writes no number (数, 何, 幾):
+/// they count without saying how many. Numerals of number kanji alone write
+/// a number, if one Kanaemi cannot fill in (十二三, 廿), and ①, 3 or ゼロ
+/// are no kanji.
+fn writes_no_number(numerals: &[Token]) -> bool {
+    let surface: String = numerals.iter().map(|t| t.surface.as_str()).collect();
+    surface.chars().all(is_kanji) && surface.chars().any(|c| !NUMBER_KANJI.contains(c))
+}
+
+/// The kanji that write numbers, in any notation.
+const NUMBER_KANJI: &str = "〇一二三四五六七八九十百千万萬億兆京壱弐参拾廿卅零";
+
+/// `tokens`, the numerals ending at `after` with the prefix before them and
+/// the counter and suffixes after them, as one plain word: the counter
+/// changes its sound as after a number, and UniDic's reading wins when UniDic
+/// has the word.
+fn word_of_numeral(tokens: &[Token], after: usize, readings: &UnidicReadings) -> Option<LineUnit> {
+    let surface: String = tokens.iter().map(|t| t.surface.as_str()).collect();
+    let head: String = tokens[..after].iter().map(|t| t.reading.as_str()).collect();
+    let seam = head.chars().count();
+    let joined = match tokens[after..].split_first() {
+        Some((counter, suffixes)) => {
+            let counted =
+                reading_counted_after(&head, &counter.surface, &counter.reading, readings);
+            let rest: String = suffixes
+                .iter()
+                .enumerate()
+                .map(|(i, t)| reading_after_number(i + 1, t))
+                .collect();
+            counted + &rest
+        }
+        None => head,
+    };
+    let reading = checked_reading(readings.of(&surface), joined, seam)?;
+    (is_plain_reading(&reading) && is_word(&reading, &surface)).then(|| LineUnit {
+        begin: tokens[0].begin,
+        reading,
+        surface,
+        stem: None,
+        unknown_conjugation: None,
+        numeric: None,
+        okurigana_variant: false,
+    })
 }
 
 /// The reading of `token`, the `i`th of the counter and the suffixes after a
@@ -1283,6 +1338,143 @@ mod tests {
                 &format!("1.5/いってんご/{NUMERAL}/1.5"),
                 &format!("倍/ばい/{COUNTER_SUFFIX}/倍"),
             ]),
+            []
+        );
+    }
+
+    #[test]
+    fn a_numeral_that_writes_no_number_and_its_counter_are_a_word() {
+        assert_eq!(
+            cut(&[
+                &format!("数/すう/{NUMERAL}/数"),
+                &format!("年/ねん/{COUNTER_NOUN}/年"),
+                "前/まえ/名詞,普通名詞,副詞可能,*,*,*/前",
+            ]),
+            [plain(0, "すうねん", "数年"), plain(2, "まえ", "前")]
+        );
+    }
+
+    #[test]
+    fn a_word_of_a_numeral_that_writes_no_number_takes_the_prefix_and_suffixes() {
+        assert_eq!(
+            cut(&[
+                &format!("第/だい/{PREFIX}/第"),
+                &format!("何/なん/{NUMERAL}/何"),
+                &format!("回/かい/{COUNTER_NOUN}/回"),
+                &format!("の/の/{PARTICLE}/の"),
+                &format!("数/すう/{NUMERAL}/数"),
+                "日/じつ/接尾辞,名詞的,一般,*,*,*/日",
+                "後/ご/接尾辞,名詞的,副詞可能,*,*,*/後",
+            ]),
+            [
+                plain(0, "だいなんかい", "第何回"),
+                plain(4, "すうじつご", "数日後"),
+            ]
+        );
+    }
+
+    #[test]
+    fn numerals_that_write_no_number_without_a_counter_are_a_word() {
+        assert_eq!(
+            cut(&[
+                &format!("数千/すうせん/{NUMERAL}/数千"),
+                &format!("万/まん/{NUMERAL}/万"),
+                &format!("の/の/{PARTICLE}/の"),
+            ]),
+            [plain(0, "すうせんまん", "数千万")]
+        );
+    }
+
+    #[test]
+    fn a_large_unit_alone_makes_no_word() {
+        assert_eq!(
+            cut(&[
+                &format!("万/まん/{NUMERAL}/万"),
+                &format!("円/えん/{COUNTER_NOUN}/円"),
+                &format!("億/おく/{NUMERAL}/億"),
+                &format!("萬/まん/{NUMERAL}/萬"),
+                &format!("倍/ばい/{COUNTER_SUFFIX}/倍"),
+            ]),
+            []
+        );
+    }
+
+    #[test]
+    fn numerals_of_number_kanji_alone_make_no_word() {
+        assert_eq!(
+            cut(&[
+                &format!("十二/じゅうに/{NUMERAL}/十二"),
+                &format!("三/さん/{NUMERAL}/三"),
+                &format!("歳/さい/{COUNTER_SUFFIX}/歳"),
+                &format!("の/の/{PARTICLE}/の"),
+                &format!("廿/にじゅう/{NUMERAL}/廿"),
+                &format!("年/ねん/{COUNTER_NOUN}/年"),
+            ]),
+            []
+        );
+    }
+
+    #[test]
+    fn numerals_written_in_other_than_kanji_make_no_word() {
+        assert_eq!(
+            cut(&[
+                &format!("①/いち/{NUMERAL}/①"),
+                &format!("回/かい/{COUNTER_NOUN}/回"),
+                &format!("ゼロ/ぜろ/{NUMERAL}/ゼロ"),
+                &format!("ひと/ひと/{NUMERAL}/ひと"),
+                &format!("つ/つ/{COUNTER_SUFFIX}/つ"),
+            ]),
+            []
+        );
+    }
+
+    #[test]
+    fn a_word_of_a_numeral_that_writes_no_number_reads_its_counter_with_the_sound_change() {
+        let counters = UnidicReadings::default().with_counters(
+            [("ひき", "匹"), ("ほん", "本")].map(|(reading, surface)| UnidicWord {
+                reading: reading.into(),
+                surface: surface.into(),
+            }),
+        );
+        assert_eq!(
+            cut_line(
+                &line(&[
+                    &format!("何/なん/{NUMERAL}/何"),
+                    &format!("匹/ひき/{COUNTER_SUFFIX}/匹"),
+                    &format!("と/と/{PARTICLE}/と"),
+                    &format!("数/すう/{NUMERAL}/数"),
+                    &format!("本/ぽん/{COUNTER_SUFFIX}/本"),
+                ]),
+                &counters
+            ),
+            [plain(0, "なんびき", "何匹"), plain(3, "すうほん", "数本")]
+        );
+    }
+
+    #[test]
+    fn a_word_of_a_numeral_that_writes_no_number_takes_unidic_s_reading_voiced_at_the_counter() {
+        assert_eq!(
+            cut_knowing(
+                &[("なんばい", "何杯")],
+                &[
+                    &format!("何/なん/{NUMERAL}/何"),
+                    &format!("杯/はい/{COUNTER_SUFFIX}/杯"),
+                ]
+            ),
+            [plain(0, "なんばい", "何杯")]
+        );
+    }
+
+    #[test]
+    fn a_word_of_a_numeral_that_writes_no_number_whose_unidic_reading_cannot_be_chosen_is_none() {
+        assert_eq!(
+            cut_knowing(
+                &[("いくにち", "幾日"), ("いっか", "幾日")],
+                &[
+                    &format!("幾/いく/{NUMERAL}/幾"),
+                    &format!("日/か/{COUNTER_SUFFIX}/日"),
+                ]
+            ),
             []
         );
     }
