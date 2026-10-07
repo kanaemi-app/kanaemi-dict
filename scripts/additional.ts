@@ -7,13 +7,14 @@
  *
  * `fetch` sets up the dictionary of YEAR's new words under additional/ if
  * it is not there (this year in Japan by default), and fetches into
- * build/additional/raw the postal code data and the hot entries of every
- * year with a dictionary. `docs` writes, for each dictionary under
- * additional/, what it is built from into build/additional/NAME/: the
- * documents of its Wikipedia articles, the laws, or the year's hot entries
- * as docs.jsonl, the titles of its articles as titles.tsv, and the postal
- * code data as ken_all.csv. The Wikipedia dump and the laws come from the
- * base dictionary's build/raw.
+ * build/additional/raw the postal code data, Mozc's symbol, emoji and
+ * emoticon tables, and the hot entries of every year with a dictionary.
+ * `docs` writes, for each dictionary under additional/, what it is built
+ * from into build/additional/NAME/: the documents of its Wikipedia articles,
+ * the laws, or the year's hot entries as docs.jsonl, the titles of its
+ * articles as titles.tsv, the postal code data as ken_all.csv, and Mozc's
+ * tables as they are. The Wikipedia dump and the laws come from the base
+ * dictionary's build/raw.
  */
 import { join } from "@std/path";
 import { compareUtf8, writeJsonl } from "./docs/extract.ts";
@@ -36,6 +37,7 @@ import {
 } from "./additional/hatena.ts";
 import { articlesOf, type Title, writeTitlesTo } from "./additional/wikipedia.ts";
 import { NoArticleYet, setUpYear } from "./additional/year.ts";
+import { MOZC_TABLES } from "./additional/mozc.ts";
 
 const ADDITIONAL = "additional";
 const BUILD = join("build", "additional");
@@ -64,6 +66,10 @@ async function fetchAll(year: number, refresh: boolean): Promise<void> {
     await fetchToStore(store, manifest, sourceId, url, { ...options, refresh });
   const postal = await get(POSTAL_ID, POSTAL_URL);
   console.log(`${postal.source_id}\t${postal.bytes}`);
+  for (const table of MOZC_TABLES) {
+    const record = await get(table.sourceId, table.url);
+    console.log(`${record.source_id}\t${record.bytes}`);
+  }
   try {
     if (await setUpYear(ADDITIONAL, year)) console.log(`${ADDITIONAL}/${year}: set up`);
   } catch (e) {
@@ -141,6 +147,13 @@ async function writeDocs(): Promise<void> {
     await Deno.mkdir(join(BUILD, PLACE), { recursive: true });
     await Deno.writeFile(join(BUILD, PLACE, "ken_all.csv"), csv);
     console.log(`${PLACE}\trows: ${new TextDecoder().decode(csv).split("\n").length - 1}`);
+  }
+  for (const table of MOZC_TABLES.filter((t) => names.has(t.dictionary))) {
+    const record = recordOf(ownRecords, table.sourceId, RAW);
+    const out = join(BUILD, table.dictionary, table.name);
+    await Deno.mkdir(join(BUILD, table.dictionary), { recursive: true });
+    await Deno.writeFile(out, await own.read(record.sha256));
+    console.log(`${table.dictionary}\tout: ${out}`);
   }
 }
 

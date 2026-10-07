@@ -65,7 +65,7 @@ evaluate:
     cargo run --release -p kanaemi-dict -- evaluate
 
 # Set up this year's dictionary of new words (or YEAR's: `--year YEAR`) if it is not there, and fetch the postal code
-# data and the hot entries of every year with a dictionary into build/additional/raw.
+# data, Mozc's symbol, emoji and emoticon tables and the hot entries of every year with a dictionary into build/additional/raw.
 additional-fetch *args:
     deno run --allow-read --allow-write --allow-net scripts/additional.ts fetch {{args}}
 

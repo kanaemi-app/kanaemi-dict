@@ -18,12 +18,12 @@ use kanaemi_dict::{
     counted_reading, counted_words, counter_words, cut_documents, dictionary_lines,
     document_sources, document_texts, each_document_with_units, engine, eval_documents,
     evaluate_documents, examples_of_document, excluded_readings, field_dictionary, gather, is_word,
-    kanji_entries, mismatches_tsv, model_file, mozc_readings, okurigana_dictionary,
-    parse_corrections, parse_word_cases, paths_of, place_dictionary, place_names, plain_words,
-    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
-    shared_readings, sources_file, split_of, take, title_entries, train, unihan_readings,
-    wikidata_mismatches, wikidata_readings, word_misses_tsv, word_scores_tsv, write_atomically,
-    year_dictionary,
+    kanji_entries, listed_dictionary, mismatches_tsv, model_file, mozc_emoji, mozc_emoticons,
+    mozc_readings, mozc_symbols, okurigana_dictionary, parse_corrections, parse_word_cases,
+    paths_of, place_dictionary, place_names, plain_words, read_names, read_title_entries,
+    read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of,
+    take, title_entries, train, unihan_readings, wikidata_mismatches, wikidata_readings,
+    word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -60,6 +60,10 @@ const PLACE: &str = "place";
 /// The additional dictionary of the words the base dictionary's documents
 /// spell with other okurigana than the usual, which the base leaves out.
 const OKURIGANA: &str = "okurigana";
+/// The additional dictionaries taken from Mozc's tables, not from documents.
+const SYMBOL: &str = "symbol";
+const EMOJI: &str = "emoji";
+const EMOTICON: &str = "emoticon";
 /// The sources every dictionary read with the analyzer has: the analyzer's
 /// dictionary, the dictionary that checks its readings, and the UniDic
 /// lexicon they are checked against and the base takes words from.
@@ -1002,7 +1006,25 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
     let mut analyzer = None;
     for name in names {
         let label = read_to_string(format!("{ADDITIONAL}/{name}/label.txt"))?;
-        let (mut dictionary, sources) = if name == PLACE {
+        let listed = [SYMBOL, EMOJI, EMOTICON].contains(&name.as_str());
+        let (mut dictionary, sources) = if listed {
+            let table = |file: &str| read_to_string(format!("{ADDITIONAL_BUILD}/{name}/{file}"));
+            let (pairs, sources) = match name.as_str() {
+                SYMBOL => (mozc_symbols(&table("symbol.tsv")?), vec!["mozc-symbol"]),
+                EMOJI => (
+                    mozc_emoji(&table("emoji_data.tsv")?, &table("manual_emoji_data.tsv")?),
+                    vec!["mozc-emoji:emoji_data", "mozc-emoji:manual_emoji_data"],
+                ),
+                _ => (
+                    mozc_emoticons(&table("emoticon.tsv")?),
+                    vec!["mozc-emoticon"],
+                ),
+            };
+            (
+                listed_dictionary(pairs),
+                sources.into_iter().map(String::from).collect(),
+            )
+        } else if name == PLACE {
             (
                 place_dictionary_of(&format!("{ADDITIONAL_BUILD}/{name}/ken_all.csv"))?,
                 BTreeSet::from([POSTAL_SOURCE.to_owned()]),
@@ -1034,8 +1056,9 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             }
             sourced_dictionary(&name, &base, analyzer.as_ref().unwrap())?
         };
+        // Symbols and emoticons are not words, and may hold spaces or end in 〜.
         dictionary.drop_words(|reading, surface| {
-            corrections.drops(surface) || !is_word(reading, surface)
+            corrections.drops(surface) || !listed && !is_word(reading, surface)
         });
         let dictionary_path = format!("{DICTIONARIES}/{name}.tsv");
         let report_path = format!("{DICTIONARIES}/{name}-report.tsv");
