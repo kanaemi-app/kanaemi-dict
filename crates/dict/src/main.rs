@@ -10,17 +10,17 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kanaemi_dict::{
-    Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, Corrections, CorrectionsError, CutError,
-    Dictionary, DistError, DocumentsError, EvalDocument, EvalDocumentsError, Evaluation,
-    ExampleFile, Examples, ReadingsError, RejectedLines, Split, TitlesError, UnidicError,
-    UnidicReadings, UnidicWord, Unit, UnitsError, WordCasesError, WordResult, WriteError,
-    agreement, check_words, counted_reading, counted_words, counter_words, cut_documents,
-    dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
-    eval_documents, evaluate_documents, examples_of_document, field_dictionary, gather, is_word,
-    model_file, okurigana_dictionary, parse_corrections, parse_word_cases, paths_of,
-    place_dictionary, place_names, plain_words, read_titles, read_units, reading_form, sample_tsv,
-    shared_readings, sources_file, split_of, take, title_entries, train, word_misses_tsv,
-    word_scores_tsv, write_atomically, year_dictionary,
+    Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Corrections,
+    CorrectionsError, CutError, Dictionary, DistError, DocumentsError, EvalDocument,
+    EvalDocumentsError, Evaluation, ExampleFile, Examples, ReadingsError, RejectedLines, Split,
+    TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError, WordCasesError,
+    WordResult, WriteError, agreement, check_words, counted_reading, counted_words, counter_words,
+    cut_documents, dictionary_lines, document_sources, document_texts, each_document_with_units,
+    engine, eval_documents, evaluate_documents, examples_of_document, field_dictionary, gather,
+    is_word, model_file, okurigana_dictionary, parse_corrections, parse_word_cases, paths_of,
+    place_dictionary, place_names, plain_words, read_names, read_titles, read_units, reading_form,
+    sample_tsv, shared_readings, sources_file, split_of, take, title_entries, train,
+    word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -32,9 +32,11 @@ const LEXICON: &str = "build/sudachi/small_lex.csv";
 /// The words the analyzer reads wrong, applied to what it reads.
 const CORRECTIONS: &str = "analyzer/corrections.tsv";
 const DOCS: &str = "build/docs.jsonl";
-/// The titles of the Wikipedia articles in the categories of
-/// base/wikipedia.txt, which `scripts/base-titles.ts` writes.
+/// The titles of the Wikipedia articles, which `scripts/base-titles.ts` writes.
 const BASE_TITLES: &str = "build/base-titles.tsv";
+/// The names of the Wikipedia articles and redirects, which
+/// `scripts/base-titles.ts` writes.
+const BASE_NAMES: &str = "build/base-names.txt";
 const UNITS: &str = "build/units.jsonl";
 const EVALUATION: &str = "build/evaluation.tsv";
 const DICTIONARIES: &str = "build/dictionaries";
@@ -322,7 +324,9 @@ fn cut_units() -> Result<(), Error> {
 fn build_dictionary(train_only: bool) -> Result<(), Error> {
     let outputs = if train_only { BASE_TRAIN } else { BASE };
     let unidic = unidic_words()?;
+    let names = read_names(open(BASE_NAMES)?).map_err(read_error(BASE_NAMES))?;
     let (dictionary, took_titles) = {
+        let mut chains = ChainCounter::new(&names);
         let mut failure = None;
         let units = read_units(open(UNITS)?)
             .map_while(|unit| {
@@ -336,26 +340,46 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             })
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
         let mut total = 0usize;
-        let mut dictionary = Dictionary::build(units.inspect(|_| total += 1), &unidic);
+        let mut dictionary = Dictionary::build(
+            units.inspect(|unit| {
+                total += 1;
+                chains.observe(unit);
+            }),
+            &unidic,
+        );
         if let Some(e) = failure {
             return Err(e);
         }
+        let texts = document_texts(open(DOCS)?, |doc_id| {
+            !train_only || split_of(doc_id) == Split::Train
+        })
+        .map_err(|source| Error::Documents {
+            path: DOCS.into(),
+            source,
+        })?;
         let titles = {
             let titles = read_titles(open(BASE_TITLES)?).map_err(|source| Error::Titles {
                 path: BASE_TITLES.into(),
                 source,
             })?;
-            let texts = document_texts(open(DOCS)?, |doc_id| {
-                !train_only || split_of(doc_id) == Split::Train
-            })
-            .map_err(|source| Error::Documents {
-                path: DOCS.into(),
-                source,
-            })?;
             title_entries(&titles, texts.iter().map(String::as_str), total)
         };
-        let took_titles = !titles.is_empty();
+        let mut took_titles = !titles.is_empty();
         dictionary.add_words(titles);
+        let chained = {
+            let known: HashSet<&str> = dictionary
+                .entries
+                .iter()
+                .map(|e| e.surface.as_str())
+                .collect();
+            let chains = chains
+                .finish()
+                .titles(|s| known.contains(s), texts.iter().map(String::as_str));
+            title_entries(&chains, texts.iter().map(String::as_str), total)
+        };
+        println!("chains: {}", chained.len());
+        took_titles |= !chained.is_empty();
+        dictionary.add_words(chained);
         let counted = {
             let counters =
                 UnidicReadings::new(counter_words(open(LEXICON)?).map_err(|source| {

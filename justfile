@@ -42,8 +42,8 @@ docs:
 sudachi:
     deno run --allow-read --allow-write --allow-net scripts/sudachi.ts
 
-# Write the titles of the Wikipedia articles in the categories of base/wikipedia.txt into build/base-titles.tsv,
-# taking the Wikipedia dump out of build/raw.
+# Write the titles of the Wikipedia articles into build/base-titles.tsv and the names of every article and redirect
+# into build/base-names.txt, taking the Wikipedia dump out of build/raw.
 base-titles:
     deno run --allow-read --allow-write --allow-run=lbzip2 scripts/base-titles.ts
 

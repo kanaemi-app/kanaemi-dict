@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { dump, page } from "../docs/mediawiki_test_helper.ts";
 import { keyHash } from "../select.ts";
-import { articlesOf, fieldsOf, titleReading } from "./wikipedia.ts";
+import { articlesOf, baseTitlesOf, fieldsOf, titleReading } from "./wikipedia.ts";
 
 async function* once(s: string): AsyncGenerator<string> {
   yield await Promise.resolve(s);
@@ -117,4 +117,32 @@ Deno.test("a year's dictionary takes the titles of every article from its first 
     docs: [],
     titles: [{ doc_id: "wikipedia:9", reading: "しんご", surface: "新語" }],
   });
+});
+
+Deno.test("the base takes every article's title its lead reads, and the name of every article and redirect", async () => {
+  const xml = dump([
+    page(1, 0, "", "'''二人三脚'''（ににんさんきゃく）は…\n[[Category:競技]]", "二人三脚"),
+    page(2, 0, "", "'''多種多様'''は…", "多種多様"),
+    page(3, 0, '<redirect title="自律神経系" />', "#REDIRECT [[自律神経系]]", "自律神経"),
+    page(4, 0, "", "'''東京タワー'''（とうきょうたわー）は…", "東京タワー (映画)"),
+    page(5, 0, "", "'''鉄'''（てつ）\n{{Aimai}}", "鉄"),
+    page(6, 1, "", "'''話'''（はなし）", "話"),
+  ]);
+
+  const { titles, names } = await baseTitlesOf(once(xml));
+
+  assertEquals(titles, [
+    { doc_id: "wikipedia:1", reading: "ににんさんきゃく", surface: "二人三脚" },
+    { doc_id: "wikipedia:4", reading: "とうきょうたわー", surface: "東京タワー" },
+  ]);
+  assertEquals(names, ["二人三脚", "多種多様", "自律神経", "東京タワー"]);
+});
+
+Deno.test("the base takes no title or name with a digit, as dates would clash with numbers", async () => {
+  const xml = dump([
+    page(1, 0, "", "'''10月19日'''（じゅうがつじゅうくにち）は…", "10月19日"),
+    page(2, 0, '<redirect title="1月" />', "#REDIRECT [[1月]]", "１月"),
+  ]);
+
+  assertEquals(await baseTitlesOf(once(xml)), { titles: [], names: [] });
 });

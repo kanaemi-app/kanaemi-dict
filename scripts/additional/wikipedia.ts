@@ -1,7 +1,7 @@
 /**
- * What the additional dictionaries take out of the Wikipedia dump: the
- * articles of a field's categories with their titles, and the titles of the
- * articles of a year.
+ * What the dictionaries take out of the Wikipedia dump: the articles of a
+ * field's categories with their titles, the titles of the articles of a year,
+ * and the titles and names of every article and redirect for the base.
  */
 import { type Document, documentOf } from "../docs/document.ts";
 import { categoriesOf, dumpPages, isDisambiguation } from "../docs/mediawiki.ts";
@@ -94,6 +94,41 @@ export async function articlesOf(
   return found;
 }
 
+/** What the base dictionary takes out of the dump: titles with readings, and names. */
+export type BaseTitles = {
+  /** The titles of the articles whose leads read them. */
+  titles: Title[];
+  /** The title of every article and redirect, without its parenthesized qualifier. */
+  names: string[];
+};
+
+const DIGIT = /[0-9０-９]/;
+
+/**
+ * The titles and names the base dictionary takes from a dump's XML: those of
+ * every article but disambiguation pages, and the names of redirects too.
+ * Titles and names with a digit are left out.
+ */
+export async function baseTitlesOf(xml: AsyncIterable<string>): Promise<BaseTitles> {
+  const titles: Title[] = [];
+  const names = new Set<string>();
+  for await (const page of dumpPages(xml, (h) => h.ns === "0")) {
+    if (!page.redirect && isDisambiguation(page.text)) continue;
+    const name = nameOf(page.title);
+    if (name === "" || DIGIT.test(name)) continue;
+    names.add(name);
+    if (page.redirect) continue;
+    const named = titleReading(page.title, page.text);
+    if (named) titles.push({ doc_id: `wikipedia:${page.id}`, ...named });
+  }
+  return { titles, names: [...names] };
+}
+
+/** A title without its parenthesized qualifier, normalized like the text it is counted in. */
+function nameOf(title: string): string {
+  return normalize(title.replace(/\s*[（(][^）)]*[）)]$/, ""));
+}
+
 const COMMENT = /<!--[\s\S]*?(?:-->|$)/g;
 const HIRAGANA = /^[\p{Script=Hiragana}ー]+$/u;
 const KATAKANA = /^[\p{Script=Katakana}ー]+$/u;
@@ -109,7 +144,7 @@ export function titleReading(
   wikitext: string,
 ): { surface: string; reading: string } | undefined {
   const surface = title.replace(/\s*[（(][^）)]*[）)]$/, "");
-  const normalized = normalize(surface);
+  const normalized = nameOf(title);
   if (normalized === "") return undefined;
   if (KATAKANA.test(normalized)) {
     return { surface: normalized, reading: toHiragana(normalized) };

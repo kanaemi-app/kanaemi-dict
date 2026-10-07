@@ -47,7 +47,7 @@ nix develop
 just fetch                     # 素材を build/raw に取得する
 just sudachi                   # 解析器の辞書と UniDic の語彙を用意する
 just docs                      # 素材から文書を取り出す
-just base-titles               # 四字熟語などの記事の見出しを取り出す
+just base-titles               # Wikipedia の記事とリダイレクトの見出しを取り出す
 just units                     # 文書を変換の単位に切る
 just dictionary                # 基本辞書を作る
 just dictionary --train-only   # 評価と学習に使う、学習用の文書だけの基本辞書を作る
