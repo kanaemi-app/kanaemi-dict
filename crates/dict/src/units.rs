@@ -517,8 +517,12 @@ fn stem_of(token: &Token, ending: &str, conjugation: &str) -> Option<(Stem, usiz
     let reading = token.reading.strip_suffix(okuri)?;
     // A verb's stem written with no okurigana reads a kana or so per character
     // (見, 出来); more (補 as おぎなえ) means okurigana left out, or a
-    // misreading. An adjective's stem stands alone so (浅 of 浅すぎる).
-    if okuri.is_empty() && conjugation != "形容詞" && reading.chars().count() > stem.chars().count()
+    // misreading. An adjective's stem stands alone so (浅 of 浅すぎる), and a
+    // stem ending in kana (考え, 高すぎ) has its okurigana written.
+    if okuri.is_empty()
+        && conjugation != "形容詞"
+        && stem.chars().next_back().is_some_and(is_kanji)
+        && reading.chars().count() > stem.chars().count()
     {
         return None;
     }
@@ -1196,6 +1200,22 @@ mod tests {
                 ]
             ),
             [plain(0, "おおずもう", "大相撲")]
+        );
+    }
+
+    #[test]
+    fn a_conjunctive_form_whose_stem_ends_in_kana_makes_its_stem() {
+        assert_eq!(
+            cut(&[
+                "考え/かんがえ/動詞,一般,*,*,下一段-ア行,連用形-一般/考える",
+                "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
+            ]),
+            [conjugated(
+                0,
+                "かんがえた",
+                "考えた",
+                ("かんがえ", "考え", "下一段-ア行")
+            )]
         );
     }
 
