@@ -1,7 +1,7 @@
 //! Additional dictionaries: words a field or a year adds to the base
 //! dictionary, without what the base dictionary already gives.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead};
 use std::sync::Arc;
 
@@ -34,6 +34,19 @@ pub fn title_entries<'a>(
     texts: impl IntoIterator<Item = &'a str>,
     total: usize,
 ) -> Vec<Entry> {
+    read_title_entries(titles, &TitleReadings::default(), texts, total)
+}
+
+/// [`title_entries`], counting a title of kanji and katakana by where the
+/// units of `reads` write its surface instead: a unit of its surface counts
+/// only when read as the title, so an article read otherwise than the text
+/// reads its surface (東京 as とうけい) never enters.
+pub fn read_title_entries<'a>(
+    titles: &[Title],
+    reads: &TitleReadings,
+    texts: impl IntoIterator<Item = &'a str>,
+    total: usize,
+) -> Vec<Entry> {
     let titles: Vec<&Title> = titles
         .iter()
         .filter(|t| t.surface.chars().nth(1).is_some() && needs_conversion(&t.surface))
@@ -42,6 +55,7 @@ pub fn title_entries<'a>(
     titles
         .into_iter()
         .zip(word_counts(&surfaces, texts))
+        .map(|(t, n)| (t, reads.count(t).unwrap_or(n)))
         .filter(|&(_, n)| n >= MIN_COUNT)
         .map(|(t, n)| Entry {
             reading: t.reading.clone(),
@@ -50,6 +64,121 @@ pub fn title_entries<'a>(
             cost: cost_of(n, total),
         })
         .collect()
+}
+
+/// Where the units write the surfaces of the titles of kanji and katakana:
+/// as one unit, by its reading, or across touching units. A place a kanji or
+/// katakana unit runs on into is part of a longer word and not counted.
+/// Units come document by document, as `build/units.jsonl` holds them;
+/// compounds are left out, as the units they group are seen.
+#[derive(Debug, Default)]
+pub struct TitleReadings {
+    surfaces: HashSet<String>,
+    longest: usize,
+    /// Places one unit writes a surface, by (surface, reading).
+    whole: HashMap<(String, String), usize>,
+    /// Places two or more touching units write a surface.
+    split: HashMap<String, usize>,
+    doc_id: String,
+    units: Vec<(usize, String, String)>,
+}
+
+impl TitleReadings {
+    /// Places to gather for the titles of kanji and katakana among `titles`.
+    pub fn new(titles: &[Title]) -> Self {
+        let surfaces: HashSet<String> = titles
+            .iter()
+            .filter(|t| t.surface.chars().all(is_word_char))
+            .map(|t| t.surface.clone())
+            .collect();
+        Self {
+            longest: surfaces
+                .iter()
+                .map(|s| s.chars().count())
+                .max()
+                .unwrap_or(0),
+            surfaces,
+            ..Self::default()
+        }
+    }
+
+    pub fn observe(&mut self, unit: &Unit) {
+        if unit.doc_id != self.doc_id {
+            self.flush();
+            self.doc_id.clone_from(&unit.doc_id);
+        }
+        if !unit.compound {
+            self.units
+                .push((unit.position, unit.surface.clone(), unit.reading.clone()));
+        }
+    }
+
+    /// These places with the last document's counted.
+    pub fn finish(mut self) -> Self {
+        self.flush();
+        self
+    }
+
+    fn flush(&mut self) {
+        let units = std::mem::take(&mut self.units);
+        let end = |i: usize| units[i].0 + units[i].1.chars().count();
+        let runs_on = |i: usize, last: bool| {
+            let s = &units[i].1;
+            if last {
+                s.chars().next_back()
+            } else {
+                s.chars().next()
+            }
+            .is_some_and(is_word_char)
+        };
+        for start in 0..units.len() {
+            if start > 0 && end(start - 1) == units[start].0 && runs_on(start - 1, true) {
+                continue;
+            }
+            let mut surface = String::new();
+            for last in start..units.len() {
+                if last > start && end(last - 1) != units[last].0 {
+                    break;
+                }
+                surface.push_str(&units[last].1);
+                if surface.chars().count() > self.longest {
+                    break;
+                }
+                let apart_after = units
+                    .get(last + 1)
+                    .is_none_or(|next| next.0 != end(last) || !runs_on(last + 1, false));
+                if !apart_after || !self.surfaces.contains(&surface) {
+                    continue;
+                }
+                if last == start {
+                    *self
+                        .whole
+                        .entry((surface.clone(), units[start].2.clone()))
+                        .or_default() += 1;
+                } else {
+                    *self.split.entry(surface.clone()).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    /// How many places write `title`'s surface as one unit read as `title`
+    /// or across units; none for a title not of kanji and katakana.
+    fn count(&self, title: &Title) -> Option<usize> {
+        if !self.surfaces.contains(&title.surface) {
+            return None;
+        }
+        let whole = self
+            .whole
+            .get(&(title.surface.clone(), title.reading.clone()))
+            .copied()
+            .unwrap_or(0);
+        Some(whole + self.split.get(&title.surface).copied().unwrap_or(0))
+    }
+}
+
+fn is_word_char(c: char) -> bool {
+    is_kanji(c) || is_katakana(c) || c == 'ー'
 }
 
 /// The `titles` used in `year` at least [`NOVELTY`] times as often, per
@@ -374,6 +503,119 @@ mod tests {
         ];
 
         assert_eq!(surfaces(title_entries(&titles, texts, 100)), ["中道改革"]);
+    }
+
+    /// Units of document `doc` from `(position, reading, surface)`.
+    fn units_of(doc: &str, parts: &[(usize, &str, &str)]) -> Vec<Unit> {
+        parts
+            .iter()
+            .map(|&(position, reading, surface)| Unit {
+                compound: false,
+                okurigana_variant: false,
+                doc_id: doc.into(),
+                position,
+                reading: reading.into(),
+                surface: surface.into(),
+                stem_reading: None,
+                stem_surface: None,
+                conjugation: None,
+                unknown_conjugation: None,
+                numeric: None,
+            })
+            .collect()
+    }
+
+    fn reads(titles: &[Title], units: &[Unit]) -> TitleReadings {
+        let mut reads = TitleReadings::new(titles);
+        for u in units {
+            reads.observe(u);
+        }
+        reads.finish()
+    }
+
+    fn costs(entries: &[Entry]) -> Vec<(&str, u32)> {
+        entries
+            .iter()
+            .map(|e| (e.surface.as_str(), e.cost))
+            .collect()
+    }
+
+    #[test]
+    fn a_title_whose_surface_a_unit_reads_otherwise_is_not_counted_there() {
+        let titles = [title("とうけい", "東京")];
+        let units = [
+            units_of("a:1", &[(0, "とうきょう", "東京")]),
+            units_of("a:2", &[(0, "とうきょう", "東京")]),
+        ]
+        .concat();
+        let texts = ["東京へ行く。", "東京に住む。"];
+
+        let entries = read_title_entries(&titles, &reads(&titles, &units), texts, 100);
+
+        assert_eq!(entries, []);
+    }
+
+    #[test]
+    fn a_title_counts_the_units_read_as_it_and_the_places_units_split_it() {
+        let titles = [title("さんみいったい", "三位一体")];
+        let units = [
+            units_of("a:1", &[(0, "さんみいったい", "三位一体")]),
+            units_of("a:2", &[(0, "さんい", "三位"), (2, "いったい", "一体")]),
+        ]
+        .concat();
+        let texts = ["三位一体。", "三位一体。"];
+
+        let entries = read_title_entries(&titles, &reads(&titles, &units), texts, 100);
+
+        assert_eq!(costs(&entries), [("三位一体", cost_of(2, 100))]);
+    }
+
+    #[test]
+    fn a_title_inside_a_longer_unit_or_run_of_kanji_is_not_counted() {
+        let titles = [title("かし", "菓子"), title("とうきょう", "東京")];
+        let units = [
+            units_of("a:1", &[(0, "かし", "菓子"), (3, "おかし", "お菓子")]),
+            units_of("a:2", &[(0, "かし", "菓子"), (3, "おかし", "お菓子")]),
+            units_of("a:3", &[(0, "とうきょう", "東京"), (2, "とちょう", "都庁")]),
+            units_of("a:4", &[(0, "とうきょう", "東京"), (2, "とちょう", "都庁")]),
+        ]
+        .concat();
+        let texts = ["菓子とお菓子", "菓子とお菓子", "東京都庁", "東京都庁"];
+
+        let entries = read_title_entries(&titles, &reads(&titles, &units), texts, 100);
+
+        assert_eq!(costs(&entries), [("菓子", cost_of(2, 100))]);
+    }
+
+    #[test]
+    fn a_compound_does_not_count_apart_from_the_units_it_groups() {
+        let titles = [title("へいあんじだい", "平安時代")];
+        let mut units = Vec::new();
+        for doc in ["a:1", "a:2"] {
+            units.extend(units_of(
+                doc,
+                &[(0, "へいあん", "平安"), (2, "じだい", "時代")],
+            ));
+            units.push(Unit {
+                compound: true,
+                ..units_of(doc, &[(0, "へいあんじだい", "平安時代")]).remove(0)
+            });
+        }
+        let texts = ["平安時代。", "平安時代。"];
+
+        let entries = read_title_entries(&titles, &reads(&titles, &units), texts, 100);
+
+        assert_eq!(costs(&entries), [("平安時代", cost_of(2, 100))]);
+    }
+
+    #[test]
+    fn a_title_with_hiragana_counts_where_its_surface_occurs() {
+        let titles = [title("れいわのこめそうどう", "令和の米騒動")];
+        let texts = ["令和の米騒動。", "令和の米騒動。"];
+
+        let entries = read_title_entries(&titles, &reads(&titles, &[]), texts, 100);
+
+        assert_eq!(costs(&entries), [("令和の米騒動", cost_of(2, 100))]);
     }
 
     #[test]

@@ -13,14 +13,15 @@ use kanaemi_dict::{
     Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Corrections,
     CorrectionsError, CutError, Dictionary, DistError, DocumentsError, EvalDocument,
     EvalDocumentsError, Evaluation, ExampleFile, Examples, ReadingsError, RejectedLines, Split,
-    TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError, WordCasesError,
-    WordResult, WriteError, agreement, check_words, counted_reading, counted_words, counter_words,
-    cut_documents, dictionary_lines, document_sources, document_texts, each_document_with_units,
-    engine, eval_documents, evaluate_documents, examples_of_document, field_dictionary, gather,
-    is_word, model_file, okurigana_dictionary, parse_corrections, parse_word_cases, paths_of,
-    place_dictionary, place_names, plain_words, read_names, read_titles, read_units, reading_form,
-    sample_tsv, shared_readings, sources_file, split_of, take, title_entries, train,
-    word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
+    WordCasesError, WordResult, WriteError, agreement, check_words, counted_reading,
+    counted_words, counter_words, cut_documents, dictionary_lines, document_sources,
+    document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
+    examples_of_document, field_dictionary, gather, is_word, model_file, okurigana_dictionary,
+    parse_corrections, parse_word_cases, paths_of, place_dictionary, place_names, plain_words,
+    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
+    shared_readings, sources_file, split_of, take, title_entries, train, word_misses_tsv,
+    word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -325,8 +326,13 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
     let outputs = if train_only { BASE_TRAIN } else { BASE };
     let unidic = unidic_words()?;
     let names = read_names(open(BASE_NAMES)?).map_err(read_error(BASE_NAMES))?;
+    let titles = read_titles(open(BASE_TITLES)?).map_err(|source| Error::Titles {
+        path: BASE_TITLES.into(),
+        source,
+    })?;
     let (dictionary, took_titles) = {
         let mut chains = ChainCounter::new(&names);
+        let mut reads = TitleReadings::new(&titles);
         let mut failure = None;
         let units = read_units(open(UNITS)?)
             .map_while(|unit| {
@@ -344,6 +350,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             units.inspect(|unit| {
                 total += 1;
                 chains.observe(unit);
+                reads.observe(unit);
             }),
             &unidic,
         );
@@ -357,13 +364,12 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             path: DOCS.into(),
             source,
         })?;
-        let titles = {
-            let titles = read_titles(open(BASE_TITLES)?).map_err(|source| Error::Titles {
-                path: BASE_TITLES.into(),
-                source,
-            })?;
-            title_entries(&titles, texts.iter().map(String::as_str), total)
-        };
+        let titles = read_title_entries(
+            &titles,
+            &reads.finish(),
+            texts.iter().map(String::as_str),
+            total,
+        );
         let mut took_titles = !titles.is_empty();
         dictionary.add_words(titles);
         let chained = {
