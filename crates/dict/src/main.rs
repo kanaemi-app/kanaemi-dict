@@ -12,15 +12,16 @@ use std::sync::Arc;
 use kanaemi_dict::{
     Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Corrections,
     CorrectionsError, CutError, Dictionary, DistError, DocumentsError, EvalDocument,
-    EvalDocumentsError, Evaluation, ExampleFile, Examples, ReadingsError, RejectedLines, Split,
-    TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
-    WordCase, WordCasesError, WordResult, WriteError, agreement, check_words, counted_reading,
-    counted_words, counter_words, cut_documents, dictionary_lines, document_sources,
-    document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
-    examples_of_document, field_dictionary, gather, is_word, model_file, okurigana_dictionary,
-    parse_corrections, parse_word_cases, paths_of, place_dictionary, place_names, plain_words,
-    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
-    shared_readings, sources_file, split_of, take, title_entries, train, word_misses_tsv,
+    EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, ReadingsError,
+    RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
+    Unit, UnitsError, WordCase, WordCasesError, WordResult, WriteError, agreement, check_words,
+    counted_reading, counted_words, counter_words, cut_documents, dictionary_lines,
+    document_sources, document_texts, each_document_with_units, engine, eval_documents,
+    evaluate_documents, examples_of_document, excluded_readings, field_dictionary, gather, is_word,
+    kanji_entries, model_file, mozc_readings, okurigana_dictionary, parse_corrections,
+    parse_word_cases, paths_of, place_dictionary, place_names, plain_words, read_names,
+    read_title_entries, read_titles, read_units, reading_form, sample_tsv, shared_readings,
+    sources_file, split_of, take, title_entries, train, unihan_readings, word_misses_tsv,
     word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
@@ -38,6 +39,14 @@ const BASE_TITLES: &str = "build/base-titles.tsv";
 /// The names of the Wikipedia articles and redirects, which
 /// `scripts/base-titles.ts` writes.
 const BASE_NAMES: &str = "build/base-names.txt";
+/// Mozc's table of single kanji and the Unihan readings, which
+/// `scripts/kanji.ts` writes, and the pairs kept out of them.
+const KANJI_TABLE: &str = "build/kanji/single_kanji.tsv";
+const UNIHAN_READINGS: &str = "build/kanji/Unihan_Readings.txt";
+const KANJI_EXCLUDED: &str = "kanji/excluded.tsv";
+/// The sources of the single kanji readings.
+const KANJI_SOURCE: &str = "mozc-single-kanji";
+const UNIHAN_SOURCE: &str = "unicode-unihan";
 const UNITS: &str = "build/units.jsonl";
 const EVALUATION: &str = "build/evaluation.tsv";
 const DICTIONARIES: &str = "build/dictionaries";
@@ -182,6 +191,8 @@ enum Error {
         path: PathBuf,
         source: CorrectionsError,
     },
+    #[error("{}: {source}", path.display())]
+    Kanji { path: PathBuf, source: KanjiError },
     #[error("{}: {source}", path.display())]
     Units { path: PathBuf, source: UnitsError },
     #[error("{}: {source}", path.display())]
@@ -333,7 +344,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         path: BASE_TITLES.into(),
         source,
     })?;
-    let (dictionary, took_titles) = {
+    let (dictionary, took_titles, took_unihan) = {
         let mut chains = ChainCounter::new(&names);
         let mut reads = TitleReadings::new(&titles);
         let mut failure = None;
@@ -409,11 +420,28 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             })?
         };
         dictionary.add_words(counted);
+        let (kanji, took_unihan) = {
+            let excluded =
+                excluded_readings(&read_to_string(KANJI_EXCLUDED)?).map_err(|source| {
+                    Error::Kanji {
+                        path: KANJI_EXCLUDED.into(),
+                        source,
+                    }
+                })?;
+            kanji_entries(
+                &dictionary.entries,
+                &mozc_readings(&read_to_string(KANJI_TABLE)?),
+                &unihan_readings(&read_to_string(UNIHAN_READINGS)?),
+                &excluded,
+            )
+        };
+        println!("single kanji: {}", kanji.len());
+        dictionary.add_words(kanji);
         let corrections = corrections()?;
         dictionary.drop_words(|reading, surface| {
             corrections.drops(surface) || !is_word(reading, surface)
         });
-        (dictionary, took_titles)
+        (dictionary, took_titles, took_unihan)
     };
     let text = dictionary
         .to_checked_text(BASE_LABEL)
@@ -438,6 +466,10 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         sources.extend(ANALYZER_SOURCES.map(String::from));
         if took_titles {
             sources.insert(TITLES_SOURCE.to_owned());
+        }
+        sources.insert(KANJI_SOURCE.to_owned());
+        if took_unihan {
+            sources.insert(UNIHAN_SOURCE.to_owned());
         }
         write_sources(outputs.dictionary, text.as_bytes(), None, &sources)?;
     }
