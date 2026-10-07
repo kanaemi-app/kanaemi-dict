@@ -1,5 +1,5 @@
 Unicode の Unihan データベース（Unihan_Readings.txt の kJapanese）
-https://www.unicode.org/charts/unihan.html
+https://www.unicode.org/Public/18.0.0/ucd/Unihan.zip（Unicode 18.0.0）
 
 基本辞書の漢字一字の読みのうち、Mozc の単漢字の表にない字の音読みは、Unihan データベースから取った。Unihan データベースは次の条件で配布されている。
 

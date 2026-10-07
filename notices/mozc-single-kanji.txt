@@ -1,5 +1,5 @@
 Mozc の単漢字の表（src/data/single_kanji/single_kanji.tsv）
-https://github.com/google/mozc
+https://github.com/google/mozc/tree/23366530244c9c85a7c0c0e0e766e04fde8e0d4d
 
 基本辞書の漢字一字の読みは、Mozc の単漢字の表から取った。人名の辞書で人名を姓と名に分けるときにも、この表の読みを使った。Mozc は次の条件で配布されている。
 

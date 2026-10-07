@@ -1,5 +1,5 @@
 Mozc の絵文字の表（src/data/emoji/emoji_data.tsv、src/data/emoji/manual_emoji_data.tsv）
-https://github.com/google/mozc
+https://github.com/google/mozc/tree/23366530244c9c85a7c0c0e0e766e04fde8e0d4d
 
 絵文字の辞書の絵文字と読みは、Mozc の絵文字の表から取った。Mozc は次の条件で配布されている。
 

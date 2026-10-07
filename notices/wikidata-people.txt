@@ -1,4 +1,4 @@
 Wikidata の人物の読み仮名（P1814）
-https://www.wikidata.org/
+https://www.wikidata.org/（QLever https://qlever.dev/ の Wikidata の索引から取った）
 
 人名の辞書の人名と読みは、Wikidata の人物の項目の日本語のラベルと読み仮名から取った。並びには、項目のサイトリンク数と日本語版ウィキペディアの記事の有無を使った。Wikidata の構造化データは CC0 1.0（https://creativecommons.org/publicdomain/zero/1.0/）で提供されている。

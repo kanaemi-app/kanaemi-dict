@@ -130,8 +130,9 @@ pub fn notice(
             texts.push(text);
         }
     }
-    let mut out =
-        String::from("この辞書は、次の素材を使って作った。素材の文章は辞書に含まない。\n");
+    let mut out = String::from(
+        "この辞書は、次の素材を使って作った。素材の文章は辞書に含まない。一覧から取った項目は、それぞれの一覧の条件に従って辞書に含む。\n",
+    );
     for text in texts {
         out.push_str(
             "\n----------------------------------------------------------------------\n\n",
@@ -464,6 +465,9 @@ mod tests {
         assert_eq!(notice.matches("FineWeb-2").count(), 1);
         assert_eq!(notice.matches("hatena-hotentry").count(), 1);
         assert!(notice.find("aozora-text") < notice.find("FineWeb-2"));
+        let preface = notice.lines().next().unwrap();
+        assert!(preface.contains("素材の文章は辞書に含まない"));
+        assert!(preface.contains("一覧から取った項目"));
     }
 
     #[test]

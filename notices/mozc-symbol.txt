@@ -1,5 +1,5 @@
 Mozc の記号の表（src/data/symbol/symbol.tsv）
-https://github.com/google/mozc
+https://github.com/google/mozc/tree/23366530244c9c85a7c0c0e0e766e04fde8e0d4d
 
 記号の辞書の記号と読みは、Mozc の記号の表から取った。Mozc は次の条件で配布されている。
 
