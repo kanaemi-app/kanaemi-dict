@@ -253,8 +253,16 @@ const NO_FUNCTIONS_FOLDER: &str = "";
 /// functions. Engines on several threads share one parsed dictionary; each
 /// has functions of its own, which stay on its thread.
 pub fn engine(dictionary: Arc<TextDictionary>) -> Engine {
+    engine_with(&[dictionary])
+}
+
+/// [`engine`] with `dictionaries` in their order of priority, as a typist
+/// lists the base dictionary first and the additional ones after it.
+pub fn engine_with(dictionaries: &[Arc<TextDictionary>]) -> Engine {
     let mut engine = Engine::new(
-        [Slot::Dictionary(Box::new(dictionary))],
+        dictionaries
+            .iter()
+            .map(|d| Slot::Dictionary(Box::new(d.clone()))),
         TextDictionary::default(),
         Discard,
     );

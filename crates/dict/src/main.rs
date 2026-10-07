@@ -178,6 +178,9 @@ usage: kanaemi-dict units
          surface did not come first to build/check-words-misses.tsv
        kanaemi-dict check-words --build
          the same with build/dictionaries/base.tsv, without a model
+       kanaemi-dict check-words [--build] --with NAME...
+         the same with the additional dictionaries NAME of
+         build/dictionaries/ listed after the base dictionary
        kanaemi-dict check-sample
          sample the items of the dictionaries of dictionaries/ by stratum
          into build/check-sample.tsv for people to judge
@@ -266,8 +269,12 @@ fn main() -> ExitCode {
         ["ranking"] => train_ranking(),
         ["take"] => take_built(),
         ["dist"] => build_dist(),
-        ["check-words"] => check_kept_words(),
-        ["check-words", "--build"] => check_built_words(),
+        ["check-words"] => check_kept_words(&[]),
+        ["check-words", "--build"] => check_built_words(&[]),
+        ["check-words", "--with", ref names @ ..] if !names.is_empty() => check_kept_words(names),
+        ["check-words", "--build", "--with", ref names @ ..] if !names.is_empty() => {
+            check_built_words(names)
+        }
         ["check-sample"] => sample_kept(),
         ["check-readings"] => check_kept_readings(),
         ["check-wikidata"] => check_wikidata(),
@@ -727,27 +734,40 @@ fn take_built() -> Result<(), Error> {
     Ok(())
 }
 
-/// Converts the word set with the base dictionary that ships, without and
-/// with its model.
-fn check_kept_words() -> Result<(), Error> {
+/// Converts the word set with the base dictionary that ships and the built
+/// additional dictionaries `with` after it, without and with its model.
+fn check_kept_words(with: &[&str]) -> Result<(), Error> {
     let cases = word_cases()?;
-    let dictionary = parsed_dictionary(&format!("{KEPT}/base.tsv"))?;
+    let dictionaries = with_additional(parsed_dictionary(&format!("{KEPT}/base.tsv"))?, with)?;
     let model = RankingModel::open(KEPT_MODEL).map_err(|source| Error::Model {
         path: KEPT_MODEL.into(),
         source,
     })?;
-    let off = check_words(&cases, &dictionary, None);
-    let on = check_words(&cases, &dictionary, Some(&Arc::new(model)));
+    let off = check_words(&cases, &dictionaries, None);
+    let on = check_words(&cases, &dictionaries, Some(&Arc::new(model)));
     write_word_checks(&cases, &[("off", &off), ("on", &on)])
 }
 
 /// [`check_kept_words`] with the base dictionary just built, which has no
 /// model paired with it until the model is trained again.
-fn check_built_words() -> Result<(), Error> {
+fn check_built_words(with: &[&str]) -> Result<(), Error> {
     let cases = word_cases()?;
-    let dictionary = parsed_dictionary(BASE.dictionary)?;
-    let off = check_words(&cases, &dictionary, None);
+    let dictionaries = with_additional(parsed_dictionary(BASE.dictionary)?, with)?;
+    let off = check_words(&cases, &dictionaries, None);
     write_word_checks(&cases, &[("off", &off)])
+}
+
+/// `base` followed by the additional dictionaries `names` built under
+/// build/dictionaries/, as a typist lists them.
+fn with_additional(
+    base: Arc<TextDictionary>,
+    names: &[&str],
+) -> Result<Vec<Arc<TextDictionary>>, Error> {
+    let mut dictionaries = vec![base];
+    for name in names {
+        dictionaries.push(parsed_dictionary(&format!("{DICTIONARIES}/{name}.tsv"))?);
+    }
+    Ok(dictionaries)
 }
 
 fn word_cases() -> Result<Vec<WordCase>, Error> {

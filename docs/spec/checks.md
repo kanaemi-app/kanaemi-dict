@@ -28,6 +28,8 @@
 
 `just check-words --build` は、作ったばかりの `build/dictionaries/base.tsv` を、モデルなしで変換する。基本辞書を作り直すたびに、モデルを学習し直したり `dictionaries/` に入れたりせずに測るため。モデルは組になる基本辞書で学習し直すまで使えないので、モデルありは測らない。
 
+`--with NAME...` を付けると、`build/dictionaries/NAME.tsv` の追加辞書を、基本辞書の後ろに並べて読ませる（`just check-words --with person emoji`）。利用者が基本辞書に追加辞書を足したとき、ふつうの語の並びが崩れないかを測るため。
+
 ## 項目の抜き出し
 
 辞書の項目を無作為に抜き出し、人が正誤を判定して、辞書の誤りの割合を見積もる。

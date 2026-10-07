@@ -11,7 +11,7 @@ use kanaemi_engine::{RankingModel, TextDictionary, terminal_ending};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::dictionary::UNIDIC_UNSEEN;
-use crate::evaluation::{Field, Score, engine, offered};
+use crate::evaluation::{Field, Score, engine_with, offered};
 use crate::kana::{hiragana_to_katakana, is_kanji};
 
 /// One word of the word set: what is typed, after which text, and the
@@ -102,14 +102,14 @@ pub fn check_word(field: &mut impl Field, case: &WordCase) -> WordResult {
     }
 }
 
-/// Converts every case with an engine reading `dictionary` alone, ranking
-/// with `model` when given.
+/// Converts every case with an engine reading `dictionaries` in their order
+/// of priority, ranking with `model` when given.
 pub fn check_words(
     cases: &[WordCase],
-    dictionary: &Arc<TextDictionary>,
+    dictionaries: &[Arc<TextDictionary>],
     model: Option<&Arc<RankingModel>>,
 ) -> Vec<WordResult> {
-    let mut engine = engine(dictionary.clone());
+    let mut engine = engine_with(dictionaries);
     engine.set_model(model.cloned());
     cases.iter().map(|c| check_word(&mut engine, c)).collect()
 }
@@ -528,10 +528,25 @@ mod tests {
             case("熟字訓", "", "いなか", None, &["田舎"]),
         ];
 
-        let results = check_words(&cases, &Arc::new(dictionary), None);
+        let results = check_words(&cases, &[Arc::new(dictionary)], None);
 
         let ranks: Vec<_> = results.iter().map(|r| r.rank).collect();
         assert_eq!(ranks, [Some(1), Some(1), None]);
+    }
+
+    #[test]
+    fn an_additional_dictionary_comes_after_the_base_whatever_its_costs() {
+        let (base, _) = TextDictionary::parse("まさと\t正人\t\t3000\n");
+        let (person, _) = TextDictionary::parse("まさと\t優人\t\t100\nいなか\t田舎\n");
+        let cases = [
+            case("人名", "", "まさと", None, &["正人"]),
+            case("熟字訓", "", "いなか", None, &["田舎"]),
+        ];
+
+        let results = check_words(&cases, &[Arc::new(base), Arc::new(person)], None);
+
+        let ranks: Vec<_> = results.iter().map(|r| r.rank).collect();
+        assert_eq!(ranks, [Some(1), Some(1)]);
     }
 
     #[test]

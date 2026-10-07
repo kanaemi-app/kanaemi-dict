@@ -94,7 +94,8 @@ dist:
 
 # Convert the word set evaluation/words.tsv with the base dictionary and model of dictionaries/, without and with the model,
 # into build/check-words.tsv and the words that did not come first into build/check-words-misses.tsv;
-# `--build` converts build/dictionaries/base.tsv instead, without a model.
+# `--build` converts build/dictionaries/base.tsv instead, without a model; `--with NAME...` (last) adds the additional
+# dictionaries build/dictionaries/NAME.tsv after the base dictionary.
 check-words *flags:
     cargo run --release -p kanaemi-dict -- check-words {{flags}}
 
