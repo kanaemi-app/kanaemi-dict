@@ -1,6 +1,6 @@
 # Wikipedia の記事とリダイレクトの見出しにある語を、基本辞書に入れる
 
-状態：採用。「四字熟語やことわざは、Wikipedia の記事の見出しからも基本辞書に取る」（`20261007-take-set-phrases-from-wikipedia-titles-into-the-base.md`）を置き換える。
+状態：採用。「四字熟語やことわざは、Wikipedia の記事の見出しからも基本辞書に取る」（`20261007-take-set-phrases-from-wikipedia-titles-into-the-base.md`）を置き換える。見出しを数える回数は「見出しは、文書で見出しと同じ読みの語として出た回数で数える」（`20261007-count-titles-by-units-read-as-the-title.md`）で一部置き換えた。
 
 ## 背景
 
