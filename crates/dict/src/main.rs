@@ -18,11 +18,12 @@ use kanaemi_dict::{
     counted_reading, counted_words, counter_words, cut_documents, dictionary_lines,
     document_sources, document_texts, each_document_with_units, engine, eval_documents,
     evaluate_documents, examples_of_document, excluded_readings, field_dictionary, gather, is_word,
-    kanji_entries, model_file, mozc_readings, okurigana_dictionary, parse_corrections,
-    parse_word_cases, paths_of, place_dictionary, place_names, plain_words, read_names,
-    read_title_entries, read_titles, read_units, reading_form, sample_tsv, shared_readings,
-    sources_file, split_of, take, title_entries, train, unihan_readings, word_misses_tsv,
-    word_scores_tsv, write_atomically, year_dictionary,
+    kanji_entries, mismatches_tsv, model_file, mozc_readings, okurigana_dictionary,
+    parse_corrections, parse_word_cases, paths_of, place_dictionary, place_names, plain_words,
+    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
+    shared_readings, sources_file, split_of, take, title_entries, train, unihan_readings,
+    wikidata_mismatches, wikidata_readings, word_misses_tsv, word_scores_tsv, write_atomically,
+    year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -98,6 +99,10 @@ const CHECK_WORD_MISSES: &str = "build/check-words-misses.tsv";
 /// The model that ships with the base dictionary.
 const KEPT_MODEL: &str = "dictionaries/base.model";
 const CHECK_SAMPLE: &str = "build/check-sample.tsv";
+/// The readings of Wikidata's items, which `scripts/wikidata.ts` writes, and
+/// the words of the base dictionary that read none of their ways.
+const WIKIDATA_READINGS: &str = "build/wikidata/readings.tsv";
+const CHECK_WIKIDATA: &str = "build/check-wikidata.tsv";
 /// Items sampled from each stratum of the base dictionary and from each
 /// additional dictionary.
 const SAMPLE_BASE: usize = 60;
@@ -171,7 +176,11 @@ usage: kanaemi-dict units
        kanaemi-dict check-readings
          read the surfaces with kanji of the dictionaries of dictionaries/
          with MeCab and write the items no path of it reads as the
-         dictionary does to build/check-readings.tsv";
+         dictionary does to build/check-readings.tsv
+       kanaemi-dict check-wikidata
+         compare the base dictionary of dictionaries/ with the readings of
+         Wikidata's items in build/wikidata/readings.tsv and write the words
+         that read none of their items' ways to build/check-wikidata.tsv";
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -253,6 +262,7 @@ fn main() -> ExitCode {
         ["check-words", "--build"] => check_built_words(),
         ["check-sample"] => sample_kept(),
         ["check-readings"] => check_kept_readings(),
+        ["check-wikidata"] => check_wikidata(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -810,6 +820,25 @@ fn sample_kept() -> Result<(), Error> {
             .map_err(write_error(CHECK_SAMPLE))
     })?;
     println!("items: {}, out: {CHECK_SAMPLE}", tsv.lines().count() - 1);
+    Ok(())
+}
+
+/// Lists the words of the base dictionary that ships whose readings are none
+/// of the readings of the Wikidata items of their surface.
+fn check_wikidata() -> Result<(), Error> {
+    let readings = wikidata_readings(&read_to_string(WIKIDATA_READINGS)?);
+    let base_path = format!("{KEPT}/base.tsv");
+    let base = read_to_string(&base_path)?;
+    let (summary, mismatches) =
+        wikidata_mismatches(&readings, dictionary_lines(&base).map(|(_, line)| line));
+    write_atomically(CHECK_WIKIDATA, |w| {
+        w.write_all(mismatches_tsv(&mismatches).as_bytes())
+            .map_err(write_error(CHECK_WIKIDATA))
+    })?;
+    println!(
+        "labels: {}, in the base: {}, mismatched: {}, out: {CHECK_WIKIDATA}",
+        summary.labels, summary.in_base, summary.mismatched
+    );
     Ok(())
 }
 

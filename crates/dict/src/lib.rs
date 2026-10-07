@@ -24,6 +24,7 @@ mod ranking;
 mod split;
 mod unidic;
 mod units;
+mod wikidata;
 
 pub use additional::*;
 pub use analyzer::*;
@@ -45,3 +46,4 @@ pub use ranking::*;
 pub use split::*;
 pub use unidic::*;
 pub use units::*;
+pub use wikidata::*;

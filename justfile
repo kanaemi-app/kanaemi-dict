@@ -107,6 +107,15 @@ check-sample:
 check-readings:
     cargo run --release -p kanaemi-dict -- check-readings
 
+# Fetch the readings in kana of Wikidata's items from QLever into build/wikidata/ (again with `--refresh`).
+wikidata *args:
+    deno run --allow-read --allow-write --allow-net scripts/wikidata.ts {{args}}
+
+# List the words of dictionaries/base.tsv that read none of the ways the Wikidata items of their surface read
+# in build/check-wikidata.tsv.
+check-wikidata:
+    cargo run --release -p kanaemi-dict -- check-wikidata
+
 # Run the tests that need SudachiDict (`just sudachi` first).
 test-sudachi:
     cargo test --workspace --release -- --ignored
