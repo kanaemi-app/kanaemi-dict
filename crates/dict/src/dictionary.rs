@@ -102,9 +102,11 @@ impl Dictionary {
             }
             *surfaces.entry(unit.surface.clone()).or_default() += 1;
             if let Some(n) = &unit.numeric {
-                *numeric_counts
-                    .entry((n.reading.clone(), n.surface.clone()))
-                    .or_default() += 1;
+                if !is_glossed(&n.surface) {
+                    *numeric_counts
+                        .entry((n.reading.clone(), n.surface.clone()))
+                        .or_default() += 1;
+                }
                 continue;
             }
             if let Some(t) = &unit.unknown_conjugation {
@@ -704,6 +706,26 @@ mod tests {
 
         assert_eq!(dict.numeric, [entry("{}まい", "{}枚", None, cost(2, 4))]);
         assert!(dict.entries.is_empty(), "{:?}", dict.entries);
+    }
+
+    #[test]
+    fn a_numeric_unit_with_a_gloss_in_brackets_makes_no_numeric_entry() {
+        let units = [
+            counted(
+                "5か",
+                "5日（アスキー）",
+                ("{}か", "{half-num}日（アスキー）", "5"),
+            ),
+            counted(
+                "3か",
+                "3日（アスキー）",
+                ("{}か", "{half-num}日（アスキー）", "3"),
+            ),
+        ];
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(dict.numeric, []);
     }
 
     #[test]
