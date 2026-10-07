@@ -1,0 +1,2 @@
+# sha256 74b2ab50d578555978fc33bd4c912bdf375e5ae9c7ab4b8dcaf100b19cacef2f
+mozc-emoticon

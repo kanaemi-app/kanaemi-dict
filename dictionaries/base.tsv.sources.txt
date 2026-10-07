@@ -1,12 +1,14 @@
-# sha256 77d203f01416c374bb82e8ae41a33259a047b1ca2a75fed9786e6babd7bb156f
+# sha256 4971cca03341b4a458e6bdab0355f50e25e0a5252ef49856703e999771f5c40a
 aozora-text
 egov-all-xml
 fineweb2-jpn
 fineweb2-jpn-train
+mozc-single-kanji
 pydocs-ja
 rurema
 sudachidict-full
 sudachidict-small
 sudachidict-small-lex
+unicode-unihan
 wikinews-ja
 wikipedia-ja

@@ -1,0 +1,3 @@
+# sha256 abaf41ed9efd3f9bc1bf2dcfe9151f6c78e68b183676777ef9b8177d03b37c05
+mozc-emoji:emoji_data
+mozc-emoji:manual_emoji_data

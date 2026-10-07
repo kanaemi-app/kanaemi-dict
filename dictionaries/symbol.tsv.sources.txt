@@ -1,0 +1,2 @@
+# sha256 d77cf1c5ac61ee4beccc9c0b5ad94caa6fd60faa8f3dd38102a57d9ab13847d5
+mozc-symbol

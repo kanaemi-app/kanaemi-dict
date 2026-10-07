@@ -1,4 +1,4 @@
-# sha256 30d87ca7842595f268132c0d1b7403681ccd4d2e4393f0f167f9b6f3e23de438
+# sha256 ed95726ad511fa71c85e0775d04eda3108dd58addfd16d6a2895030520c0a283
 aozora-text
 egov-all-xml
 hatena-hotentry:20260101
@@ -278,6 +278,8 @@ hatena-hotentry:20261001
 hatena-hotentry:20261002
 hatena-hotentry:20261003
 hatena-hotentry:20261004
+hatena-hotentry:20261005
+hatena-hotentry:20261006
 sudachidict-full
 sudachidict-small
 sudachidict-small-lex
