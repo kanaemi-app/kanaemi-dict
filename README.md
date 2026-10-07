@@ -34,6 +34,16 @@ dictionaries = ["custom", "kanaemi-base.tsv", "kanaemi-railway.tsv", "kanaemi-it
 
 辞書を作るのに使った素材の表示は、配布物の `NOTICE` にある。素材の文章は、辞書にもモデルにも含まない。素材をどう扱うかは [文章は解析にだけ使い、素材のライセンスは問わない](docs/adr/20261004-read-any-text-for-analysis-only.md) による。
 
+文章から作れない語は、再配布と改変が認められた一覧から取って辞書に含める（[他の辞書の項目一覧は、文章から作れない語に要り、再配布と改変が明記されているときに取り込む](docs/adr/20261007-take-other-lists-only-for-words-text-cannot-make.md)）。その一覧の条件の表示も、取った辞書の `NOTICE` にある。
+
+| 辞書 | 取った一覧 | 条件 |
+| --- | --- | --- |
+| 基本辞書（漢字一字の読み） | Mozc の単漢字の表、Unicode の Unihan データベース | BSD-3-Clause、Unicode License v3 |
+| 記号・顔文字 | Mozc の記号の表、顔文字の表 | BSD-3-Clause |
+| 絵文字 | Mozc の絵文字の表（読みは Unicode CLDR から） | BSD-3-Clause、Unicode License v3 |
+| 地名 | 日本郵便の郵便番号データ | 日本郵便は著作権を主張せず、自由に配布できる |
+| 人名 | Wikidata の人物の読み仮名 | CC0 1.0 |
+
 ## 辞書を作る
 
 辞書とモデルは手元で素材の取得から作り、評価してから [dictionaries/](dictionaries/) にコミットする。CI は、コミットされたものを確かめて配布物にまとめるだけで、素材の取得はしない（[辞書は手元で作ってコミットし、CI は配布物にまとめるだけにする](docs/adr/20261004-commit-built-dictionaries-and-package-in-ci.md)）。
@@ -47,6 +57,7 @@ nix develop
 just fetch                     # 素材を build/raw に取得する
 just sudachi                   # 解析器の辞書と UniDic の語彙を用意する
 just docs                      # 素材から文書を取り出す
+just kanji                     # 漢字一字の読みの表（Mozc、Unihan）を取得する
 just base-titles               # Wikipedia の記事とリダイレクトの見出しを取り出す
 just units                     # 文書を変換の単位に切る
 just dictionary                # 基本辞書を作る
@@ -54,7 +65,7 @@ just dictionary --train-only   # 評価と学習に使う、学習用の文書�
 just evaluate                  # 基本辞書を評価する
 
 # 追加辞書
-just additional-fetch          # 郵便番号データとその年の人気エントリーを取得する
+just additional-fetch          # 郵便番号データ、Mozc の記号・絵文字・顔文字の表、Wikidata の人物、その年の人気エントリーを取得する
 just additional-docs           # 追加辞書ごとの文書を取り出す
 just additional                # 追加辞書を作る
 
@@ -74,6 +85,8 @@ just dist                      # 配布物にまとめられるかを確かめ�
 just check-words               # 人が書いた正解集で変換する
 just check-sample              # 人が判定する項目を層ごとに抜き出す
 just check-readings            # MeCab の読みと食い違う項目を並べる
+just wikidata                  # Wikidata の読み仮名を取得する
+just check-wikidata            # Wikidata の読み仮名と食い違う語を並べる
 ```
 
 `just` だけを流すと、レシピの一覧が出る。コードを変えたら `just ci` を通す。
