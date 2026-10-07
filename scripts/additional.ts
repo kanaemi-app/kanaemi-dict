@@ -33,6 +33,7 @@ import {
   HATENA_INTERVAL_MS,
   HATENA_SOURCE,
   hatenaHotentry,
+  notPublishedYet,
   yearInJapan,
 } from "./additional/hatena.ts";
 import { articlesOf, type Title, writeTitlesTo } from "./additional/wikipedia.ts";
@@ -87,13 +88,18 @@ async function fetchAll(year: number, refresh: boolean): Promise<void> {
   }
   for (const { name } of years) {
     const days = daysOf(Number(name), new Date());
-    for (const day of days) {
+    for (const [i, day] of days.entries()) {
       if (!robotsAllows(robots, USER_AGENT, robotsPath(`${HATENA_HOTENTRY}${day}`))) {
         throw new Error(`Hatena Bookmark's robots.txt disallows ${HATENA_HOTENTRY}${day}`);
       }
-      await get(`${HATENA_SOURCE}${day}`, `${HATENA_HOTENTRY}${day}`, {
-        minIntervalMs: HATENA_INTERVAL_MS,
-      });
+      try {
+        await get(`${HATENA_SOURCE}${day}`, `${HATENA_HOTENTRY}${day}`, {
+          minIntervalMs: HATENA_INTERVAL_MS,
+        });
+      } catch (e) {
+        if (!notPublishedYet(e, i === days.length - 1)) throw e;
+        console.log(`hatena ${day}\tnot published yet`);
+      }
     }
     console.log(`hatena ${name}\t${days.length} days`);
   }

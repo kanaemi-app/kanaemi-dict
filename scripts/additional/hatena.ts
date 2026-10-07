@@ -5,6 +5,7 @@
 import { type Document, documentOf } from "../docs/document.ts";
 import { parseDocument } from "../docs/html.ts";
 import { finishLines } from "../docs/text.ts";
+import { HttpError } from "../raw/fetch.ts";
 
 /** A day's hot entries, `YYYYMMDD` appended. */
 export const HATENA_HOTENTRY = "https://b.hatena.ne.jp/hotentry/all/";
@@ -45,6 +46,15 @@ export function daysOf(year: number, now: Date): string[] {
     days.push(new Date(day).toISOString().slice(0, 10).replaceAll("-", ""));
   }
   return days;
+}
+
+/**
+ * Whether `error`, met fetching a day's hot entries, means the day's page is
+ * not up yet: a 404 for the last day, which Hatena Bookmark publishes some
+ * hours after the day ends. A missing earlier day is an error.
+ */
+export function notPublishedYet(error: unknown, lastDay: boolean): boolean {
+  return lastDay && error instanceof HttpError && error.status === 404;
 }
 
 /** The year in Japan at `now`. */

@@ -48,7 +48,7 @@ export class Stopped extends Error {
 }
 
 /** A response with an error status. Client errors other than 408 and 429 are not retried. */
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(readonly url: string, readonly status: number) {
     super(`HTTP ${status} for ${url}`);
     this.name = "HttpError";

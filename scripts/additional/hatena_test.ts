@@ -1,5 +1,14 @@
 import { assertEquals } from "@std/assert";
-import { daysOf, hatenaHotentry } from "./hatena.ts";
+import { HttpError } from "../raw/fetch.ts";
+import { daysOf, hatenaHotentry, notPublishedYet } from "./hatena.ts";
+
+Deno.test("only the last day missing is a day not published yet", () => {
+  const missing = new HttpError("https://b.hatena.ne.jp/hotentry/all/20261007", 404);
+  assertEquals(notPublishedYet(missing, true), true);
+  assertEquals(notPublishedYet(missing, false), false);
+  assertEquals(notPublishedYet(new HttpError("https://b.hatena.ne.jp/", 500), true), false);
+  assertEquals(notPublishedYet(new Error("offline"), true), false);
+});
 
 const encode = (s: string) => new TextEncoder().encode(s);
 
