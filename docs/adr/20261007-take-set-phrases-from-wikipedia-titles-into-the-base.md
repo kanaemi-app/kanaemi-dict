@@ -1,6 +1,6 @@
 # 四字熟語やことわざは、Wikipedia の記事の見出しからも基本辞書に取る
 
-状態：採用
+状態：置き換えられた。「Wikipedia の記事とリダイレクトの見出しにある語を、基本辞書に入れる」（`20261007-take-words-named-by-wikipedia-titles-and-redirects.md`）による。
 
 ## 背景
 

@@ -1,6 +1,6 @@
 # 解析器がまとめる複合語も語として数える
 
-状態：一部置き換え（数詞を含む複合語を数えない行は `20261007-count-compounds-that-hold-a-numeral-as-words.md` で置き換えた）
+状態：一部置き換え（数詞を含む複合語を数えない行は `20261007-count-compounds-that-hold-a-numeral-as-words.md` で置き換えた）。検討した他の案の、隣り合う B 単位の組を数える案は、Wikipedia の見出しにある組に限って「Wikipedia の記事とリダイレクトの見出しにある語を、基本辞書に入れる」（`20261007-take-words-named-by-wikipedia-titles-and-redirects.md`）で採った。
 
 ## 背景
 
