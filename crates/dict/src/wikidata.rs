@@ -44,20 +44,20 @@ pub fn wikidata_readings(text: &str) -> Vec<WikidataReading> {
 }
 
 /// `Q55488` of `<http://www.wikidata.org/entity/Q55488>`.
-fn entity(field: &str) -> Option<String> {
+pub(crate) fn entity(field: &str) -> Option<String> {
     let inner = field.strip_prefix('<')?.strip_suffix('>')?;
     inner.strip_prefix(ENTITY).map(str::to_owned)
 }
 
 /// The text of a quoted literal, without its language tag.
-fn literal(field: &str) -> Option<&str> {
+pub(crate) fn literal(field: &str) -> Option<&str> {
     let quoted = field.rsplit_once('@').map_or(field, |(text, _)| text);
     quoted.strip_prefix('"')?.strip_suffix('"')
 }
 
 /// `reading` in hiragana without spaces and middle dots, ゐ and ゑ as い
 /// and え; none when other characters than kana stay.
-fn plain_reading(reading: &str) -> Option<String> {
+pub(crate) fn plain_reading(reading: &str) -> Option<String> {
     let plain: String = katakana_to_hiragana(reading)
         .chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '\u{200b}' | '・'))
@@ -71,7 +71,7 @@ fn plain_reading(reading: &str) -> Option<String> {
 }
 
 /// `label` without a qualifier in brackets at its end (内藤忠政 (鳥羽藩主)).
-fn unqualified(label: &str) -> String {
+pub(crate) fn unqualified(label: &str) -> String {
     let cut = if label.ends_with(')') {
         label.rfind(" (")
     } else if label.ends_with('）') {

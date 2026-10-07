@@ -15,15 +15,16 @@ use kanaemi_dict::{
     EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, ReadingsError,
     RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WriteError, agreement, check_words,
-    counted_reading, counted_words, counter_words, cut_documents, dictionary_lines,
+    clans, counted_reading, counted_words, counter_words, cut_documents, dictionary_lines,
     document_sources, document_texts, each_document_with_units, engine, eval_documents,
     evaluate_documents, examples_of_document, excluded_readings, field_dictionary, gather, is_word,
     kanji_entries, listed_dictionary, mismatches_tsv, model_file, mozc_emoji, mozc_emoticons,
-    mozc_readings, mozc_symbols, okurigana_dictionary, parse_corrections, parse_word_cases,
-    paths_of, place_dictionary, place_names, plain_words, read_names, read_title_entries,
-    read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of,
-    take, title_entries, train, unihan_readings, wikidata_mismatches, wikidata_readings,
-    word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    mozc_readings, mozc_symbols, name_readings, okurigana_dictionary, parse_corrections,
+    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
+    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
+    shared_readings, sources_file, split_of, take, title_entries, train, unihan_readings,
+    wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv,
+    write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -64,6 +65,9 @@ const OKURIGANA: &str = "okurigana";
 const SYMBOL: &str = "symbol";
 const EMOJI: &str = "emoji";
 const EMOTICON: &str = "emoticon";
+/// The additional dictionary of person names, taken from Wikidata's people.
+const PERSON: &str = "person";
+const PEOPLE_SOURCE: &str = "wikidata-people";
 /// The sources every dictionary read with the analyzer has: the analyzer's
 /// dictionary, the dictionary that checks its readings, and the UniDic
 /// lexicon they are checked against and the base takes words from.
@@ -1023,6 +1027,16 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             (
                 listed_dictionary(pairs),
                 sources.into_iter().map(String::from).collect(),
+            )
+        } else if name == PERSON {
+            let people = wikidata_people(&read_to_string(format!(
+                "{ADDITIONAL_BUILD}/{name}/people.tsv"
+            ))?);
+            let readings = name_readings(&mozc_readings(&read_to_string(KANJI_TABLE)?));
+            let clans = clans(&read_to_string(format!("{ADDITIONAL}/{name}/uji.txt"))?);
+            (
+                person_dictionary(&people, &readings, &clans),
+                BTreeSet::from([PEOPLE_SOURCE.to_owned(), KANJI_SOURCE.to_owned()]),
             )
         } else if name == PLACE {
             (
