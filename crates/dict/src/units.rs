@@ -126,7 +126,7 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
                 .extend(piece_words.compounds.into_iter().map(shift));
         }
         let units = cut_line(&words.tokens, readings);
-        let compounds = compound_units(&words, &units);
+        let compounds = compound_units(&words, &units, readings);
         let mut line_units: Vec<(LineUnit, bool)> = units
             .into_iter()
             .map(|u| (u, false))
@@ -154,29 +154,48 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
     Ok(())
 }
 
-/// The compounds of `words` that make words: nouns with kanji or katakana
-/// and no numeral among their tokens, read in plain kana, other than a unit
+/// The compounds of `words` that make words: nouns with kanji or katakana,
+/// read in plain kana, other than those numeric units write and a unit
 /// already cut at the same place.
-fn compound_units(words: &Words, units: &[LineUnit]) -> Vec<LineUnit> {
+fn compound_units(words: &Words, units: &[LineUnit], readings: &UnidicReadings) -> Vec<LineUnit> {
     words
         .compounds
         .iter()
         .filter(|c| {
             let end = c.begin + c.surface.chars().count();
+            let parts = {
+                let start = words.tokens.partition_point(|t| t.begin < c.begin);
+                let count = words.tokens[start..]
+                    .iter()
+                    .take_while(|t| t.begin < end)
+                    .count();
+                &words.tokens[start..start + count]
+            };
             c.pos[0] == "名詞"
                 && needs_conversion(&c.surface)
                 && is_plain_reading(&c.reading)
                 && is_word(&c.reading, &c.surface)
-                && !words
-                    .tokens
-                    .iter()
-                    .any(|t| t.begin >= c.begin && t.begin < end && is_numeral(t))
+                && !is_numbers_alone(parts, readings)
                 && !units
                     .iter()
                     .any(|u| u.begin == c.begin && u.surface == c.surface)
         })
         .map(plain)
         .collect()
+}
+
+/// Whether `tokens` are numeric units and numbers with no counter alone, as
+/// [`cut_numeric`] cuts them: 第一子, 二階建て, 二十一.
+fn is_numbers_alone(mut tokens: &[Token], readings: &UnidicReadings) -> bool {
+    while let Some(first) = tokens.first() {
+        let starts_number = is_numeral(first)
+            || (first.pos[0] == "接頭辞" && tokens.get(1).is_some_and(is_numeral));
+        if !starts_number {
+            return false;
+        }
+        tokens = &tokens[cut_numeric(tokens, readings).1..];
+    }
+    true
 }
 
 /// `line` in pieces the analyzer accepts, each with its character offset.
@@ -1654,17 +1673,13 @@ mod tests {
     }
 
     #[test]
-    fn a_compound_that_is_no_noun_holds_a_numeral_or_is_a_unit_already_is_left_out() {
-        let numeral = "名詞,数詞,*,*,*,*";
+    fn a_compound_that_is_no_noun_or_is_a_unit_already_is_left_out() {
         let suffix = "接尾辞,名詞的,一般,*,*,*";
         let units = cut_with_compounds(
-            "取り扱う第三章山田さん",
+            "取り扱う山田さん",
             &[
                 "取り/とり/動詞,一般,*,*,五段-ラ行,連用形-一般/取る",
                 "扱う/あつかう/動詞,一般,*,*,五段-ワア行,終止形-一般/扱う",
-                "第/だい/接頭辞,*,*,*,*,*/第",
-                &format!("三/さん/{numeral}/三"),
-                &format!("章/しょう/{NOUN}/章"),
                 "山田/やまだ/名詞,固有名詞,人名,姓,*,*/山田",
                 &format!("さん/さん/{suffix}/さん"),
             ],
@@ -1674,8 +1689,61 @@ mod tests {
                     "とりあつかう",
                     "動詞,一般,*,*,五段-ワア行,終止形-一般",
                 ),
-                ("第三章", "だいさんしょう", NOUN),
                 ("山田さん", "やまださん", NOUN),
+            ],
+        );
+
+        assert!(units.iter().all(|u| !u.3), "{units:?}");
+    }
+
+    #[test]
+    fn a_compound_with_a_numeral_and_a_part_no_numeric_unit_takes_is_a_word_read_in_kana() {
+        let units = cut_with_compounds(
+            "日本一の一眼レフ",
+            &[
+                "日本/にっぽん/名詞,固有名詞,地名,国,*,*/日本",
+                &format!("一/いち/{NUMERAL}/一"),
+                &format!("の/の/{PARTICLE}/の"),
+                &format!("一/いち/{NUMERAL}/一"),
+                &format!("眼/がん/{COUNTER_SUFFIX}/眼"),
+                &format!("レフ/れふ/{COUNTER_NOUN}/レフ"),
+            ],
+            &[
+                ("日本一", "にっぽんいち", NOUN),
+                ("一眼レフ", "いちがんれふ", NOUN),
+            ],
+        );
+
+        let compounds: Vec<_> = units.into_iter().filter(|u| u.3).collect();
+        assert_eq!(
+            compounds,
+            [
+                (0, "にっぽんいち".into(), "日本一".into(), true),
+                (4, "いちがんれふ".into(), "一眼レフ".into(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_compound_of_numeric_units_and_numbers_alone_is_left_out() {
+        let units = cut_with_compounds(
+            "第一子と二階建てと二十一",
+            &[
+                &format!("第/だい/{PREFIX}/第"),
+                &format!("一/いっ/{NUMERAL}/一"),
+                "子/し/接尾辞,名詞的,一般,*,*,*/子",
+                &format!("と/と/{PARTICLE}/と"),
+                &format!("二/に/{NUMERAL}/二"),
+                &format!("階/かい/{COUNTER_NOUN}/階"),
+                "建て/だて/接尾辞,名詞的,一般,*,*,*/建て",
+                &format!("と/と/{PARTICLE}/と"),
+                &format!("二十/にじゅう/{NUMERAL}/二十"),
+                &format!("一/いち/{NUMERAL}/一"),
+            ],
+            &[
+                ("第一子", "だいいっし", NOUN),
+                ("二階建て", "にかいだて", NOUN),
+                ("二十一", "にじゅういち", NUMERAL),
             ],
         );
 
