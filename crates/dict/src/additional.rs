@@ -429,7 +429,7 @@ pub fn field_dictionary(units: &[Unit], titles: &[Title], texts: &[String]) -> D
             .collect()
     };
     dictionary.entries.extend(added);
-    dictionary.okuri = okuri_lines(&dictionary.entries);
+    dictionary.okuri = okuri_lines(&dictionary.entries, dictionary.rare_cost);
     dictionary
 }
 
@@ -449,9 +449,11 @@ pub fn year_dictionary(
         older.iter().map(String::as_str),
     );
     let entries = title_entries(&titles, year.iter().map(String::as_str), units);
+    let rare_cost = (units > 0).then(|| cost_of(MIN_COUNT, units));
     Dictionary {
-        okuri: okuri_lines(&entries),
+        okuri: okuri_lines(&entries, rare_cost),
         entries,
+        rare_cost,
         ..Default::default()
     }
 }

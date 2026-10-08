@@ -52,6 +52,10 @@ pub struct Dictionary {
     /// Numeric items, whose reading and surface hold the number as a
     /// placeholder (`{}ほん` for `{}本`).
     pub numeric: Vec<Entry>,
+    /// The cost from which a word was met at most [`MIN_COUNT`] times in the
+    /// units the dictionary counts, or comes from UniDic alone; `None` for a
+    /// dictionary not counted from units.
+    pub rare_cost: Option<u32>,
     pub report: Report,
 }
 
@@ -176,10 +180,12 @@ impl Dictionary {
             })
             .collect();
 
+        let rare_cost = (total > 0).then(|| cost_of(MIN_COUNT, total));
         Self {
-            okuri: okuri_lines(&entries),
+            okuri: okuri_lines(&entries, rare_cost),
             numeric: numeric_entries(numeric_counts, total),
             entries,
+            rare_cost,
             report: Report {
                 unknown_conjugations: unknown.into_iter().collect(),
                 disallowed_okurigana: disallowed
@@ -225,7 +231,7 @@ impl Dictionary {
                 }
             }
         }
-        self.okuri = okuri_lines(&self.entries);
+        self.okuri = okuri_lines(&self.entries, self.rare_cost);
     }
 
     /// Removes the words `drops` tells by their reading and surface, with
@@ -405,8 +411,10 @@ pub fn nihon_readings(entries: &[Entry]) -> Vec<Entry> {
 }
 
 /// The okurigana lines of `entries`, each at the cheapest cost of the
-/// entries it follows from.
-pub(crate) fn okuri_lines(entries: &[Entry]) -> Vec<Entry> {
+/// entries it follows from, but for a line of one kanji costing `rare_cost` or
+/// more, which is mostly kana written for a kanji (祈とう, 気っぷ) rather than
+/// okurigana.
+pub(crate) fn okuri_lines(entries: &[Entry], rare_cost: Option<u32>) -> Vec<Entry> {
     let mut okuri: BTreeMap<(String, String), u32> = BTreeMap::new();
     for entry in entries {
         if let Some(key) = okuri_line(&entry.reading, &entry.surface) {
@@ -418,6 +426,9 @@ pub(crate) fn okuri_lines(entries: &[Entry]) -> Vec<Entry> {
     }
     okuri
         .into_iter()
+        .filter(|((_, surface), cost)| {
+            surface.chars().count() > 2 || rare_cost.is_none_or(|rare| *cost < rare)
+        })
         .map(|((reading, surface), cost)| Entry {
             reading,
             surface,
@@ -628,7 +639,14 @@ mod tests {
 
     #[test]
     fn added_words_join_the_entries_with_their_okurigana_lines_and_the_smaller_cost() {
-        let mut dict = Dictionary::build(repeat(word("ひとつ", "一つ"), 2), &[]);
+        let mut dict = Dictionary::build(
+            [
+                repeat(word("ひとつ", "一つ"), 3),
+                repeat(word("ほん", "本"), 2),
+            ]
+            .concat(),
+            &[],
+        );
         let kept = find(&dict.entries, "ひとつ", "一つ").unwrap().cost;
 
         dict.add_words([
@@ -638,7 +656,7 @@ mod tests {
 
         assert_eq!(find(&dict.entries, "ひとつ", "一つ").unwrap().cost, kept);
         assert_eq!(find(&dict.entries, "いっぴき", "一匹").unwrap().cost, 900);
-        assert_eq!(dict.entries.len(), 2);
+        assert_eq!(dict.entries.len(), 3);
         assert!(
             find(&dict.okuri, "ひと*つ", "一つ").is_some(),
             "{:?}",
@@ -735,8 +753,8 @@ mod tests {
     fn dropped_words_leave_with_their_okurigana_lines() {
         let mut dict = Dictionary::build(
             [
-                repeat(word("とうつ", "十つ"), 2),
-                repeat(word("ひとつ", "一つ"), 2),
+                repeat(word("とうつ", "十つ"), 3),
+                repeat(word("ひとつ", "一つ"), 3),
             ]
             .concat(),
             &[],
@@ -886,7 +904,7 @@ mod tests {
         ];
 
         assert_eq!(
-            okuri_lines(&entries),
+            okuri_lines(&entries, None),
             [entry("だんちょうのおも*い", "断腸の思い", None, 700)]
         );
     }
@@ -1027,9 +1045,11 @@ mod tests {
     #[test]
     fn words_ending_in_kanji_and_hiragana_get_okurigana_lines() {
         let units: Vec<Unit> = [
-            repeat(conj("かいた", "書いた", ("か", "書"), "五段-カ行"), 2),
-            repeat(word("みなさん", "皆さん"), 2),
-            repeat(conj("たべる", "食べる", ("たべ", "食べ"), "下一段-バ行"), 2),
+            repeat(conj("かいた", "書いた", ("か", "書"), "五段-カ行"), 3),
+            repeat(word("みなさん", "皆さん"), 3),
+            repeat(conj("たべる", "食べる", ("たべ", "食べ"), "下一段-バ行"), 3),
+            repeat(word("こころぐるしい", "心苦しい"), 2),
+            repeat(word("きとう", "祈とう"), 2),
         ]
         .concat();
 
@@ -1043,7 +1063,39 @@ mod tests {
         assert!(lines.contains(&("か*い", "書い")), "{lines:?}");
         assert!(lines.contains(&("みな*さ", "皆さ")), "{lines:?}");
         assert!(lines.contains(&("た*べ", "食べ")), "{lines:?}");
-        assert_eq!(find(&dict.okuri, "か*い", "書い").unwrap().cost, cost(2, 6));
+        assert!(lines.contains(&("こころぐる*し", "心苦し")), "{lines:?}");
+        assert!(
+            !lines.contains(&("き*と", "祈と")),
+            "one kanji met twice: {lines:?}"
+        );
+        assert_eq!(
+            find(&dict.okuri, "か*い", "書い").unwrap().cost,
+            cost(3, 13)
+        );
+        assert_eq!(dict.rare_cost, Some(cost(2, 13)));
+    }
+
+    #[test]
+    fn one_kanji_lines_of_rare_words_are_left_out() {
+        let entries = [
+            entry("きとう", "祈とう", None, 1631),
+            entry("きっぷ", "気っぷ", None, 3000),
+            entry("みなさん", "皆さん", None, 1500),
+            entry("やまおり", "山折り", None, 1700),
+        ];
+
+        let lines = |rare| -> Vec<(String, String)> {
+            okuri_lines(&entries, rare)
+                .into_iter()
+                .map(|e| (e.reading, e.surface))
+                .collect()
+        };
+        let line = |r: &str, s: &str| (r.to_owned(), s.to_owned());
+        assert_eq!(
+            lines(Some(1631)),
+            [line("みな*さ", "皆さ"), line("やまお*り", "山折り")]
+        );
+        assert_eq!(lines(None).len(), 4);
     }
 
     #[test]
