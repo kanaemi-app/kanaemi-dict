@@ -7,9 +7,12 @@ use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use kanaemi_engine::{CONTEXT_CHARS, Engine, HISTORY_LEN, RankingInput, feature_indices};
+use kanaemi_engine::{
+    CONTEXT_CHARS, CandidateFacts, Engine, HISTORY_LEN, RankingInput, feature_indices,
+};
 
-use crate::{Unit, query_of};
+use crate::kana::is_hiragana;
+use crate::{Query, Unit, query_of};
 
 /// The widest hash a model file allows.
 pub const MAX_BITS: u8 = 28;
@@ -108,8 +111,10 @@ impl Examples {
 /// The examples of a document read as one input field: each unit is typed as
 /// the evaluation types it, with the document's earlier units as the field's
 /// commits and the text before it as the field's committed text, and once
-/// more into an empty field. Units with a single candidate or without their
-/// surface among the candidates teach nothing and are left out.
+/// more into an empty field. A conjugating unit is also typed in the
+/// [other ways](other_typings) it may be. Typings with a single candidate or
+/// without the unit's surface among the candidates teach nothing and are left
+/// out.
 pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Examples {
     let chars: Vec<char> = text.chars().collect();
     let mut history: Vec<(String, String)> = Vec::new();
@@ -120,26 +125,12 @@ pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Exam
         let context: String = chars[end.saturating_sub(CONTEXT_CHARS)..end]
             .iter()
             .collect();
-        let candidates = engine.candidate_facts(&query.reading, query.okurigana.as_deref());
-        let correct = candidates.iter().position(|c| c.surface == query.expected);
-        if let (Some(correct), true) = (correct, candidates.len() > 1) {
-            for (history, context) in [(&history[..], context.as_str()), (&[][..], "")] {
-                let input = RankingInput {
-                    reading: &query.reading,
-                    history,
-                    context,
-                };
-                examples.push(
-                    candidates.iter().map(|c| {
-                        feature_indices(&input, c, MAX_BITS)
-                            .into_iter()
-                            .map(|f| f as u32)
-                            .collect()
-                    }),
-                    correct,
-                );
-            }
+        for other in other_typings(unit, &query) {
+            let candidates = engine.candidate_facts(&other.reading, other.okurigana.as_deref());
+            push_typing(&mut examples, &other, &candidates, &history, &context);
         }
+        let candidates = engine.candidate_facts(&query.reading, query.okurigana.as_deref());
+        let correct = push_typing(&mut examples, &query, &candidates, &history, &context);
         // Kanaemi records a commit as its candidate's own pair: a numeric
         // candidate as its numeric item.
         let commit = match correct.map(|c| candidates[c].recorded(&query.reading)) {
@@ -152,6 +143,73 @@ pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Exam
         }
     }
     examples
+}
+
+/// Adds the examples of `query` typed into the field with `history` and
+/// `context`, and into an empty field, when its `candidates` teach anything;
+/// gives where its expected surface is among them.
+fn push_typing(
+    examples: &mut Examples,
+    query: &Query,
+    candidates: &[CandidateFacts],
+    history: &[(String, String)],
+    context: &str,
+) -> Option<usize> {
+    let correct = candidates.iter().position(|c| c.surface == query.expected);
+    if let (Some(correct), true) = (correct, candidates.len() > 1) {
+        for (history, context) in [(history, context), (&[][..], "")] {
+            let input = RankingInput {
+                reading: &query.reading,
+                history,
+                context,
+            };
+            examples.push(
+                candidates.iter().map(|c| {
+                    feature_indices(&input, c, MAX_BITS)
+                        .into_iter()
+                        .map(|f| f as u32)
+                        .collect()
+                }),
+                correct,
+            );
+        }
+    }
+    correct
+}
+
+/// The other ways a conjugating unit, typed with the first kana of its
+/// okurigana marked, may be typed: whole (かいた for 書いた), and with all of
+/// its okurigana marked (か*いた) when that is more than the first kana.
+/// Without them the model sees such a form only as a wrong candidate of
+/// another word typed whole, and learns to put it last.
+fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
+    if query.okurigana.is_none() {
+        return Vec::new();
+    }
+    let whole = Query {
+        reading: unit.reading.clone(),
+        okurigana: None,
+        expected: unit.surface.clone(),
+    };
+    let okurigana: String = {
+        let mut kana: Vec<char> = unit
+            .surface
+            .chars()
+            .rev()
+            .take_while(|&c| is_hiragana(c))
+            .collect();
+        kana.reverse();
+        kana.into_iter().collect()
+    };
+    if okurigana.chars().count() < 2 || !unit.reading.ends_with(&okurigana) {
+        return vec![whole];
+    }
+    let marked = Query {
+        reading: unit.reading.clone(),
+        okurigana: Some(okurigana),
+        expected: unit.surface.clone(),
+    };
+    vec![whole, marked]
 }
 
 /// Examples kept as blocks, each loaded whole when trained on, so that only
@@ -417,6 +475,65 @@ mod tests {
         let in_empty_field = correct_of(3);
         assert!(!in_empty_field.contains(&index("hl\u{1f}1")));
         assert!(!in_empty_field.contains(&index("a\u{1f}と\u{1f}漢")));
+    }
+
+    fn conjugated(position: usize, reading: &str, surface: &str, stem: (&str, &str)) -> Unit {
+        Unit {
+            stem_reading: Some(stem.0.into()),
+            stem_surface: Some(stem.1.into()),
+            conjugation: Some("五段-カ行".into()),
+            ..unit(position, reading, surface)
+        }
+    }
+
+    fn typing(reading: &str, okurigana: Option<&str>, expected: &str) -> Query {
+        Query {
+            reading: reading.into(),
+            okurigana: okurigana.map(str::to_owned),
+            expected: expected.into(),
+        }
+    }
+
+    #[test]
+    fn a_conjugated_form_is_also_typed_whole_and_with_all_its_okurigana() {
+        let form = conjugated(0, "かいた", "書いた", ("か", "書"));
+        assert_eq!(
+            other_typings(&form, &query_of(&form)),
+            [
+                typing("かいた", None, "書いた"),
+                typing("かいた", Some("いた"), "書いた")
+            ]
+        );
+        let terminal = conjugated(0, "かく", "書く", ("か", "書"));
+        assert_eq!(
+            other_typings(&terminal, &query_of(&terminal)),
+            [typing("かく", None, "書く")],
+            "く alone is the first kana already"
+        );
+        let word = unit(0, "てがみ", "手紙");
+        assert_eq!(other_typings(&word, &query_of(&word)), []);
+    }
+
+    #[test]
+    fn every_typing_of_a_conjugated_form_teaches_it_first_but_one_commit_goes_into_the_history() {
+        let engine = engine_of(
+            "か\t書\t五段-カ行\t5\nか\t買\t五段-ワア行\t9\nかいた\t海田\t\t3\nかん\t缶\t\t5\nかん\t漢\t\t10\n",
+        );
+        let units = [
+            conjugated(0, "かいた", "書いた", ("か", "書")),
+            unit(3, "かん", "漢"),
+        ];
+
+        let examples = examples_of_document(&engine, &units, "書いた漢");
+
+        assert_eq!(examples.len(), 8, "3 typings of 書いた and 漢, each twice");
+        let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
+        assert!(correct_of(0).contains(&index("rs\u{1f}かいた\u{1f}書いた")));
+        assert!(correct_of(4).contains(&index("rs\u{1f}かい\u{1f}書い")));
+        assert!(
+            correct_of(6).contains(&index("hc\u{1f}1\u{1f}漢")),
+            "one commit before 漢"
+        );
     }
 
     #[test]
