@@ -23,6 +23,9 @@ pub struct EvalDocument {
     pub source_id: String,
     pub units: Vec<Unit>,
     pub text: String,
+    /// Where the compound units left out of `units` lie: start and end, in
+    /// start order.
+    pub compounds: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,8 +71,8 @@ pub fn eval_documents(
 /// Calls `f` on each document `wanted` takes by its doc ID, in doc ID order,
 /// with its units from `units` and its text from `docs`, both sorted as
 /// `kanaemi-dict units` and the documents are; one document is held at a
-/// time. Compounds are left out, as they overlap the units typed. A document
-/// without units is no document here.
+/// time. Compounds are left out, as they overlap the units typed, but where
+/// they lie is kept. A document without units is no document here.
 pub fn each_document_with_units<E: From<EvalDocumentsError>>(
     units: impl BufRead,
     docs: impl BufRead,
@@ -79,9 +82,27 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
     let mut units = read_units(units).enumerate();
     let mut previous: Option<(String, usize)> = None;
     let mut pending: Option<Unit> = None;
-    // The units of the next wanted document, all of them.
-    let mut next_group = || -> Result<Option<Vec<Unit>>, EvalDocumentsError> {
-        let mut group: Vec<Unit> = pending.take().into_iter().collect();
+    // The units of the next wanted document, all of them, and where its
+    // compounds lie.
+    type Group = (Vec<Unit>, Vec<(usize, usize)>);
+    let mut next_group = || -> Result<Option<Group>, EvalDocumentsError> {
+        // A document's first unit may be a compound: no unit starts it when
+        // it opens with kana alone (むっつり右門).
+        let mut doc_id: Option<String> = None;
+        let mut group: Vec<Unit> = Vec::new();
+        let mut compounds: Vec<(usize, usize)> = Vec::new();
+        let take = |unit: Unit, group: &mut Vec<Unit>, compounds: &mut Vec<(usize, usize)>| {
+            if unit.compound {
+                let end = unit.position + unit.surface.chars().count();
+                compounds.push((unit.position, end));
+            } else {
+                group.push(unit);
+            }
+        };
+        if let Some(unit) = pending.take() {
+            doc_id = Some(unit.doc_id.clone());
+            take(unit, &mut group, &mut compounds);
+        }
         for (i, unit) in units.by_ref() {
             let unit = unit?;
             if let Some((previous_doc_id, previous_position)) =
@@ -98,19 +119,21 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
                 });
             }
             previous = Some((unit.doc_id.clone(), unit.position));
-            if unit.compound || !wanted(&unit.doc_id) {
+            if !wanted(&unit.doc_id) {
                 continue;
             }
-            if group
-                .first()
-                .is_some_and(|first| first.doc_id != unit.doc_id)
-            {
-                pending = Some(unit);
-                return Ok(Some(group));
+            if doc_id.as_ref().is_some_and(|d| *d != unit.doc_id) {
+                if !group.is_empty() {
+                    pending = Some(unit);
+                    return Ok(Some((group, compounds)));
+                }
+                // The document before had compounds alone.
+                compounds.clear();
             }
-            group.push(unit);
+            doc_id = Some(unit.doc_id.clone());
+            take(unit, &mut group, &mut compounds);
         }
-        Ok((!group.is_empty()).then_some(group))
+        Ok((!group.is_empty()).then_some((group, compounds)))
     };
     // Reading fails with the reader's errors, `f` with the caller's.
     enum Failed<E> {
@@ -124,19 +147,23 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
     }
     let mut next = next_group()?;
     let read = each_document(docs, |doc| {
-        if let Some(group) = next.take_if(|g| g[0].doc_id < doc.doc_id) {
+        if let Some((group, _)) = next.take_if(|(g, _)| g[0].doc_id < doc.doc_id) {
             return Err(Failed::Read(EvalDocumentsError::MissingText(
                 group[0].doc_id.clone(),
             )));
         }
-        if next.as_ref().is_some_and(|g| g[0].doc_id == doc.doc_id) {
-            let units = next.take().expect("checked");
+        if next
+            .as_ref()
+            .is_some_and(|(g, _)| g[0].doc_id == doc.doc_id)
+        {
+            let (units, compounds) = next.take().expect("checked");
             next = next_group().map_err(Failed::Read)?;
             f(EvalDocument {
                 doc_id: doc.doc_id,
                 source_id: doc.source_id,
                 units,
                 text: doc.text,
+                compounds,
             })
             .map_err(Failed::Caller)?;
         }
@@ -148,7 +175,7 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
         Ok(()) => {}
     }
     match next {
-        Some(group) => Err(EvalDocumentsError::MissingText(group[0].doc_id.clone()).into()),
+        Some((group, _)) => Err(EvalDocumentsError::MissingText(group[0].doc_id.clone()).into()),
         None => Ok(()),
     }
 }
@@ -304,19 +331,21 @@ mod tests {
                     source_id: "aozora-text".into(),
                     units: units[1..3].to_vec(),
                     text: "漢い字".into(),
+                    compounds: Vec::new(),
                 },
                 EvalDocument {
                     doc_id: "aozora:000015".into(),
                     source_id: "aozora-text".into(),
                     units: units[4..].to_vec(),
                     text: "あ書".into(),
+                    compounds: Vec::new(),
                 },
             ]
         );
     }
 
     #[test]
-    fn compounds_are_left_out_of_the_documents_units() {
+    fn compounds_are_left_out_of_the_documents_units_but_their_places_are_kept() {
         let parts = [
             unit("aozora:000004", 0, "ろてん", "露天"),
             unit("aozora:000004", 2, "ふろ", "風呂"),
@@ -333,6 +362,65 @@ mod tests {
 
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].units, parts);
+        assert_eq!(read[0].compounds, [(0, 4)]);
+    }
+
+    #[test]
+    fn a_compound_that_opens_a_document_keeps_its_place() {
+        // むっつり is kana alone, so no unit starts the compound before it.
+        let compound = Unit {
+            compound: true,
+            ..unit("aozora:000004", 0, "むっつりうもん", "むっつり右門")
+        };
+        let units = [
+            unit("aozora:000001", 0, "てがみ", "手紙"),
+            compound,
+            unit("aozora:000004", 4, "うもん", "右門"),
+        ];
+        let docs = docs_jsonl(&[("aozora:000001", "手紙"), ("aozora:000004", "むっつり右門")]);
+        let mut seen = Vec::new();
+
+        each_document_with_units(
+            units_jsonl(&units).as_bytes(),
+            docs.as_bytes(),
+            |_| true,
+            |doc| {
+                seen.push(doc);
+                Ok::<_, EvalDocumentsError>(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].compounds, []);
+        assert_eq!(seen[1].units, units[2..]);
+        assert_eq!(seen[1].compounds, [(0, 6)]);
+    }
+
+    #[test]
+    fn a_document_of_compounds_alone_is_no_document() {
+        let compound = Unit {
+            compound: true,
+            ..unit("aozora:000004", 0, "むっつりうもん", "むっつり右門")
+        };
+        let units = [compound, unit("aozora:000015", 0, "しょ", "書")];
+        let docs = docs_jsonl(&[("aozora:000004", "むっつり右門"), ("aozora:000015", "書")]);
+        let mut seen = Vec::new();
+
+        each_document_with_units(
+            units_jsonl(&units).as_bytes(),
+            docs.as_bytes(),
+            |_| true,
+            |doc| {
+                seen.push(doc);
+                Ok::<_, EvalDocumentsError>(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].doc_id, "aozora:000015");
+        assert_eq!(seen[0].compounds, []);
     }
 
     #[test]
@@ -370,12 +458,14 @@ mod tests {
                     source_id: "aozora-text".into(),
                     units: units[..1].to_vec(),
                     text: "手紙".into(),
+                    compounds: Vec::new(),
                 },
                 EvalDocument {
                     doc_id: "aozora:000004".into(),
                     source_id: "aozora-text".into(),
                     units: units[1..3].to_vec(),
                     text: "漢い字".into(),
+                    compounds: Vec::new(),
                 },
             ]
         );
@@ -504,6 +594,7 @@ mod tests {
                 .map(|(reading, surface)| unit(doc_id, 0, reading, surface))
                 .collect(),
             text: String::new(),
+            compounds: Vec::new(),
         }
     }
 
@@ -582,6 +673,7 @@ mod model_tests {
                 numeric: None,
             }],
             text: "手神".into(),
+            compounds: Vec::new(),
         };
         let model = {
             let bits = 10;

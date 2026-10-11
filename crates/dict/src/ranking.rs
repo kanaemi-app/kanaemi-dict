@@ -2,7 +2,7 @@
 //! softmax over each unit's candidates, and the weights written as Kanaemi's
 //! model file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use kanaemi_engine::{
 };
 
 use crate::kana::is_hiragana;
-use crate::{Query, Unit, query_of};
+use crate::{Query, Spans, Unit, query_of};
 
 /// The widest hash a model file allows.
 pub const MAX_BITS: u8 = 28;
@@ -143,6 +143,27 @@ pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Exam
         }
     }
     examples
+}
+
+/// The units of a document a typist types one by one: all but those whose
+/// surface is one of `fragments` and that lie inside one of `compounds`
+/// (一髪 in 危機一髪), which are typed as the compound. The dictionary counts
+/// them so too (see [`crate::fragment_surfaces`]); taught them, the model
+/// would put such a fragment back ahead of the words it lost to.
+pub fn typed_units(
+    units: &[Unit],
+    compounds: &[(usize, usize)],
+    fragments: &HashSet<String>,
+) -> Vec<Unit> {
+    let spans = Spans::new(compounds.iter().copied());
+    units
+        .iter()
+        .filter(|u| {
+            let end = u.position + u.surface.chars().count();
+            !(fragments.contains(&u.surface) && spans.covers(u.position, end))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Adds the examples of `query` typed into the field with `history` and
@@ -567,6 +588,20 @@ mod tests {
             }),
             ..unit(0, reading, surface)
         }
+    }
+
+    #[test]
+    fn a_fragment_inside_a_compound_is_not_typed_alone() {
+        let units = [
+            unit(0, "きき", "危機"),
+            unit(2, "いっぱつ", "一髪"),
+            unit(10, "いっぱつ", "一髪"),
+        ];
+        let fragments = HashSet::from(["一髪".to_owned()]);
+
+        let typed = typed_units(&units, &[(0, 4)], &fragments);
+
+        assert_eq!(typed, [units[0].clone(), units[2].clone()]);
     }
 
     #[test]

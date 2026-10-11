@@ -85,7 +85,129 @@ const UNIDIC_EXTRA: u32 = 1000;
 /// The cost of a UniDic word whose surface no unit shows.
 pub(crate) const UNIDIC_UNSEEN: u32 = 3000;
 
+/// A surface of words written whole with at least this share (numerator,
+/// denominator) of its places, in any reading, inside compound units is a
+/// fragment of them (一髪 of 危機一髪), and its words count only their places
+/// outside them.
+const FRAGMENT_SHARE: (usize, usize) = (3, 4);
+
 type Key = (String, String, Option<String>);
+
+/// How many places of each word written whole lie inside a compound unit
+/// (一髪 in 危機一髪). Units come document by document, as
+/// `build/units.jsonl` holds them; a compound comes after the unit that
+/// starts where it does, so a document is looked at once it ends.
+#[derive(Debug, Default)]
+struct CompoundParts {
+    inside: HashMap<Key, usize>,
+    /// Places of each surface of words written whole, in any reading.
+    places: HashMap<String, usize>,
+    doc_id: String,
+    /// Places of words written whole: start, end, and the word.
+    words: Vec<(usize, usize, Key)>,
+    /// Places of compounds: start and end.
+    compounds: Vec<(usize, usize)>,
+}
+
+impl CompoundParts {
+    fn observe(&mut self, unit: &Unit) {
+        if unit.doc_id != self.doc_id {
+            self.flush();
+            self.doc_id.clone_from(&unit.doc_id);
+        }
+        if unit.numeric.is_some()
+            || unit.stem_surface.is_some()
+            || unit.unknown_conjugation.is_some()
+        {
+            return;
+        }
+        let span = (unit.position, unit.position + unit.surface.chars().count());
+        if unit.compound {
+            self.compounds.push(span);
+        } else {
+            *self.places.entry(unit.surface.clone()).or_default() += 1;
+            self.words.push((
+                span.0,
+                span.1,
+                (unit.reading.clone(), unit.surface.clone(), None),
+            ));
+        }
+    }
+
+    /// The places inside compounds of each word, and the surfaces that are
+    /// fragments. The analyzer may read a surface one way alone and another
+    /// way inside compounds (日本 as にっぽん and にほん), so whether a surface
+    /// is a fragment is judged across its readings.
+    fn finish(mut self) -> (HashMap<Key, usize>, HashSet<String>) {
+        self.flush();
+        let mut inside_of: HashMap<&str, usize> = HashMap::new();
+        for ((_, surface, _), &n) in &self.inside {
+            *inside_of.entry(surface.as_str()).or_default() += n;
+        }
+        let fragments = inside_of
+            .into_iter()
+            .filter(|&(surface, inside)| {
+                inside * FRAGMENT_SHARE.1 >= self.places[surface] * FRAGMENT_SHARE.0
+            })
+            .map(|(surface, _)| surface.to_owned())
+            .collect();
+        (self.inside, fragments)
+    }
+
+    fn flush(&mut self) {
+        let compounds = Spans::new(std::mem::take(&mut self.compounds));
+        for (start, end, key) in std::mem::take(&mut self.words) {
+            if compounds.covers(start, end) {
+                *self.inside.entry(key).or_default() += 1;
+            }
+        }
+    }
+}
+
+/// Spans of a document, start and end, that may overlap: a joined word
+/// (朽ち果てた) and a compound (朽ち果て) can start at one place.
+#[derive(Debug, Clone, Default)]
+pub struct Spans {
+    starts: Vec<usize>,
+    /// The farthest end among the spans up to each, in start order.
+    reach: Vec<usize>,
+}
+
+impl Spans {
+    pub fn new(spans: impl IntoIterator<Item = (usize, usize)>) -> Self {
+        let mut spans: Vec<(usize, usize)> = spans.into_iter().collect();
+        spans.sort_unstable();
+        let mut reach = Vec::with_capacity(spans.len());
+        let mut farthest = 0;
+        for &(_, end) in &spans {
+            farthest = farthest.max(end);
+            reach.push(farthest);
+        }
+        Self {
+            starts: spans.into_iter().map(|(start, _)| start).collect(),
+            reach,
+        }
+    }
+
+    /// Whether `start..end` lies inside one of the spans.
+    pub fn covers(&self, start: usize, end: usize) -> bool {
+        let before = self.starts.partition_point(|&s| s <= start);
+        before > 0 && end <= self.reach[before - 1]
+    }
+}
+
+/// The surfaces that are fragments of compounds among `units` (see
+/// [`FRAGMENT_SHARE`]), as the dictionary built from them counts them.
+pub fn fragment_surfaces<U: Borrow<Unit>>(units: impl IntoIterator<Item = U>) -> HashSet<String> {
+    let mut parts = CompoundParts::default();
+    for unit in units {
+        let unit = unit.borrow();
+        if !unit.okurigana_variant {
+            parts.observe(unit);
+        }
+    }
+    parts.finish().1
+}
 
 impl Dictionary {
     /// Builds the dictionary from every unit given and the UniDic words.
@@ -102,12 +224,14 @@ impl Dictionary {
         let mut surfaces: HashMap<String, usize> = HashMap::new();
         let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
         let mut disallowed: BTreeMap<(String, String), (usize, String)> = BTreeMap::new();
+        let mut parts = CompoundParts::default();
         for unit in units {
             let unit = unit.borrow();
             total += 1;
             if unit.okurigana_variant {
                 continue;
             }
+            parts.observe(unit);
             *surfaces.entry(unit.surface.clone()).or_default() += 1;
             if let Some(n) = &unit.numeric {
                 if !is_glossed(&n.surface) {
@@ -153,6 +277,17 @@ impl Dictionary {
                     .entry((conjugation.clone(), okuri.to_owned()))
                     .or_insert_with(|| (0, unit.surface.clone()))
                     .0 += 1;
+            }
+        }
+
+        {
+            let (inside, fragments) = parts.finish();
+            for (key, n) in inside {
+                if fragments.contains(&key.1)
+                    && let Some(count) = counts.get_mut(&key)
+                {
+                    *count -= n;
+                }
             }
         }
 
@@ -988,6 +1123,175 @@ mod tests {
             .find(|e| e.reading == "たか" && e.surface == "高" && e.conjugation.is_none())
             .unwrap();
         assert_eq!(plain.cost, cost(2, 2));
+    }
+
+    /// `unit` at `position` of document `doc_id`.
+    fn at(unit: Unit, doc_id: &str, position: usize) -> Unit {
+        Unit {
+            doc_id: doc_id.into(),
+            position,
+            ..unit
+        }
+    }
+
+    fn compound(reading: &str, surface: &str) -> Unit {
+        Unit {
+            compound: true,
+            ..word(reading, surface)
+        }
+    }
+
+    /// 危機一髪 as the analyzer cuts it in document `doc_id`: the parts, and
+    /// the compound beside them in position order.
+    fn kiki_ippatsu(doc_id: &str) -> Vec<Unit> {
+        vec![
+            at(word("きき", "危機"), doc_id, 0),
+            at(compound("ききいっぱつ", "危機一髪"), doc_id, 0),
+            at(word("いっぱつ", "一髪"), doc_id, 2),
+        ]
+    }
+
+    #[test]
+    fn a_word_met_mostly_inside_compounds_counts_only_where_it_stands_outside_them() {
+        let units: Vec<Unit> = [
+            (0..6)
+                .flat_map(|i| kiki_ippatsu(&format!("k{i}")))
+                .collect(),
+            vec![at(word("いっぱつ", "一髪"), "a", 0)],
+            vec![at(word("いっぱつ", "一髪"), "b", 0)],
+            repeat(word("きき", "危機"), 2),
+        ]
+        .concat();
+        let total = units.len();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(
+            find(&dict.entries, "いっぱつ", "一髪").unwrap().cost,
+            cost(2, total),
+            "6 of the 8 places of 一髪 are inside 危機一髪"
+        );
+        assert_eq!(
+            find(&dict.entries, "ききいっぱつ", "危機一髪")
+                .unwrap()
+                .cost,
+            cost(6, total)
+        );
+    }
+
+    #[test]
+    fn a_word_met_only_inside_compounds_makes_no_entry() {
+        let units: Vec<Unit> = (0..3)
+            .flat_map(|i| {
+                let doc_id = format!("d{i}");
+                [
+                    at(word("ぜんぽう", "前方"), &doc_id, 0),
+                    at(compound("ぜんぽうこうえんふん", "前方後円墳"), &doc_id, 0),
+                    at(word("こうえんふん", "後円墳"), &doc_id, 2),
+                ]
+            })
+            .collect();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert!(find(&dict.entries, "こうえんふん", "後円墳").is_none());
+        assert!(find(&dict.entries, "ぜんぽう", "前方").is_none());
+        assert!(find(&dict.entries, "ぜんぽうこうえんふん", "前方後円墳").is_some());
+    }
+
+    #[test]
+    fn a_word_met_often_enough_outside_compounds_counts_every_place() {
+        let units: Vec<Unit> = [
+            (0..2)
+                .flat_map(|i| {
+                    let doc_id = format!("t{i}");
+                    [
+                        at(compound("とうきょうとちょう", "東京都庁"), &doc_id, 0),
+                        at(word("とうきょう", "東京"), &doc_id, 0),
+                        at(word("とちょう", "都庁"), &doc_id, 2),
+                    ]
+                })
+                .collect(),
+            repeat(word("とうきょう", "東京"), 2),
+        ]
+        .concat();
+        let total = units.len();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(
+            find(&dict.entries, "とうきょう", "東京").unwrap().cost,
+            cost(4, total),
+            "half the places of 東京 are outside 東京都庁"
+        );
+    }
+
+    #[test]
+    fn a_reading_met_mostly_inside_compounds_counts_every_place_when_its_surface_mostly_stands_alone()
+     {
+        let units: Vec<Unit> = [
+            (0..3)
+                .flat_map(|i| {
+                    let doc_id = format!("n{i}");
+                    [
+                        at(compound("にほんてれび", "日本テレビ"), &doc_id, 0),
+                        at(word("にほん", "日本"), &doc_id, 0),
+                        at(word("てれび", "テレビ"), &doc_id, 2),
+                    ]
+                })
+                .collect(),
+            repeat(word("にっぽん", "日本"), 6),
+        ]
+        .concat();
+        let total = units.len();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(
+            find(&dict.entries, "にほん", "日本").unwrap().cost,
+            cost(3, total),
+            "the analyzer reads 日本 alone にっぽん and inside compounds にほん"
+        );
+    }
+
+    #[test]
+    fn spans_that_overlap_still_cover_what_lies_inside_any_of_them() {
+        // 朽ち果てた joined and 朽ち果て grouped start at one place.
+        let spans = Spans::new([(6, 8), (0, 5), (0, 4)]);
+
+        assert!(spans.covers(2, 5));
+        assert!(spans.covers(0, 4));
+        assert!(spans.covers(6, 8));
+        assert!(!spans.covers(4, 6));
+        assert!(!spans.covers(5, 6));
+    }
+
+    #[test]
+    fn a_word_that_only_touches_a_compound_is_not_inside_it() {
+        let units: Vec<Unit> = (0..2)
+            .flat_map(|i| {
+                let doc_id = format!("d{i}");
+                [
+                    at(word("きのう", "昨日"), &doc_id, 0),
+                    at(compound("ききいっぱつ", "危機一髪"), &doc_id, 2),
+                    at(word("きき", "危機"), &doc_id, 2),
+                    at(word("いっぱつ", "一髪"), &doc_id, 4),
+                    at(word("あした", "明日"), &doc_id, 6),
+                ]
+            })
+            .collect();
+        let total = units.len();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(
+            find(&dict.entries, "きのう", "昨日").unwrap().cost,
+            cost(2, total)
+        );
+        assert_eq!(
+            find(&dict.entries, "あした", "明日").unwrap().cost,
+            cost(2, total)
+        );
     }
 
     #[test]
