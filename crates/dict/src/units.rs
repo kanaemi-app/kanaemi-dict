@@ -416,8 +416,8 @@ const NUMBER_KANJI: &str = "〇一二三四五六七八九十百千万萬億兆�
 
 /// `tokens`, the numerals ending at `after` with the prefix before them and
 /// the counter and suffixes after them, as one plain word: the counter
-/// changes its sound as after a number, and UniDic's reading wins when UniDic
-/// has the word.
+/// changes its sound as after a number, and the lexicon's reading wins when
+/// the lexicon has the word.
 fn word_of_numeral(tokens: &[Token], after: usize, readings: &UnidicReadings) -> Option<LineUnit> {
     let surface: String = tokens.iter().map(|t| t.surface.as_str()).collect();
     let head: String = tokens[..after].iter().map(|t| t.reading.as_str()).collect();
@@ -435,7 +435,7 @@ fn word_of_numeral(tokens: &[Token], after: usize, readings: &UnidicReadings) ->
         }
         None => head,
     };
-    let reading = checked_reading(readings.of(&surface), joined, seam)?;
+    let reading = checked_reading(readings.in_lexicon(&surface), joined, seam)?;
     (is_plain_reading(&reading) && is_word(&reading, &surface)).then(|| LineUnit {
         begin: tokens[0].begin,
         reading,
@@ -586,8 +586,8 @@ fn take_in(mut unit: LineUnit, mut okuri: usize, rest: &[Token]) -> (LineUnit, u
 }
 
 /// Joins a prefix to the content word after it and a suffix to the noun or
-/// pronoun before it, unless UniDic has the joined word and no reading of it
-/// can stand for the joined readings.
+/// pronoun before it, unless the lexicon has the joined word and no reading
+/// of it can stand for the joined readings.
 fn join_affixes(tokens: &[Token], readings: &UnidicReadings) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::new();
     let mut prefix: Option<Token> = None;
@@ -621,11 +621,16 @@ fn join_affixes(tokens: &[Token], readings: &UnidicReadings) -> Vec<Token> {
 }
 
 /// `head` and `tail` as one word with the part of speech of `tail`, read as
-/// UniDic reads it when UniDic has it.
+/// the lexicon (UniDic and the whole SudachiDict lexicon) reads it when the
+/// lexicon has it.
 fn joined(head: &Token, tail: &Token, readings: &UnidicReadings) -> Option<Token> {
     let surface = format!("{}{}", head.surface, tail.surface);
     let reading = format!("{}{}", head.reading, tail.reading);
-    let reading = checked_reading(readings.of(&surface), reading, head.reading.chars().count())?;
+    let reading = checked_reading(
+        readings.in_lexicon(&surface),
+        reading,
+        head.reading.chars().count(),
+    )?;
     Some(Token {
         surface,
         reading,
@@ -636,9 +641,13 @@ fn joined(head: &Token, tail: &Token, readings: &UnidicReadings) -> Option<Token
     })
 }
 
-/// `reading` when UniDic does not know the word or reads it so; else UniDic's
-/// reading that differs only by voicing the kana at `seam`, or UniDic's only
-/// reading. None when neither is there.
+/// `reading` when the lexicon does not know the word or reads it so; else the
+/// lexicon's reading that differs only by voicing the kana at `seam`, or the
+/// lexicon's only reading when it reads the part before `seam` or the part
+/// after it as `reading` does (the part after voiced or not). An only reading
+/// that reads neither part so belongs to another word of the same spelling (下山中 as
+/// the place しもやまなか, not げざんちゅう), and `reading` stays. None when
+/// the lexicon reads the word in more ways and none of them fits.
 fn checked_reading(known: &[String], reading: String, seam: usize) -> Option<String> {
     if known.is_empty() || known.contains(&reading) {
         return Some(reading);
@@ -651,14 +660,41 @@ fn checked_reading(known: &[String], reading: String, seam: usize) -> Option<Str
                 .enumerate()
                 .all(|(i, (a, b))| a == b || (i == seam && is_voicing_of(a, b)))
     };
-    known
-        .iter()
-        .find(|r| voiced_at_seam(r))
-        .or(match known {
-            [only] => Some(only),
-            _ => None,
-        })
-        .cloned()
+    if let Some(voiced) = known.iter().find(|r| voiced_at_seam(r)) {
+        return Some(voiced.clone());
+    }
+    match known {
+        [only] if reads_a_part_so(only, &reading, seam) => Some(only.clone()),
+        [_] => Some(reading),
+        _ => None,
+    }
+}
+
+/// Whether `other` begins with the part of `reading` before `seam` or ends
+/// with the part after it, that part's first kana voiced or not.
+fn reads_a_part_so(other: &str, reading: &str, seam: usize) -> bool {
+    let at = reading
+        .char_indices()
+        .nth(seam)
+        .map_or(reading.len(), |(i, _)| i);
+    let (head, tail) = reading.split_at(at);
+    if !head.is_empty() && other.starts_with(head) {
+        return true;
+    }
+    let mut tail_chars = tail.chars();
+    let Some(first) = tail_chars.next() else {
+        return false;
+    };
+    let rest = tail_chars.as_str();
+    let tail_len = tail.chars().count();
+    let Some(start) = other.char_indices().rev().nth(tail_len - 1).map(|(i, _)| i) else {
+        return false;
+    };
+    let mut other_tail = other[start..].chars();
+    other_tail
+        .next()
+        .is_some_and(|c| c == first || is_voicing_of(first, c))
+        && other_tail.as_str() == rest
 }
 
 fn takes_suffix(token: &Token) -> bool {
@@ -1295,6 +1331,71 @@ mod tests {
                 ]
             ),
             [plain(0, "おおずもう", "大相撲")]
+        );
+    }
+
+    /// Cuts with UniDic knowing nothing and the whole lexicon giving `known`
+    /// as (reading, surface) pairs.
+    fn cut_with_lexicon(known: &[(&str, &str)], specs: &[&str]) -> Vec<LineUnit> {
+        let readings =
+            UnidicReadings::default().with_lexicon(known.iter().map(|(reading, surface)| {
+                UnidicWord {
+                    reading: (*reading).into(),
+                    surface: (*surface).into(),
+                }
+            }));
+        cut_line(&line(specs), &readings).0
+    }
+
+    #[test]
+    fn a_joined_word_only_the_lexicon_has_takes_the_lexicon_s_reading() {
+        assert_eq!(
+            cut_with_lexicon(
+                &[("おおそうじ", "大掃除"), ("うちゅうじん", "宇宙人")],
+                &[
+                    "大/だい/接頭辞,*,*,*,*,*/大",
+                    &format!("掃除/そうじ/{NOUN}/掃除"),
+                    &format!("宇宙/うちゅう/{NOUN}/宇宙"),
+                    "人/にん/接尾辞,名詞的,一般,*,*,*/人",
+                ]
+            ),
+            [
+                plain(0, "おおそうじ", "大掃除"),
+                plain(3, "うちゅうじん", "宇宙人")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_joined_word_keeps_its_reading_when_the_lexicon_s_only_reading_reads_neither_part_so() {
+        assert_eq!(
+            cut_with_lexicon(
+                &[("しもやまなか", "下山中"), ("さいたかね", "最高値")],
+                &[
+                    &format!("下山/げざん/{NOUN}/下山"),
+                    "中/ちゅう/接尾辞,名詞的,一般,*,*,*/中",
+                    &format!("最高/さいこう/{NOUN}/最高"),
+                    "値/ち/接尾辞,名詞的,一般,*,*,*/値",
+                ]
+            ),
+            [
+                plain(0, "げざんちゅう", "下山中"),
+                plain(3, "さいこうち", "最高値")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_joined_word_takes_the_lexicon_s_only_reading_that_reads_the_tail_voiced() {
+        assert_eq!(
+            cut_with_lexicon(
+                &[("きょうじゅう", "今日中")],
+                &[
+                    &format!("今日/こんにち/{NOUN}/今日"),
+                    "中/ちゅう/接尾辞,名詞的,一般,*,*,*/中",
+                ]
+            ),
+            [plain(0, "きょうじゅう", "今日中")]
         );
     }
 

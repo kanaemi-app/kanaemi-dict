@@ -109,6 +109,12 @@ impl Corrections {
         self.readings.get(surface.as_ref()).map(String::as_str)
     }
 
+    /// Whether a correction reads `surface` other than as `reading`.
+    pub fn contradicts(&self, reading: impl AsRef<str>, surface: impl AsRef<str>) -> bool {
+        self.reading_of(surface)
+            .is_some_and(|corrected| corrected != reading.as_ref())
+    }
+
     /// Whether `surface` is no word and stays out of the dictionaries.
     pub fn drops(&self, surface: impl AsRef<str>) -> bool {
         self.dropped.contains(surface.as_ref())
@@ -195,6 +201,15 @@ mod tests {
                 reading: Some("ふかぼり".into()),
             }]
         );
+    }
+
+    #[test]
+    fn a_reading_other_than_the_correction_s_is_contradicted() {
+        let corrections = Corrections::new(parse_corrections("一回\tいっかい\n").unwrap());
+
+        assert!(corrections.contradicts("いちかい", "一回"));
+        assert!(!corrections.contradicts("いっかい", "一回"));
+        assert!(!corrections.contradicts("にかい", "二回"));
     }
 
     #[test]

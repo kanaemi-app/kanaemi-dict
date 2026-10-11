@@ -29,6 +29,23 @@ pub fn plain_words(lexicon: impl Read) -> Result<Vec<UnidicWord>, UnidicError> {
     })
 }
 
+/// The non-conjugating words with kanji in the lexicon that are not proper
+/// nouns, without duplicates, in reading and surface order.
+pub fn common_words(lexicon: impl Read) -> Result<Vec<UnidicWord>, UnidicError> {
+    words_where(lexicon, |row| {
+        !matches!(row.pos[0].as_str(), "補助記号" | "空白") && row.pos[1] != "固有名詞"
+    })
+}
+
+/// The non-conjugating words with kanji in the lexicon that are not person
+/// names, without duplicates, in reading and surface order. A person name
+/// reads its surface in ways a word does not (一日 as かずてる).
+pub fn unnamed_words(lexicon: impl Read) -> Result<Vec<UnidicWord>, UnidicError> {
+    words_where(lexicon, |row| {
+        !matches!(row.pos[0].as_str(), "補助記号" | "空白") && row.pos[2] != "人名"
+    })
+}
+
 /// The words with kanji the lexicon gives as counters (a suffix, or a noun
 /// that can count), without duplicates, in reading and surface order. Rows of
 /// cost 0, which the lexicon keeps for symbols, are left out.
@@ -102,19 +119,48 @@ fn words_where(
 }
 
 /// The readings UniDic gives each surface of its words, to check a reading
-/// against, and of its counters, which a counter's sound changes start from.
+/// against, and of its counters, which a counter's sound changes start from;
+/// and the readings the whole SudachiDict lexicon adds to them, which a word
+/// the build joins is read by.
 #[derive(Debug, Clone, Default)]
 pub struct UnidicReadings {
     words: HashMap<String, Vec<String>>,
     counters: HashMap<String, Vec<String>>,
+    /// UniDic's readings and the lexicon's, of the surfaces the lexicon has.
+    lexicon: HashMap<String, Vec<String>>,
 }
 
 impl UnidicReadings {
     pub fn new(words: impl IntoIterator<Item = UnidicWord>) -> Self {
         Self {
             words: by_surface(words),
-            counters: HashMap::new(),
+            ..Self::default()
         }
+    }
+
+    /// These readings with `lexicon`, the words of the whole SudachiDict
+    /// lexicon (see [`unnamed_words`]).
+    pub fn with_lexicon(mut self, lexicon: impl IntoIterator<Item = UnidicWord>) -> Self {
+        for word in lexicon {
+            let readings = self
+                .lexicon
+                .entry(word.surface)
+                .or_insert_with_key(|surface| self.words.get(surface).cloned().unwrap_or_default());
+            if !readings.contains(&word.reading) {
+                readings.push(word.reading);
+            }
+        }
+        self
+    }
+
+    /// UniDic's readings of `surface` and the lexicon's; none when neither
+    /// has it.
+    pub fn in_lexicon(&self, surface: impl AsRef<str>) -> &[String] {
+        let surface = surface.as_ref();
+        self.lexicon
+            .get(surface)
+            .or_else(|| self.words.get(surface))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// These readings with `counters`, UniDic's words read as counters (see
@@ -267,6 +313,68 @@ mod tests {
         assert_eq!(readings.of("米子"), ["よなご", "よねこ"]);
         assert_eq!(readings.of("長野"), ["ながの"]);
         assert!(readings.of("深掘り").is_empty());
+    }
+
+    #[test]
+    fn common_words_leave_out_proper_nouns() {
+        let csv = [
+            HEADER.to_owned(),
+            "大文字,1,1,8118,,名詞,普通名詞,一般,*,*,*,オオモジ,,,,,,,\n".to_owned(),
+            "宇宙人,1,1,12481,,名詞,固有名詞,一般,*,*,*,ウチュウジン,,,,,,,\n".to_owned(),
+            "深田,1,1,10000,,名詞,固有名詞,地名,一般,*,*,フケダ,,,,,,,\n".to_owned(),
+        ]
+        .concat();
+
+        let words = common_words(csv.as_bytes()).unwrap();
+
+        assert_eq!(words, [word("おおもじ", "大文字")]);
+    }
+
+    #[test]
+    fn unnamed_words_leave_out_person_names() {
+        let csv = [
+            HEADER.to_owned(),
+            "大文字,1,1,8118,,名詞,普通名詞,一般,*,*,*,オオモジ,,,,,,,\n".to_owned(),
+            "大文字,-1,-1,0,,名詞,固有名詞,人名,姓,*,*,ダイモンジ,,,,,,,\n".to_owned(),
+            "宇宙人,1,1,12481,,名詞,固有名詞,一般,*,*,*,ウチュウジン,,,,,,,\n".to_owned(),
+            "日本海,1,1,10000,,名詞,固有名詞,地名,一般,*,*,ニホンカイ,,,,,,,\n".to_owned(),
+            "書く,1,1,100,,動詞,一般,*,*,五段-カ行,*,カク,,,,,,,\n".to_owned(),
+        ]
+        .concat();
+
+        let words = unnamed_words(csv.as_bytes()).unwrap();
+
+        assert_eq!(
+            words,
+            [
+                word("うちゅうじん", "宇宙人"),
+                word("おおもじ", "大文字"),
+                word("にほんかい", "日本海"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_lexicon_gives_unidic_s_readings_and_its_own() {
+        let readings = UnidicReadings::new([word("だいもんじ", "大文字"), word("ながの", "長野")])
+            .with_lexicon([
+                word("おおもじ", "大文字"),
+                word("だいもんじ", "大文字"),
+                word("おおそうじ", "大掃除"),
+            ]);
+
+        assert_eq!(readings.of("大文字"), ["だいもんじ"]);
+        assert_eq!(readings.in_lexicon("大文字"), ["だいもんじ", "おおもじ"]);
+        assert_eq!(readings.in_lexicon("長野"), ["ながの"]);
+        assert_eq!(readings.in_lexicon("大掃除"), ["おおそうじ"]);
+        assert!(readings.of("大掃除").is_empty());
+    }
+
+    #[test]
+    fn without_a_lexicon_unidic_s_readings_are_the_lexicon_s() {
+        let readings = UnidicReadings::new([word("ながの", "長野")]);
+
+        assert_eq!(readings.in_lexicon("長野"), ["ながの"]);
     }
 
     #[test]

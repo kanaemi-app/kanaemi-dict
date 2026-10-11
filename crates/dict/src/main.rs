@@ -15,15 +15,15 @@ use kanaemi_dict::{
     EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, ReadingsError,
     RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WriteError, agreement, check_words,
-    clans, counted_reading, counted_words, counter_words, cut_documents, dictionary_lines,
-    document_sources, document_texts, each_document_with_units, engine, eval_documents,
-    evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
+    clans, common_words, counted_reading, counted_words, counter_words, cut_documents,
+    dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
+    eval_documents, evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
     fragment_surfaces, gather, is_word, kanji_entries, listed_dictionary, mismatches_tsv,
     model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols, name_readings,
     nihon_readings, okurigana_dictionary, parse_corrections, parse_word_cases, paths_of,
     person_dictionary, place_dictionary, place_names, plain_words, read_names, read_title_entries,
     read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of,
-    take, title_entries, train, typed_as_entries, typed_units, unihan_readings,
+    take, title_entries, train, typed_as_entries, typed_units, unihan_readings, unnamed_words,
     wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv,
     write_atomically, year_dictionary,
 };
@@ -34,6 +34,11 @@ const SYSTEM_DICTIONARY: &str = "build/sudachi/system_full.dic";
 /// SudachiDict small, which checks the analyzer's readings against UniDic.
 const CHECKER_DICTIONARY: &str = "build/sudachi/system_small.dic";
 const LEXICON: &str = "build/sudachi/small_lex.csv";
+/// The rest of SudachiDict's lexicon, beside SudachiDict small's.
+const FULL_LEXICONS: [&str; 2] = [
+    "build/sudachi/core_lex.csv",
+    "build/sudachi/notcore_lex.csv",
+];
 /// The words the analyzer reads wrong, applied to what it reads.
 const CORRECTIONS: &str = "analyzer/corrections.tsv";
 const DOCS: &str = "build/docs.jsonl";
@@ -71,11 +76,14 @@ const PERSON: &str = "person";
 const PEOPLE_SOURCE: &str = "wikidata-people";
 /// The sources every dictionary read with the analyzer has: the analyzer's
 /// dictionary, the dictionary that checks its readings, and the UniDic
-/// lexicon they are checked against and the base takes words from.
-const ANALYZER_SOURCES: [&str; 3] = [
+/// lexicon they are checked against and the base takes words from, and the
+/// rest of SudachiDict's lexicon, which reads the words the build joins.
+const ANALYZER_SOURCES: [&str; 5] = [
     "sudachidict-full",
     "sudachidict-small",
     "sudachidict-small-lex",
+    "sudachidict-core-lex",
+    "sudachidict-notcore-lex",
 ];
 /// The source of the article titles and of the place names.
 const TITLES_SOURCE: &str = "wikipedia-ja";
@@ -140,11 +148,14 @@ usage: kanaemi-dict units
          cut every document of build/docs.jsonl into build/units.jsonl,
          reading them with build/sudachi/system_full.dic, checking the
          readings against build/sudachi/small_lex.csv with
-         build/sudachi/system_small.dic, and applying the corrections of
-         analyzer/corrections.tsv
+         build/sudachi/system_small.dic, reading the words it joins as
+         build/sudachi/{small,core,notcore}_lex.csv read them, and applying
+         the corrections of analyzer/corrections.tsv
        kanaemi-dict dictionary [--train-only]
-         build build/dictionaries/base.tsv from build/units.jsonl and the
-         UniDic lexicon build/sudachi/small_lex.csv, with the words of one
+         build build/dictionaries/base.tsv from build/units.jsonl, the
+         UniDic lexicon build/sudachi/small_lex.csv and the readings
+         build/sudachi/{core,notcore}_lex.csv give the surfaces of the
+         units, with the words of one
          to ten with each counter read by the analyzer, reporting to
          build/dictionaries/base-report.tsv; with --train-only, from the
          units of the train documents alone into
@@ -298,7 +309,9 @@ fn open_analyzer() -> Result<Analyzer, Error> {
         path: LEXICON.into(),
         source,
     })?;
-    let readings = UnidicReadings::new(unidic_words()?).with_counters(counters);
+    let readings = UnidicReadings::new(unidic_words()?)
+        .with_counters(counters)
+        .with_lexicon(lexicon_words(unnamed_words)?);
     Analyzer::open(
         SYSTEM_DICTIONARY,
         CHECKER_DICTIONARY,
@@ -325,6 +338,20 @@ fn unidic_words() -> Result<Vec<UnidicWord>, Error> {
         path: LEXICON.into(),
         source,
     })
+}
+
+/// The words of the full lexicons `take` picks out of each.
+fn lexicon_words(
+    take: fn(BufReader<File>) -> Result<Vec<UnidicWord>, UnidicError>,
+) -> Result<Vec<UnidicWord>, Error> {
+    let mut words = Vec::new();
+    for path in FULL_LEXICONS {
+        words.extend(take(open(path)?).map_err(|source| Error::Unidic {
+            path: path.into(),
+            source,
+        })?);
+    }
+    Ok(words)
 }
 
 fn open(path: &str) -> Result<BufReader<File>, Error> {
@@ -365,6 +392,15 @@ fn cut_units() -> Result<(), Error> {
 fn build_dictionary(train_only: bool) -> Result<(), Error> {
     let outputs = if train_only { BASE_TRAIN } else { BASE };
     let unidic = unidic_words()?;
+    // A correction says how its surface reads; the lexicon reading it away
+    // would bring back the misreading it corrects (一回 as いちかい).
+    let lexicon: Vec<UnidicWord> = {
+        let corrections = corrections()?;
+        lexicon_words(common_words)?
+            .into_iter()
+            .filter(|w| !corrections.contradicts(&w.reading, &w.surface))
+            .collect()
+    };
     let names = read_names(open(BASE_NAMES)?).map_err(read_error(BASE_NAMES))?;
     let titles = read_titles(open(BASE_TITLES)?).map_err(|source| Error::Titles {
         path: BASE_TITLES.into(),
@@ -386,13 +422,14 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             })
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
         let mut total = 0usize;
-        let mut dictionary = Dictionary::build(
+        let mut dictionary = Dictionary::build_with_lexicon(
             units.inspect(|unit| {
                 total += 1;
                 chains.observe(unit);
                 reads.observe(unit);
             }),
             &unidic,
+            &lexicon,
         );
         if let Some(e) = failure {
             return Err(e);

@@ -4,9 +4,9 @@
  *
  *     deno run -A scripts/sudachi.ts
  *
- * The raw store is build/sudachi/raw; the files are
- * build/sudachi/system_full.dic and build/sudachi/small_lex.csv. A URL
- * already stored is not fetched again.
+ * The raw store is build/sudachi/raw; the files are written into
+ * build/sudachi/ under their names in scripts/sudachi/files.ts. A URL already
+ * stored is not fetched again.
  */
 import { join } from "@std/path";
 import { fetchToStore } from "./raw/fetch.ts";

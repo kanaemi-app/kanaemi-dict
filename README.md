@@ -55,7 +55,7 @@ nix develop
 
 # 基本辞書
 just fetch                     # 素材を build/raw に取得する
-just sudachi                   # 解析器の辞書と UniDic の語彙を用意する
+just sudachi                   # 解析器の辞書と SudachiDict の語彙を用意する
 just docs                      # 素材から文書を取り出す
 just kanji                     # 漢字一字の読みの表（Mozc、Unihan）を取得する
 just base-titles               # Wikipedia の記事とリダイレクトの見出しを取り出す

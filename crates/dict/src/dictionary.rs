@@ -215,6 +215,20 @@ impl Dictionary {
         units: impl IntoIterator<Item = U>,
         unidic: &[UnidicWord],
     ) -> Self {
+        Self::build_with_lexicon(units, unidic, &[])
+    }
+
+    /// [`Dictionary::build`] with the words of the whole SudachiDict
+    /// lexicon, which enter as UniDic words do but only where units show
+    /// their surface as often as a word must occur to enter: the lexicon
+    /// reads a surface the text has in ways the analyzer never chooses
+    /// (大文字 as おおもじ), and the rest of it would bring in words no text
+    /// uses.
+    pub fn build_with_lexicon<U: Borrow<Unit>>(
+        units: impl IntoIterator<Item = U>,
+        unidic: &[UnidicWord],
+        lexicon: &[UnidicWord],
+    ) -> Self {
         let mut total = 0usize;
         // A whole form and a plain word with the same reading and surface are
         // one item, so they share one count.
@@ -280,12 +294,19 @@ impl Dictionary {
             }
         }
 
+        // A fragment's surface counts only where it stands outside the
+        // compounds, for the lexicon's words of it as for the units.
+        let mut outside = surfaces.clone();
         {
             let (inside, fragments) = parts.finish();
             for (key, n) in inside {
-                if fragments.contains(&key.1)
-                    && let Some(count) = counts.get_mut(&key)
-                {
+                if !fragments.contains(&key.1) {
+                    continue;
+                }
+                if let Some(count) = counts.get_mut(&key) {
+                    *count -= n;
+                }
+                if let Some(count) = outside.get_mut(&key.1) {
                     *count -= n;
                 }
             }
@@ -306,7 +327,19 @@ impl Dictionary {
             let kept = costs.entry(key).or_insert(u32::MAX);
             *kept = (*kept).min(cost);
         }
+        for word in lexicon {
+            let Some(&n) = outside
+                .get(word.surface.as_str())
+                .filter(|&&n| n >= MIN_COUNT)
+            else {
+                continue;
+            };
+            let key = (word.reading.clone(), word.surface.clone(), None);
+            let kept = costs.entry(key).or_insert(u32::MAX);
+            *kept = (*kept).min(cost_of(n, total) + UNIDIC_EXTRA);
+        }
         drop(surfaces);
+        drop(outside);
         let entries: Vec<Entry> = costs
             .into_iter()
             .filter(|((reading, surface, conjugation), _)| {
@@ -1180,6 +1213,24 @@ mod tests {
     }
 
     #[test]
+    fn lexicon_words_count_a_fragment_s_surface_only_outside_the_compounds() {
+        let units: Vec<Unit> = [
+            (0..6)
+                .flat_map(|i| kiki_ippatsu(&format!("k{i}")))
+                .collect(),
+            vec![at(word("いっぱつ", "一髪"), "a", 0)],
+        ]
+        .concat();
+
+        let dict = Dictionary::build_with_lexicon(&units, &[], &[unidic("ひとはつ", "一髪")]);
+
+        assert!(
+            find(&dict.entries, "ひとはつ", "一髪").is_none(),
+            "6 of the 7 places of 一髪 are inside 危機一髪, so it stands alone once"
+        );
+    }
+
+    #[test]
     fn a_word_met_only_inside_compounds_makes_no_entry() {
         let units: Vec<Unit> = (0..3)
             .flat_map(|i| {
@@ -1321,6 +1372,34 @@ mod tests {
             find(&dict.entries, "じょうけい", "情景").unwrap().cost,
             3000
         );
+    }
+
+    #[test]
+    fn lexicon_words_enter_as_unidic_words_only_where_units_show_the_surface_enough() {
+        let units: Vec<Unit> = [
+            repeat(word("だいもんじ", "大文字"), 3),
+            repeat(word("てがみ", "手紙"), 1),
+        ]
+        .concat();
+        let lexicon = [
+            unidic("おおもじ", "大文字"),
+            unidic("だいもんじ", "大文字"),
+            unidic("おおそうじ", "大掃除"),
+            unidic("しょかん", "手紙"),
+        ];
+
+        let dict = Dictionary::build_with_lexicon(&units, &[], &lexicon);
+
+        assert_eq!(
+            find(&dict.entries, "おおもじ", "大文字").unwrap().cost,
+            cost(3, 4) + 1000
+        );
+        assert_eq!(
+            find(&dict.entries, "だいもんじ", "大文字").unwrap().cost,
+            cost(3, 4)
+        );
+        assert!(find(&dict.entries, "おおそうじ", "大掃除").is_none());
+        assert!(find(&dict.entries, "しょかん", "手紙").is_none());
     }
 
     #[test]

@@ -3,7 +3,9 @@
  * SudachiDict full, which the analyzer reads, the system dictionary of
  * SudachiDict small, which checks the analyzer's readings, and the lexicon
  * file of SudachiDict small (UniDic), which the readings are checked against
- * and whose words the base dictionary takes in.
+ * and whose words the base dictionary takes in, and the lexicon files of the
+ * rest of SudachiDict, which read the words the build joins and give the
+ * surfaces of the text their other readings.
  * SudachiDict is a tool of the build, not a source of documents, so its
  * records live in a raw store of their own.
  */
@@ -39,6 +41,17 @@ export const SUDACHI_FILES: SudachiFile[] = [
     url:
       "https://sudachi.s3.ap-northeast-1.amazonaws.com/sudachidict-raw/v1/20260723/small_lex.zip",
     name: "small_lex.csv",
+  },
+  {
+    sourceId: "sudachidict-core-lex",
+    url: "https://sudachi.s3.ap-northeast-1.amazonaws.com/sudachidict-raw/v1/20260723/core_lex.zip",
+    name: "core_lex.csv",
+  },
+  {
+    sourceId: "sudachidict-notcore-lex",
+    url:
+      "https://sudachi.s3.ap-northeast-1.amazonaws.com/sudachidict-raw/v1/20260723/notcore_lex.zip",
+    name: "notcore_lex.csv",
   },
 ];
 

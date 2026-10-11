@@ -37,8 +37,8 @@ fetch *args:
 docs:
     deno run --allow-read --allow-write --allow-run=lbzip2 scripts/docs.ts
 
-# Fetch SudachiDict into build/sudachi/raw and write the analyzer's dictionary, the dictionary that checks its readings
-# and the UniDic lexicon into build/sudachi/.
+# Fetch SudachiDict into build/sudachi/raw and write the analyzer's dictionary, the dictionary that checks its readings,
+# the UniDic lexicon and the rest of SudachiDict's lexicon into build/sudachi/.
 sudachi:
     deno run --allow-read --allow-write --allow-net scripts/sudachi.ts
 
