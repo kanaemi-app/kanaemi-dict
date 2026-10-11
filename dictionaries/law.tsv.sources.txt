@@ -1,5 +1,7 @@
-# sha256 424883ec487a94861fd818dba004fdc3cefb687fa213673c4cb3f332f5be569e
+# sha256 055fc552bc283e04a1a04cc2b439fa3e8ed080d6b13414f8b7b0e0bf508ee41d
 egov-all-xml
+sudachidict-core-lex
 sudachidict-full
+sudachidict-notcore-lex
 sudachidict-small
 sudachidict-small-lex

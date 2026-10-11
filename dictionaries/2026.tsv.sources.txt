@@ -280,7 +280,9 @@ hatena-hotentry:20261003
 hatena-hotentry:20261004
 hatena-hotentry:20261005
 hatena-hotentry:20261006
+sudachidict-core-lex
 sudachidict-full
+sudachidict-notcore-lex
 sudachidict-small
 sudachidict-small-lex
 wikipedia-ja

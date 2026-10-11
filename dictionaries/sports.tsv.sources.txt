@@ -1,5 +1,7 @@
-# sha256 6edf17bb5658d5194d25e7b3cfeb125bff0bb196dc3372bbf68957bb0b93757c
+# sha256 3002aede0581fe93fcef11e6375dda13fc4ef63ce53e625d530d9f9439a0d271
+sudachidict-core-lex
 sudachidict-full
+sudachidict-notcore-lex
 sudachidict-small
 sudachidict-small-lex
 wikipedia-ja
