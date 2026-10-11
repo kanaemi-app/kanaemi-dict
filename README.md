@@ -42,7 +42,7 @@ dictionaries = ["custom", "kanaemi-base.tsv", "kanaemi-railway.tsv", "kanaemi-it
 | 記号・顔文字 | Mozc の記号の表、顔文字の表 | BSD-3-Clause |
 | 絵文字 | Mozc の絵文字の表（読みは Unicode CLDR から） | BSD-3-Clause、Unicode License v3 |
 | 地名 | 日本郵便の郵便番号データ | 日本郵便は著作権を主張せず、自由に配布できる |
-| 人名 | Wikidata の人物の読み仮名 | CC0 1.0 |
+| 人名 | Wikidata の人物の読み仮名、Mozc の単漢字の表（姓と名を分けるのに使う） | CC0 1.0、BSD-3-Clause |
 
 ## 辞書を作る
 
