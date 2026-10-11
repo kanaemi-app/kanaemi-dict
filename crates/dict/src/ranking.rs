@@ -2,7 +2,7 @@
 //! softmax over each unit's candidates, and the weights written as Kanaemi's
 //! model file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use kanaemi_engine::{
 };
 
 use crate::kana::is_hiragana;
-use crate::{Query, Unit, query_of};
+use crate::{Query, Spans, Unit, query_of, span_of};
 
 /// The widest hash a model file allows.
 pub const MAX_BITS: u8 = 28;
@@ -145,6 +145,23 @@ pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Exam
     examples
 }
 
+/// The units of a document a typist types one by one: all but those whose
+/// surface is one of `fragments` and that lie inside one of `compounds`
+/// (一髪 in 危機一髪), which are typed as the compound. The dictionary counts
+/// them so too (see [`crate::fragment_surfaces`]); taught them, the model
+/// would put such a fragment back ahead of the words it lost to.
+pub fn typed_units(units: &[Unit], compounds: &[Unit], fragments: &HashSet<String>) -> Vec<Unit> {
+    let spans = Spans::new(compounds.iter().map(span_of));
+    units
+        .iter()
+        .filter(|u| {
+            let end = u.position + u.surface.chars().count();
+            !(fragments.contains(&u.surface) && spans.covers(u.position, end))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Adds the examples of `query` typed into the field with `history` and
 /// `context`, and into an empty field, when its `candidates` teach anything;
 /// gives where its expected surface is among them.
@@ -177,12 +194,24 @@ fn push_typing(
     correct
 }
 
-/// The other ways a conjugating unit, typed with the first kana of its
-/// okurigana marked, may be typed: whole (かいた for 書いた), and with all of
-/// its okurigana marked (か*いた) when that is more than the first kana.
-/// Without them the model sees such a form only as a wrong candidate of
-/// another word typed whole, and learns to put it last.
+/// The other ways a unit may be typed. A conjugating unit, typed with the
+/// first kana of its okurigana marked, also whole (かいた for 書いた), and
+/// with all of its okurigana marked (か*いた) when that is more than the
+/// first kana. A numeric unit with its number in kanji, typed with the number
+/// as digits, also with the number in kana (にほん for 二本). Without them the
+/// model sees such a form only as a wrong candidate of another word typed
+/// whole, and learns to put it last.
 fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
+    if let Some(numeric) = &unit.numeric {
+        if !numeric.surface.contains("{kanji}") || numeric.kana.is_empty() {
+            return Vec::new();
+        }
+        return vec![Query {
+            reading: numeric.kana.clone(),
+            okurigana: None,
+            expected: unit.surface.clone(),
+        }];
+    }
     if query.okurigana.is_none() {
         return Vec::new();
     }
@@ -543,6 +572,63 @@ mod tests {
         let examples = examples_of_document(&engine, &[unit(0, "かん", "幹")], "幹");
 
         assert!(examples.is_empty());
+    }
+
+    fn numeric_unit(reading: &str, surface: &str, numeric: (&str, &str, &str)) -> Unit {
+        Unit {
+            numeric: Some(Numeric {
+                reading: numeric.0.into(),
+                surface: numeric.1.into(),
+                value: reading.chars().take_while(char::is_ascii_digit).collect(),
+                kana: numeric.2.into(),
+            }),
+            ..unit(0, reading, surface)
+        }
+    }
+
+    #[test]
+    fn a_fragment_inside_a_compound_is_not_typed_alone() {
+        let units = [
+            unit(0, "きき", "危機"),
+            unit(2, "いっぱつ", "一髪"),
+            unit(10, "いっぱつ", "一髪"),
+        ];
+        let fragments = HashSet::from(["一髪".to_owned()]);
+
+        let compound = Unit {
+            compound: true,
+            ..unit(0, "ききいっぱつ", "危機一髪")
+        };
+
+        let typed = typed_units(&units, &[compound], &fragments);
+
+        assert_eq!(typed, [units[0].clone(), units[2].clone()]);
+    }
+
+    #[test]
+    fn a_number_written_in_kanji_is_also_typed_in_kana() {
+        let kanji = numeric_unit("2ほん", "二本", ("{}ほん", "{kanji}本", "にほん"));
+        assert_eq!(
+            other_typings(&kanji, &query_of(&kanji)),
+            [typing("にほん", None, "二本")]
+        );
+        let digits = numeric_unit("2ほん", "2本", ("{}ほん", "{}本", "にほん"));
+        assert_eq!(other_typings(&digits, &query_of(&digits)), []);
+    }
+
+    #[test]
+    fn a_word_of_a_small_number_typed_in_kana_is_taught_first() {
+        let engine = engine_of("にほん\t日本\t\t5\nにほん\t二本\t\t9\n{}ほん\t{kanji}本\t\t5\n");
+        let units = [numeric_unit(
+            "2ほん",
+            "二本",
+            ("{}ほん", "{kanji}本", "にほん"),
+        )];
+
+        let examples = examples_of_document(&engine, &units, "二本");
+
+        let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
+        assert!(correct_of(0).contains(&index("rs\u{1f}にほん\u{1f}二本")));
     }
 
     #[test]

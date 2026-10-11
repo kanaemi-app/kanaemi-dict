@@ -1,3 +1,3 @@
-# sha256 59c8908aeb5acedcdcb781683d0f283d085073c1b1bf6b974288f9c69a4e6faf
+# sha256 5044de798f2cd6609e340ab6d4f98ffef940750ea8dadf18510a5b6a1c29eb19
 mozc-single-kanji
 wikidata-people

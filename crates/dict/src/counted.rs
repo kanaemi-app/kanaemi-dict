@@ -2,7 +2,7 @@
 //! kana (いっぴき, さんぼん), which numeric items cannot give: Kanaemi takes a
 //! number in a reading only as digits.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::kana::{
     HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji, is_katakana, is_reading_kana,
@@ -85,10 +85,14 @@ pub fn counted_reading(tokens: &[Token], surface: &str) -> Option<CountedReading
 /// The words of one to ten with each counter of `numeric`, read with `read`
 /// (see [`counted_reading`]) and `counter_readings`, UniDic's readings of
 /// its counters (see [`crate::counter_words`]), each at its counter's cost
-/// and one of ten numbers more.
+/// and one of ten numbers more, or at the cost of its surface in `written`
+/// (see [`crate::Dictionary::numeric_written`]) when that is smaller: a
+/// counter's cost spreads evenly over the ten numbers, though 一 is written
+/// far more often than the others (一発, 一度).
 pub fn counted_words<E>(
     numeric: &[Entry],
     counter_readings: &UnidicReadings,
+    written: &HashMap<String, u32>,
     mut read: impl FnMut(&str) -> Result<Option<CountedReading>, E>,
 ) -> Result<Vec<Entry>, E> {
     let mut words = Vec::new();
@@ -113,11 +117,14 @@ pub fn counted_words<E>(
             if reading.is_empty() || !reading.chars().all(is_reading_kana) {
                 continue;
             }
+            let cost = written
+                .get(&surface)
+                .map_or(cost + ONE_OF_TEN, |&w| w.min(cost + ONE_OF_TEN));
             words.push(Entry {
                 reading,
                 surface,
                 conjugation: None,
-                cost: cost + ONE_OF_TEN,
+                cost,
             });
         }
     }
@@ -557,7 +564,8 @@ mod tests {
             }))
         };
 
-        let words = counted_words(&numeric, &UnidicReadings::default(), read).unwrap();
+        let words =
+            counted_words(&numeric, &UnidicReadings::default(), &HashMap::new(), read).unwrap();
 
         let view: Vec<_> = words
             .iter()
@@ -574,6 +582,28 @@ mod tests {
     }
 
     #[test]
+    fn a_word_written_in_the_units_costs_no_more_than_its_written_count_gives() {
+        let numeric = [numeric("{}はつ", "{kanji}発", 1000)];
+        let written = HashMap::from([("一発".to_owned(), 700), ("二発".to_owned(), 1500)]);
+        let read = |surface: &str| -> Result<Option<CountedReading>, ()> {
+            let number = match surface.chars().next().unwrap() {
+                '一' => "いち",
+                '二' => "に",
+                _ => return Ok(None),
+            };
+            Ok(Some(CountedReading::Counted {
+                number: number.into(),
+                counter: "はつ".into(),
+            }))
+        };
+
+        let words = counted_words(&numeric, &UnidicReadings::default(), &written, read).unwrap();
+
+        let view: Vec<_> = words.iter().map(|w| (w.surface.as_str(), w.cost)).collect();
+        assert_eq!(view, [("一発", 700), ("二発", 1230)]);
+    }
+
+    #[test]
     fn a_japanese_reading_of_the_number_is_kept_as_read() {
         let numeric = [numeric("{}か", "{kanji}日", 900)];
         let read = |surface: &str| -> Result<Option<CountedReading>, ()> {
@@ -583,7 +613,8 @@ mod tests {
             }))
         };
 
-        let words = counted_words(&numeric, &UnidicReadings::default(), read).unwrap();
+        let words =
+            counted_words(&numeric, &UnidicReadings::default(), &HashMap::new(), read).unwrap();
 
         assert_eq!(words.len(), 1);
         assert_eq!(words[0].reading, "みっか");

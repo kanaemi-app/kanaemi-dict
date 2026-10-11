@@ -17,14 +17,15 @@ use kanaemi_dict::{
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WriteError, agreement, check_words,
     clans, counted_reading, counted_words, counter_words, cut_documents, dictionary_lines,
     document_sources, document_texts, each_document_with_units, engine, eval_documents,
-    evaluate_documents, examples_of_document, excluded_readings, field_dictionary, gather, is_word,
-    kanji_entries, listed_dictionary, mismatches_tsv, model_file, mozc_emoji, mozc_emoticons,
-    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
-    parse_corrections, parse_word_cases, paths_of, person_dictionary, place_dictionary,
-    place_names, plain_words, read_names, read_title_entries, read_titles, read_units,
-    reading_form, sample_tsv, shared_readings, sources_file, split_of, take, title_entries, train,
-    unihan_readings, wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv,
-    word_scores_tsv, write_atomically, year_dictionary,
+    evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
+    fragment_surfaces, gather, is_word, kanji_entries, listed_dictionary, mismatches_tsv,
+    model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols, name_readings,
+    nihon_readings, okurigana_dictionary, parse_corrections, parse_word_cases, paths_of,
+    person_dictionary, place_dictionary, place_names, plain_words, read_names, read_title_entries,
+    read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of,
+    take, title_entries, train, typed_as_entries, typed_units, unihan_readings,
+    wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv,
+    write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -434,11 +435,16 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                     }
                 })?);
             let analyzer = open_analyzer()?;
-            counted_words(&dictionary.numeric, &counters, |surface| {
-                analyzer
-                    .tokens(format!("{surface}の"))
-                    .map(|tokens| counted_reading(&tokens, surface))
-            })
+            counted_words(
+                &dictionary.numeric,
+                &counters,
+                &dictionary.numeric_written,
+                |surface| {
+                    analyzer
+                        .tokens(format!("{surface}の"))
+                        .map(|tokens| counted_reading(&tokens, surface))
+                },
+            )
             .map_err(|source| Error::Analyzer {
                 path: SYSTEM_DICTIONARY.into(),
                 source,
@@ -518,7 +524,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
 /// the train documents, and writes the scores per kind of source.
 fn evaluate() -> Result<(), Error> {
     let dictionary = train_dictionary()?;
-    let docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
+    let docs = typed_eval_documents(BASE_TRAIN.dictionary)?;
     let evaluation = evaluate_documents(&docs, &dictionary, None);
     write_atomically(EVALUATION, |w| {
         w.write_all(evaluation.to_tsv().as_bytes())
@@ -527,6 +533,24 @@ fn evaluate() -> Result<(), Error> {
     print_scores("", &evaluation);
     println!("documents: {}, out: {EVALUATION}", docs.len());
     Ok(())
+}
+
+/// The eval documents with their units as a typist types them with the
+/// dictionary at `path`: each compound it has typed whole (see
+/// [`typed_as_entries`]).
+fn typed_eval_documents(path: &str) -> Result<Vec<EvalDocument>, Error> {
+    let text = read_to_string(path)?;
+    let entries: HashSet<(&str, &str)> = dictionary_lines(&text)
+        .filter(|(_, line)| line.conjugation.is_empty())
+        .map(|(_, line)| (line.reading, line.surface))
+        .collect();
+    let mut docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
+    for doc in &mut docs {
+        doc.units = typed_as_entries(&doc.units, &doc.compounds, |reading, surface| {
+            entries.contains(&(reading, surface))
+        });
+    }
+    Ok(docs)
 }
 
 /// The base dictionary built from the train documents, as Kanaemi reads it.
@@ -560,6 +584,28 @@ fn train_ranking() -> Result<(), Error> {
         source,
     })?;
     let base = std::fs::read(BASE.dictionary).map_err(read_error(BASE.dictionary))?;
+    // The fragments the train dictionary counted so, from the same units.
+    let fragments = {
+        let mut failure = None;
+        let fragments = fragment_surfaces(
+            read_units(open(UNITS)?)
+                .map_while(|unit| {
+                    unit.map_err(|source| {
+                        failure = Some(Error::Units {
+                            path: UNITS.into(),
+                            source,
+                        })
+                    })
+                    .ok()
+                })
+                .filter(|unit| split_of(&unit.doc_id) == Split::Train),
+        );
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        fragments
+    };
+    println!("fragments: {}", fragments.len());
     let mut taken: HashSet<String> = HashSet::new();
     let mut sources = BTreeSet::from(ANALYZER_SOURCES.map(String::from));
     let mut add = |units: &str, docs: &str, budget: usize| -> Result<(), Error> {
@@ -568,7 +614,10 @@ fn train_ranking() -> Result<(), Error> {
             docs,
             budget,
             &taken,
-            &dictionary,
+            &Teaching {
+                dictionary: &dictionary,
+                fragments: &fragments,
+            },
             &mut examples,
             &mut sources,
         )?;
@@ -600,7 +649,7 @@ fn train_ranking() -> Result<(), Error> {
         path: MODEL.into(),
         source,
     })?;
-    let docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
+    let docs = typed_eval_documents(BASE_TRAIN.dictionary)?;
     print_scores(
         "without the model: ",
         &evaluate_documents(&docs, &dictionary, None),
@@ -637,6 +686,13 @@ fn field_names() -> Result<Vec<String>, Error> {
     Ok(names)
 }
 
+/// What examples are made with: the dictionary that gives the candidates,
+/// and the fragments typed only as their compounds (see [`typed_units`]).
+struct Teaching<'a> {
+    dictionary: &'a Arc<TextDictionary>,
+    fragments: &'a HashSet<String>,
+}
+
 /// Adds the examples of the train documents of `units` and `docs` that are
 /// not `taken`, until their units reach `budget`, a block at a time, and to
 /// `sources` their source IDs; returns the doc IDs added.
@@ -645,7 +701,7 @@ fn add_examples(
     docs: &str,
     budget: usize,
     taken: &HashSet<String>,
-    dictionary: &Arc<TextDictionary>,
+    teaching: &Teaching,
     examples: &mut ExampleFile,
     sources: &mut BTreeSet<String>,
 ) -> Result<Vec<String>, Error> {
@@ -657,8 +713,11 @@ fn add_examples(
         let parts: Vec<Examples> = batch
             .par_iter()
             .map_init(
-                || engine(dictionary.clone()),
-                |engine, doc| examples_of_document(engine, &doc.units, &doc.text),
+                || engine(teaching.dictionary.clone()),
+                |engine, doc| {
+                    let units = typed_units(&doc.units, &doc.compounds, teaching.fragments);
+                    examples_of_document(engine, &units, &doc.text)
+                },
             )
             .collect();
         let mut block = Examples::default();
