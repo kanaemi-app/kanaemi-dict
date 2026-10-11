@@ -15,17 +15,18 @@ use kanaemi_dict::{
     EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, ReadingsError,
     RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WriteError, agreement, check_words,
-    clans, common_words, counted_reading, counted_words, counter_words, cut_documents,
-    dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
-    eval_documents, evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
-    fragment_surfaces, gather, is_word, kanji_entries, listed_dictionary, mismatches_tsv,
-    model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols, name_readings,
-    nihon_readings, okurigana_dictionary, parse_corrections, parse_word_cases, paths_of,
-    person_dictionary, place_dictionary, place_names, plain_words, read_names, read_title_entries,
-    read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of,
-    take, title_entries, train, typed_as_entries, typed_units, unihan_readings, unnamed_words,
-    wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv,
-    write_atomically, year_dictionary,
+    clans, common_words, correction_uses, correction_uses_tsv, counted_reading, counted_words,
+    counter_words, cut_documents, dictionary_lines, document_sources, document_texts,
+    each_document_with_units, engine, eval_documents, evaluate_documents, examples_of_document,
+    excluded_readings, field_dictionary, fragment_surfaces, gather, is_word, kanji_entries,
+    listed_dictionary, mismatches_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings,
+    mozc_symbols, name_readings, nihon_readings, okurigana_dictionary, parse_corrections,
+    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
+    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
+    shared_readings, sources_file, split_of, take, text_units, title_entries, train,
+    typed_as_entries, typed_units, unihan_readings, unnamed_words, wikidata_mismatches,
+    wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv, write_atomically,
+    year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -125,6 +126,8 @@ const CHECK_WIKIDATA: &str = "build/check-wikidata.tsv";
 const SAMPLE_BASE: usize = 60;
 const SAMPLE_ADDITIONAL: usize = 15;
 const CHECK_READINGS: &str = "build/check-readings.tsv";
+/// What each correction changes in the documents.
+const CHECK_CORRECTIONS: &str = "build/check-corrections.tsv";
 /// The paths of each surface MeCab gives, best first.
 const MECAB_PATHS: usize = 5;
 
@@ -200,6 +203,11 @@ usage: kanaemi-dict units
          read the surfaces with kanji of the dictionaries of dictionaries/
          with MeCab and write the items no path of it reads as the
          dictionary does to build/check-readings.tsv
+       kanaemi-dict check-corrections
+         cut each line of the documents that holds a surface of
+         analyzer/corrections.tsv, and each surface alone, with and without
+         the corrections, and write what each correction changes to
+         build/check-corrections.tsv
        kanaemi-dict check-wikidata
          compare the base dictionary of dictionaries/ with the readings of
          Wikidata's items in build/wikidata/readings.tsv and write the words
@@ -289,6 +297,7 @@ fn main() -> ExitCode {
         }
         ["check-sample"] => sample_kept(),
         ["check-readings"] => check_kept_readings(),
+        ["check-corrections"] => check_corrections(),
         ["check-wikidata"] => check_wikidata(),
         _ => {
             eprintln!("{USAGE}");
@@ -965,6 +974,118 @@ fn check_wikidata() -> Result<(), Error> {
     println!(
         "labels: {}, in the base: {}, mismatched: {}, out: {CHECK_WIKIDATA}",
         summary.labels, summary.in_base, summary.mismatched
+    );
+    Ok(())
+}
+
+/// Cuts the documents of the base and of every additional dictionary where
+/// they hold a correction's surface, with and without the corrections, and
+/// writes what each correction changes. A surface to drop also counts as
+/// needed where a name or a title holds it, since the dictionaries take
+/// those whole.
+fn check_corrections() -> Result<(), Error> {
+    let corrections =
+        parse_corrections(read_to_string(CORRECTIONS)?).map_err(|source| Error::Corrections {
+            path: CORRECTIONS.into(),
+            source,
+        })?;
+    // Without the additional dictionaries' documents, the base's alone.
+    let additional: Vec<String> = match std::fs::read_dir(ADDITIONAL_BUILD) {
+        Ok(entries) => {
+            let mut dirs: Vec<String> = entries
+                .filter_map(|e| e.ok().map(|e| e.path().display().to_string()))
+                .collect();
+            dirs.sort();
+            dirs
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(source) => {
+            return Err(Error::Read {
+                path: ADDITIONAL_BUILD.into(),
+                source,
+            });
+        }
+    };
+    let listed: HashSet<String> = {
+        let mut listed = read_names(open(BASE_NAMES)?).map_err(read_error(BASE_NAMES))?;
+        // The base's titles must be there; an additional dictionary may have none.
+        let titles = std::iter::once(BASE_TITLES.to_owned()).chain(
+            additional
+                .iter()
+                .map(|dir| format!("{dir}/titles.tsv"))
+                .filter(|path| std::path::Path::new(path).exists()),
+        );
+        for path in titles {
+            let read = read_titles(open(&path)?).map_err(|source| Error::Titles {
+                path: path.clone().into(),
+                source,
+            })?;
+            listed.extend(read.into_iter().map(|t| t.surface));
+        }
+        listed
+    };
+    // The base's documents must be there; an additional dictionary made
+    // from a list has none.
+    let docs: Vec<String> = std::iter::once(DOCS.to_owned())
+        .chain(
+            additional
+                .iter()
+                .map(|dir| format!("{dir}/docs.jsonl"))
+                .filter(|path| std::path::Path::new(path).exists()),
+        )
+        .collect();
+    let analyzer = open_analyzer()?;
+    let leaving_out: Vec<Corrections> = (0..corrections.len())
+        .map(|i| {
+            Corrections::new(
+                corrections
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != i)
+                    .map(|(_, c)| c.clone()),
+            )
+        })
+        .collect();
+    let mut failure = None;
+    let texts = docs.iter().flat_map(|path| {
+        let texts = open(path).and_then(|docs| {
+            document_texts(docs, |_| true).map_err(|source| Error::Documents {
+                path: path.into(),
+                source,
+            })
+        });
+        texts.unwrap_or_else(|e| {
+            failure.get_or_insert(e);
+            Vec::new()
+        })
+    });
+    let uses = correction_uses(
+        &corrections,
+        texts,
+        |surface| listed.contains(surface),
+        |text, left_out| {
+            let tokenize = |t: &str| match left_out {
+                None => analyzer.words(t),
+                Some(i) => analyzer.words_corrected_by(t, &leaving_out[i]),
+            };
+            text_units(text, tokenize, analyzer.readings())
+        },
+    )
+    .map_err(|source| Error::Analyzer {
+        path: CORRECTIONS.into(),
+        source,
+    })?;
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    write_atomically(CHECK_CORRECTIONS, |w| {
+        w.write_all(correction_uses_tsv(&corrections, &uses).as_bytes())
+            .map_err(write_error(CHECK_CORRECTIONS))
+    })?;
+    let unneeded = uses.iter().filter(|u| !u.is_needed()).count();
+    println!(
+        "corrections: {}, not needed: {unneeded}, out: {CHECK_CORRECTIONS}",
+        corrections.len()
     );
     Ok(())
 }

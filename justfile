@@ -108,6 +108,12 @@ check-sample:
 check-readings:
     cargo run --release -p kanaemi-dict -- check-readings
 
+# Cut the lines of the documents (base and additional) that hold a surface of analyzer/corrections.tsv, and each surface
+# alone, with and without the corrections, and write what each one changes to build/check-corrections.tsv; a line that
+# changes nothing is no longer needed.
+check-corrections:
+    cargo run --release -p kanaemi-dict -- check-corrections
+
 # Fetch the readings in kana of Wikidata's items from QLever into build/wikidata/ (again with `--refresh`).
 wikidata *args:
     deno run --allow-read --allow-write --allow-net scripts/wikidata.ts {{args}}

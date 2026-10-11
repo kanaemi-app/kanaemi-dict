@@ -85,6 +85,34 @@ impl Analyzer {
     /// (風呂 of 露天風呂); then the corrections apply, to the compounds by
     /// their surface.
     pub fn words(&self, text: impl AsRef<str>) -> Result<Words, AnalyzerError> {
+        self.words_corrected_by(text, &self.corrections)
+    }
+
+    /// [`Analyzer::words`] with `corrections` in place of the analyzer's own,
+    /// to see what each correction changes.
+    pub fn words_corrected_by(
+        &self,
+        text: impl AsRef<str>,
+        corrections: &Corrections,
+    ) -> Result<Words, AnalyzerError> {
+        let Words { tokens, compounds } = self.uncorrected_words(text)?;
+        let compounds = compounds
+            .into_iter()
+            .map(|mut c| {
+                if let Some(reading) = corrections.reading_of(&c.surface) {
+                    c.reading = reading.to_owned();
+                }
+                c
+            })
+            .collect();
+        Ok(Words {
+            tokens: corrections.apply(tokens),
+            compounds,
+        })
+    }
+
+    /// [`Analyzer::words`] before the corrections apply.
+    fn uncorrected_words(&self, text: impl AsRef<str>) -> Result<Words, AnalyzerError> {
         let text = text.as_ref();
         let Read {
             mut tokens,
@@ -115,19 +143,7 @@ impl Analyzer {
                 }
             }
         }
-        let compounds = compounds
-            .into_iter()
-            .map(|mut c| {
-                if let Some(reading) = self.corrections.reading_of(&c.surface) {
-                    c.reading = reading.to_owned();
-                }
-                c
-            })
-            .collect();
-        Ok(Words {
-            tokens: self.corrections.apply(tokens),
-            compounds,
-        })
+        Ok(Words { tokens, compounds })
     }
 
     fn misread(&self, token: &Token) -> bool {

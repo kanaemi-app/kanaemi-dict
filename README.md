@@ -87,6 +87,7 @@ just check-sample              # 人が判定する項目を層ごとに抜き�
 just check-readings            # MeCab の読みと食い違う項目を並べる
 just wikidata                  # Wikidata の読み仮名を取得する
 just check-wikidata            # Wikidata の読み仮名と食い違う語を並べる
+just check-corrections         # 訂正の語のうち、もう何も変えない行を探す
 ```
 
 `just` だけを流すと、レシピの一覧が出る。コードを変えたら `just ci` を通す。

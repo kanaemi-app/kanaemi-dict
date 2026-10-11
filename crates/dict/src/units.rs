@@ -160,6 +160,17 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
     Ok(())
 }
 
+/// The units of `text` read with `tokenize`, cut as a document is.
+pub fn text_units<W: Into<Words>, E>(
+    text: &str,
+    tokenize: impl FnMut(&str) -> Result<W, E>,
+    readings: &UnidicReadings,
+) -> Result<Vec<Unit>, E> {
+    let mut units = Vec::new();
+    each_unit("", text, tokenize, readings, |u| units.push(u))?;
+    Ok(units)
+}
+
 /// The compounds of `words` that make words: nouns with kanji or katakana,
 /// read in plain kana, other than those numeric units write and a unit
 /// already cut at the same place.
