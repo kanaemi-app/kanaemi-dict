@@ -52,6 +52,9 @@ pub struct Dictionary {
     /// Numeric items, whose reading and surface hold the number as a
     /// placeholder (`{}ほん` for `{}本`).
     pub numeric: Vec<Entry>,
+    /// The cost of each surface of the numeric units as written (一発, 3本),
+    /// from the units met at least [`MIN_COUNT`] times.
+    pub numeric_written: HashMap<String, u32>,
     /// The cost from which a word was met at most [`MIN_COUNT`] times in the
     /// units the dictionary counts, or comes from UniDic alone; `None` for a
     /// dictionary not counted from units.
@@ -95,6 +98,7 @@ impl Dictionary {
         // one item, so they share one count.
         let mut counts: HashMap<Key, usize> = HashMap::new();
         let mut numeric_counts: HashMap<(String, String), usize> = HashMap::new();
+        let mut numeric_written: HashMap<String, usize> = HashMap::new();
         let mut surfaces: HashMap<String, usize> = HashMap::new();
         let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
         let mut disallowed: BTreeMap<(String, String), (usize, String)> = BTreeMap::new();
@@ -110,6 +114,7 @@ impl Dictionary {
                     *numeric_counts
                         .entry((n.reading.clone(), n.surface.clone()))
                         .or_default() += 1;
+                    *numeric_written.entry(unit.surface.clone()).or_default() += 1;
                 }
                 continue;
             }
@@ -184,6 +189,11 @@ impl Dictionary {
         Self {
             okuri: okuri_lines(&entries, rare_cost),
             numeric: numeric_entries(numeric_counts, total),
+            numeric_written: numeric_written
+                .into_iter()
+                .filter(|&(_, count)| count >= MIN_COUNT)
+                .map(|(surface, count)| (surface, cost_of(count, total)))
+                .collect(),
             entries,
             rare_cost,
             report: Report {
@@ -856,6 +866,26 @@ mod tests {
         assert_eq!(cost_of("{}ぼん", "{}本"), cost(5, 14));
         assert_eq!(cost_of("{}こ", "{}個"), cost(5, 14));
         assert_eq!(cost_of("{}ご", "{}個"), cost(5, 14));
+    }
+
+    #[test]
+    fn numeric_units_are_also_costed_by_their_surface_as_written() {
+        let units: Vec<Unit> = [
+            repeat(counted("1はつ", "一発", ("{}はつ", "{kanji}発", "1")), 5),
+            repeat(counted("2はつ", "2発", ("{}はつ", "{}発", "2")), 3),
+            repeat(counted("3ばつ", "三発", ("{}ばつ", "{kanji}発", "3")), 1),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        let mut written: Vec<(&str, u32)> = dict
+            .numeric_written
+            .iter()
+            .map(|(surface, &cost)| (surface.as_str(), cost))
+            .collect();
+        written.sort();
+        assert_eq!(written, [("2発", cost(3, 9)), ("一発", cost(5, 9))]);
     }
 
     #[test]

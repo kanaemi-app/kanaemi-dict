@@ -434,11 +434,16 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                     }
                 })?);
             let analyzer = open_analyzer()?;
-            counted_words(&dictionary.numeric, &counters, |surface| {
-                analyzer
-                    .tokens(format!("{surface}の"))
-                    .map(|tokens| counted_reading(&tokens, surface))
-            })
+            counted_words(
+                &dictionary.numeric,
+                &counters,
+                &dictionary.numeric_written,
+                |surface| {
+                    analyzer
+                        .tokens(format!("{surface}の"))
+                        .map(|tokens| counted_reading(&tokens, surface))
+                },
+            )
             .map_err(|source| Error::Analyzer {
                 path: SYSTEM_DICTIONARY.into(),
                 source,
