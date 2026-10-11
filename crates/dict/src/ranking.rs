@@ -12,7 +12,7 @@ use kanaemi_engine::{
 };
 
 use crate::kana::is_hiragana;
-use crate::{Query, Spans, Unit, query_of};
+use crate::{Query, Spans, Unit, query_of, span_of};
 
 /// The widest hash a model file allows.
 pub const MAX_BITS: u8 = 28;
@@ -150,12 +150,8 @@ pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Exam
 /// (一髪 in 危機一髪), which are typed as the compound. The dictionary counts
 /// them so too (see [`crate::fragment_surfaces`]); taught them, the model
 /// would put such a fragment back ahead of the words it lost to.
-pub fn typed_units(
-    units: &[Unit],
-    compounds: &[(usize, usize)],
-    fragments: &HashSet<String>,
-) -> Vec<Unit> {
-    let spans = Spans::new(compounds.iter().copied());
+pub fn typed_units(units: &[Unit], compounds: &[Unit], fragments: &HashSet<String>) -> Vec<Unit> {
+    let spans = Spans::new(compounds.iter().map(span_of));
     units
         .iter()
         .filter(|u| {
@@ -599,7 +595,12 @@ mod tests {
         ];
         let fragments = HashSet::from(["一髪".to_owned()]);
 
-        let typed = typed_units(&units, &[(0, 4)], &fragments);
+        let compound = Unit {
+            compound: true,
+            ..unit(0, "ききいっぱつ", "危機一髪")
+        };
+
+        let typed = typed_units(&units, &[compound], &fragments);
 
         assert_eq!(typed, [units[0].clone(), units[2].clone()]);
     }
