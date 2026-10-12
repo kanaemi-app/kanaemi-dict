@@ -64,7 +64,8 @@ dictionary *flags:
 # against the best order without context into build/evaluation.tsv, with the units not offered, the readings that
 # lost and every reading in build/evaluation-{misses,losses,keys}.tsv, and what changed since the run before in
 # build/evaluation-diff.tsv (see docs/spec/evaluation.md); `--with NAME...` adds the additional dictionaries
-# build/dictionaries/NAME.tsv after it, writing build/evaluation-with*.tsv instead.
+# build/dictionaries/train/NAME.tsv after it (`just additional --train-only` first), writing build/evaluation-with*.tsv
+# instead.
 evaluate *flags:
     cargo run --release -p kanaemi-dict -- evaluate {{flags}}
 
@@ -80,7 +81,8 @@ additional-docs:
     deno run --allow-read --allow-write --allow-run=lbzip2 scripts/additional.ts docs
 
 # Build the additional dictionaries NAME (or every one) into build/dictionaries/NAME.tsv,
-# without what build/dictionaries/base.tsv already gives.
+# without what build/dictionaries/base.tsv already gives; `--train-only` (first) builds them without what
+# build/dictionaries/base-train.tsv gives into build/dictionaries/train/, for `just evaluate --with`.
 additional *names:
     cargo run --release -p kanaemi-dict -- additional {{names}}
 

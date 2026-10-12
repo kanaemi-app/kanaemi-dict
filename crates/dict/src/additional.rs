@@ -387,6 +387,14 @@ pub enum TitlesError {
 /// The titles of a `doc_id<TAB>reading<TAB>surface` file, sorted, without
 /// repeats.
 pub fn read_titles(tsv: impl BufRead) -> Result<Vec<Title>, TitlesError> {
+    read_titles_of(tsv, |_| true)
+}
+
+/// [`read_titles`] of the articles whose doc ID `wanted` takes.
+pub fn read_titles_of(
+    tsv: impl BufRead,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<Vec<Title>, TitlesError> {
     let mut titles = Vec::new();
     for (i, line) in tsv.lines().enumerate() {
         let line = line.map_err(|source| TitlesError::Read {
@@ -395,11 +403,14 @@ pub fn read_titles(tsv: impl BufRead) -> Result<Vec<Title>, TitlesError> {
         })?;
         // An empty surface would be an empty pattern for the matcher, which
         // matches between the bytes of a character.
-        let [_, reading, surface] = line.split('\t').collect::<Vec<_>>()[..] else {
+        let [doc_id, reading, surface] = line.split('\t').collect::<Vec<_>>()[..] else {
             return Err(TitlesError::Fields { line: i + 1 });
         };
         if reading.is_empty() || surface.is_empty() {
             return Err(TitlesError::Fields { line: i + 1 });
+        }
+        if !wanted(doc_id) {
+            continue;
         }
         titles.push(Title {
             reading: reading.to_owned(),
@@ -811,6 +822,16 @@ mod build_tests {
         assert_eq!(
             read_titles(tsv.as_bytes()).unwrap(),
             [title("えーぴーあい", "API"), title("べきとう", "冪等")]
+        );
+    }
+
+    #[test]
+    fn titles_of_the_articles_not_wanted_are_left_out() {
+        let tsv = "wikipedia:2\tべきとう\t冪等\nwikipedia:1\tえーぴーあい\tAPI\n";
+
+        assert_eq!(
+            read_titles_of(tsv.as_bytes(), |id| id != "wikipedia:1").unwrap(),
+            [title("べきとう", "冪等")]
         );
     }
 

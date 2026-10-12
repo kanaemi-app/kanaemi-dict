@@ -1,6 +1,6 @@
 //! Cutting every document of `build/docs.jsonl` into units.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, BufRead, Write};
 
 use rayon::prelude::*;
@@ -246,6 +246,21 @@ pub fn document_texts(
     Ok(texts)
 }
 
+/// The doc IDs of `docs` that `wanted` takes.
+pub fn document_ids(
+    docs: impl BufRead,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<HashSet<String>, DocumentsError> {
+    let mut ids = HashSet::new();
+    each_document(docs, |d| {
+        if wanted(&d.doc_id) {
+            ids.insert(d.doc_id);
+        }
+        Ok::<_, DocumentsError>(())
+    })?;
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +422,20 @@ mod text_tests {
         let texts = document_texts(docs.as_bytes(), |id| id.starts_with("b:")).unwrap();
 
         assert_eq!(texts, ["二", "三"]);
+    }
+
+    #[test]
+    fn the_ids_of_the_wanted_documents_are_gathered() {
+        let docs = concat!(
+            r#"{"doc_id":"a:1","source_id":"s","text":"一"}"#,
+            "\n",
+            r#"{"doc_id":"b:2","source_id":"s","text":"二"}"#,
+            "\n",
+        );
+
+        let ids = document_ids(docs.as_bytes(), |id| id.starts_with("b:")).unwrap();
+
+        assert_eq!(ids, HashSet::from(["b:2".to_owned()]));
     }
 }
 

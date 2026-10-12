@@ -17,18 +17,18 @@ use kanaemi_dict::{
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement,
     as_typed, check_words, clans, common_words, compound_parts, correction_uses,
     correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
-    cut_documents, dictionary_lines, document_sources, document_texts, each_document_with_units,
-    engine, engine_with, eval_documents, evaluate_documents, examples_of_document,
-    excluded_readings, field_dictionary, fragment_surfaces, gather, is_word, kanji_entries,
-    keys_diff_tsv, listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv,
-    model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols, name_readings,
-    nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections, parse_word_cases,
-    paths_of, person_dictionary, place_dictionary, place_names, plain_words, read_names,
-    read_title_entries, read_titles, read_units, reading_form, sample_tsv, shared_readings,
-    sources_file, split_of, station_dictionary, take, text_units, title_entries, train,
-    typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv, unnamed_words,
-    wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations, word_misses_tsv,
-    word_scores_tsv, write_atomically, year_dictionary,
+    cut_documents, dictionary_lines, document_ids, document_sources, document_texts,
+    each_document_with_units, engine, engine_with, eval_documents, evaluate_documents,
+    examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
+    kanji_entries, keys_diff_tsv, listed_dictionary, loss_reasons_tsv, mismatches_tsv,
+    miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols,
+    name_readings, nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections,
+    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
+    read_names, read_title_entries, read_titles, read_titles_of, read_units, reading_form,
+    sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take, text_units,
+    title_entries, train, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv,
+    unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
+    word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -104,6 +104,11 @@ const WITH_ADDITIONAL_REASONS: (&str, &str) = (
     "build/evaluation-with-loss-reasons.tsv",
 );
 const DICTIONARIES: &str = "build/dictionaries";
+/// Where the additional dictionaries built against the dictionary of the
+/// train documents go, for the evaluation alone: built against the base, an
+/// additional dictionary leaves out the words of the eval documents the base
+/// has from them.
+const TRAIN_ADDITIONAL: &str = "build/dictionaries/train";
 /// Where each additional dictionary is set up, one directory per dictionary.
 const ADDITIONAL: &str = "additional";
 /// Where `scripts/additional.ts` leaves what each additional dictionary is built from.
@@ -238,13 +243,16 @@ usage: kanaemi-dict units
          build/evaluation-{missing,loss}-reasons.tsv
        kanaemi-dict evaluate --with NAME...
          evaluate with the additional dictionaries
-         build/dictionaries/NAME.tsv after the base, writing
-         build/evaluation-with*.tsv instead
-       kanaemi-dict additional [NAME...]
+         build/dictionaries/train/NAME.tsv after the base (build them with
+         additional --train-only), writing build/evaluation-with*.tsv
+         instead
+       kanaemi-dict additional [--train-only] [NAME...]
          build the additional dictionaries NAME, or every one under
          additional/, from build/additional/NAME/ into
          build/dictionaries/NAME.tsv and NAME-report.tsv, without what
-         build/dictionaries/base.tsv already gives
+         build/dictionaries/base.tsv already gives; with --train-only,
+         without what build/dictionaries/base-train.tsv gives into
+         build/dictionaries/train/, for evaluate --with
        kanaemi-dict ranking
          train the ranking model on the candidates of
          build/dictionaries/base-train.tsv from the train documents of the
@@ -362,7 +370,8 @@ fn main() -> ExitCode {
         ["dictionary", "--train-only"] => build_dictionary(true),
         ["evaluate"] => evaluate(&[]),
         ["evaluate", "--with", ref names @ ..] if !names.is_empty() => evaluate(names),
-        ["additional", ref names @ ..] => build_additional(names),
+        ["additional", "--train-only", ref names @ ..] => build_additional(names, true),
+        ["additional", ref names @ ..] => build_additional(names, false),
         ["ranking"] => train_ranking(),
         ["take"] => take_built(),
         ["dist"] => build_dist(),
@@ -657,16 +666,16 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
 
 /// Converts the units of the eval documents with the dictionary built from
 /// the train documents, followed by the additional dictionaries `with` built
-/// under build/dictionaries/, and writes the scores per kind of source and
-/// class: those of the base alone to [`EVALUATION`], those with additional
-/// dictionaries to [`WITH_ADDITIONAL`].
+/// against it under [`TRAIN_ADDITIONAL`], and writes the scores per kind of
+/// source and class: those of the base alone to [`EVALUATION`], those with
+/// additional dictionaries to [`WITH_ADDITIONAL`].
 fn evaluate(with: &[&str]) -> Result<(), Error> {
     let (outputs, reasons) = if with.is_empty() {
         (&EVALUATION, (MISSING_REASONS, LOSS_REASONS))
     } else {
         (&WITH_ADDITIONAL, WITH_ADDITIONAL_REASONS)
     };
-    let dictionaries = with_additional(train_dictionary()?, with)?;
+    let dictionaries = with_additional_in(TRAIN_ADDITIONAL, train_dictionary()?, with)?;
     let docs = typed_eval_documents(&train_established()?)?;
     let agreed = agreed_readings(&docs)?;
     let evaluation = evaluate_documents(&docs, &dictionaries, None, &|unit| agrees(&agreed, unit));
@@ -675,7 +684,10 @@ fn evaluate(with: &[&str]) -> Result<(), Error> {
     let engine = engine_with(&dictionaries);
     let all = evaluation.all();
     let texts = std::iter::once(BASE_TRAIN.dictionary.to_owned())
-        .chain(with.iter().map(|name| format!("{DICTIONARIES}/{name}.tsv")))
+        .chain(
+            with.iter()
+                .map(|name| format!("{TRAIN_ADDITIONAL}/{name}.tsv")),
+        )
         .map(|path| read_to_string(&path))
         .collect::<Result<String, Error>>()?;
     let (missing, by_reason) = miss_reasons_tsv(&engine, &all.missing(), &Readings::parse(texts));
@@ -1123,9 +1135,18 @@ fn with_additional(
     base: Arc<TextDictionary>,
     names: &[&str],
 ) -> Result<Vec<Arc<TextDictionary>>, Error> {
+    with_additional_in(DICTIONARIES, base, names)
+}
+
+/// [`with_additional`] with the additional dictionaries built under `dir`.
+fn with_additional_in(
+    dir: &str,
+    base: Arc<TextDictionary>,
+    names: &[&str],
+) -> Result<Vec<Arc<TextDictionary>>, Error> {
     let mut dictionaries = vec![base];
     for name in names {
-        dictionaries.push(parsed_dictionary(&format!("{DICTIONARIES}/{name}.tsv"))?);
+        dictionaries.push(parsed_dictionary(&format!("{dir}/{name}.tsv"))?);
     }
     Ok(dictionaries)
 }
@@ -1500,8 +1521,16 @@ fn write_error(path: &str) -> impl FnOnce(io::Error) -> Error {
 }
 
 /// Builds the additional dictionaries `names`, or every one set up under
-/// additional/, each without what the base dictionary already gives.
-fn build_additional(names: &[&str]) -> Result<(), Error> {
+/// additional/, each without what the base dictionary already gives; with
+/// `train_only`, against the dictionary of the train documents into
+/// [`TRAIN_ADDITIONAL`], for the evaluation, with no sources record.
+fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
+    let (base_path, out_dir) = if train_only {
+        std::fs::create_dir_all(TRAIN_ADDITIONAL).map_err(write_error(TRAIN_ADDITIONAL))?;
+        (BASE_TRAIN.dictionary, TRAIN_ADDITIONAL)
+    } else {
+        (BASE.dictionary, DICTIONARIES)
+    };
     let names: Vec<String> = if names.is_empty() {
         let mut found = Vec::new();
         for entry in std::fs::read_dir(ADDITIONAL).map_err(read_error(ADDITIONAL))? {
@@ -1518,10 +1547,24 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
     } else {
         names.iter().map(|&n| n.to_owned()).collect()
     };
+    // Built for the evaluation, a dictionary made from documents leaves out
+    // the ones that are eval documents of the base too.
+    let eval_ids = if train_only {
+        document_ids(open(DOCS)?, |doc_id| split_of(doc_id) == Split::Eval).map_err(|source| {
+            Error::Documents {
+                path: DOCS.into(),
+                source,
+            }
+        })?
+    } else {
+        HashSet::new()
+    };
+    let eval_ids = &eval_ids;
+    let wanted = move |doc_id: &str| !eval_ids.contains(doc_id);
     let base = {
-        let text = read_to_string(BASE.dictionary)?;
+        let text = read_to_string(base_path)?;
         Base::parse(text).map_err(|source| Error::Unreadable {
-            path: BASE.dictionary.into(),
+            path: base_path.into(),
             source,
         })?
     };
@@ -1578,15 +1621,19 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
                 })?;
             sources.extend(ANALYZER_SOURCES.map(String::from));
             let mut failure = None;
-            let dictionary = okurigana_dictionary(read_units(open(UNITS)?).map_while(|unit| {
-                unit.map_err(|source| {
-                    failure = Some(Error::Units {
-                        path: UNITS.into(),
-                        source,
+            let dictionary = okurigana_dictionary(
+                read_units(open(UNITS)?)
+                    .map_while(|unit| {
+                        unit.map_err(|source| {
+                            failure = Some(Error::Units {
+                                path: UNITS.into(),
+                                source,
+                            })
+                        })
+                        .ok()
                     })
-                })
-                .ok()
-            }));
+                    .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train),
+            );
             if let Some(e) = failure {
                 return Err(e);
             }
@@ -1596,7 +1643,7 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
                 analyzer = Some(open_analyzer()?);
             }
             let (mut dictionary, sources) =
-                sourced_dictionary(&name, &base, analyzer.as_ref().unwrap())?;
+                sourced_dictionary(&name, &base, analyzer.as_ref().unwrap(), wanted)?;
             dictionary.add_words(nihon_readings(&dictionary.entries));
             (dictionary, sources)
         };
@@ -1604,8 +1651,8 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
         dictionary.drop_words(|reading, surface| {
             corrections.drops(surface) || !listed && !is_word(reading, surface)
         });
-        let dictionary_path = format!("{DICTIONARIES}/{name}.tsv");
-        let report_path = format!("{DICTIONARIES}/{name}-report.tsv");
+        let dictionary_path = format!("{out_dir}/{name}.tsv");
+        let report_path = format!("{out_dir}/{name}-report.tsv");
         let text = dictionary.to_text_where(label.trim(), |line, kind| base.keeps(line, kind));
         let (_, invalid) = TextDictionary::parse(&text);
         if !invalid.is_empty() {
@@ -1622,7 +1669,9 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             w.write_all(dictionary.report.to_tsv().as_bytes())
                 .map_err(write_error(&report_path))
         })?;
-        write_sources(&dictionary_path, text.as_bytes(), None, &sources)?;
+        if !train_only {
+            write_sources(&dictionary_path, text.as_bytes(), None, &sources)?;
+        }
         println!(
             "{name}\tlines: {}\tout: {dictionary_path}",
             text.lines().count() - 1
@@ -1644,6 +1693,7 @@ fn sourced_dictionary(
     name: &str,
     base: &Base,
     analyzer: &Analyzer,
+    wanted: impl Fn(&str) -> bool + Copy,
 ) -> Result<(Dictionary, BTreeSet<String>), Error> {
     let dir = format!("{ADDITIONAL_BUILD}/{name}");
     let (docs, units_path) = (format!("{dir}/docs.jsonl"), format!("{dir}/units.jsonl"));
@@ -1659,8 +1709,11 @@ fn sourced_dictionary(
             source,
         })
     })?;
-    let units = read_all_units(&units_path)?;
-    let texts = document_texts(open(&docs)?, |_| true).map_err(|source| Error::Documents {
+    let units: Vec<Unit> = read_all_units(&units_path)?
+        .into_iter()
+        .filter(|u| wanted(&u.doc_id))
+        .collect();
+    let texts = document_texts(open(&docs)?, wanted).map_err(|source| Error::Documents {
         path: docs.clone().into(),
         source,
     })?;
@@ -1673,10 +1726,12 @@ fn sourced_dictionary(
     let titles = {
         let path = format!("{dir}/titles.tsv");
         match File::open(&path) {
-            Ok(file) => read_titles(BufReader::new(file)).map_err(|source| Error::Titles {
-                path: path.into(),
-                source,
-            })?,
+            Ok(file) => {
+                read_titles_of(BufReader::new(file), wanted).map_err(|source| Error::Titles {
+                    path: path.into(),
+                    source,
+                })?
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(source) => {
                 return Err(Error::Read {
@@ -1716,8 +1771,9 @@ fn sourced_dictionary(
         path: DOCS.into(),
         source,
     };
-    let older = document_texts(open(DOCS)?, older_doc).map_err(documents_error)?;
-    sources.extend(document_sources(open(DOCS)?, older_doc).map_err(documents_error)?);
+    let older_wanted = |doc_id: &str| older_doc(doc_id) && wanted(doc_id);
+    let older = document_texts(open(DOCS)?, older_wanted).map_err(documents_error)?;
+    sources.extend(document_sources(open(DOCS)?, older_wanted).map_err(documents_error)?);
     sources.insert(TITLES_SOURCE.to_owned());
     Ok((
         year_dictionary(&titles, base, &texts, &older, units.len()),
