@@ -15,17 +15,17 @@ use kanaemi_dict::{
     EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError,
     RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement,
-    as_typed, check_words, clans, common_words, correction_uses, correction_uses_tsv,
-    counted_reading, counted_voicings, counted_words, counter_words, cut_documents,
-    dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
-    eval_documents, evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
-    fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv, listed_dictionary,
-    loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons,
-    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
-    parse_check_cases, parse_corrections, parse_word_cases, paths_of, person_dictionary,
-    place_dictionary, place_names, plain_words, read_names, read_title_entries, read_titles,
-    read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of, take,
-    text_units, title_entries, train, typed_by_analyzer, typed_units, unihan_readings,
+    as_typed, check_words, clans, common_words, compound_parts, correction_uses,
+    correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
+    cut_documents, dictionary_lines, document_sources, document_texts, each_document_with_units,
+    engine, eval_documents, evaluate_documents, examples_of_document, excluded_readings,
+    field_dictionary, fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv,
+    listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji,
+    mozc_emoticons, mozc_readings, mozc_symbols, name_readings, nihon_readings,
+    okurigana_dictionary, parse_check_cases, parse_corrections, parse_word_cases, paths_of,
+    person_dictionary, place_dictionary, place_names, plain_words, read_names, read_title_entries,
+    read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of,
+    take, text_units, title_entries, train, typed_by_analyzer, typed_units, unihan_readings,
     unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings,
     word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
@@ -743,7 +743,9 @@ fn train_established() -> Result<Established, Error> {
 fn typed_eval_documents(established: &Established) -> Result<Vec<EvalDocument>, Error> {
     let mut docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
     for doc in &mut docs {
-        doc.units = typed_by_analyzer(&doc.units, &doc.compounds, established);
+        let typed = typed_by_analyzer(&doc.units, &doc.compounds, established);
+        doc.parts = compound_parts(&doc.units, &typed, established);
+        doc.units = typed;
     }
     Ok(docs)
 }
@@ -755,7 +757,7 @@ fn typed_eval_documents(established: &Established) -> Result<Vec<EvalDocument>, 
 fn agreed_readings(docs: &[EvalDocument]) -> Result<HashMap<String, HashSet<String>>, Error> {
     let pairs: BTreeSet<(&str, &str)> = docs
         .iter()
-        .flat_map(|d| &d.units)
+        .flat_map(|d| d.units.iter().chain(d.parts.values().flatten()))
         .filter(|u| u.numeric.is_none())
         .map(|u| (u.surface.as_str(), u.reading.as_str()))
         .collect();
@@ -816,6 +818,10 @@ fn print_scores(label: &str, evaluation: &Evaluation) {
             s.page_loss(),
         );
     }
+    println!(
+        "{label}compounds not offered, typed as their parts: {}",
+        evaluation.split
+    );
 }
 
 /// Trains the ranking model on the candidates the dictionary of the train

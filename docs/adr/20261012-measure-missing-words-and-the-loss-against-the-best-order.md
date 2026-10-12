@@ -1,6 +1,6 @@
 # 評価は、候補に出ない語と、文脈なしの最善の並びに対する損失で測る
 
-状態：採用（`20261011-evaluate-compounds-the-dictionary-has-as-one-word.md` を置き換える）
+状態：採用（`20261011-evaluate-compounds-the-dictionary-has-as-one-word.md` を置き換える。複合語をすべて 1 回で打つところは `20261012-type-a-compound-the-dictionary-lacks-as-its-parts.md` で一部置き換え）
 
 ## 背景
 

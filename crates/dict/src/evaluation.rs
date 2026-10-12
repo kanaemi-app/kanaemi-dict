@@ -522,22 +522,63 @@ pub fn evaluate_document(
     field: &mut impl Field,
     units: &[Unit],
     text: impl AsRef<str>,
-    mut record: impl FnMut(&Unit, &[String], Option<usize>),
+    record: impl FnMut(&Unit, &[String], Option<usize>),
 ) {
+    evaluate_document_with_parts(field, units, &HashMap::new(), text, record);
+}
+
+/// [`evaluate_document`], typing a compound not offered as its `parts`, by
+/// where it starts, as a typist does with a compound no dictionary has
+/// (長崎短期大学 as 長崎 and 短期大学): its parts are recorded in its place,
+/// and the compound is not. Gives how many compounds were typed so.
+pub fn evaluate_document_with_parts(
+    field: &mut impl Field,
+    units: &[Unit],
+    parts: &HashMap<usize, Vec<Unit>>,
+    text: impl AsRef<str>,
+    mut record: impl FnMut(&Unit, &[String], Option<usize>),
+) -> u64 {
     field.start_over();
     let chars: Vec<char> = text.as_ref().chars().collect();
     let mut typed = 0;
+    let mut split = 0;
     for unit in units {
-        let upto = unit.position.min(chars.len());
-        if upto > typed {
-            field.type_text(&chars[typed..upto].iter().collect::<String>());
-            typed = upto;
+        let (offered, rank) = convert_in(field, &chars, &mut typed, unit);
+        match parts
+            .get(&unit.position)
+            .filter(|_| unit.compound && rank.is_none())
+        {
+            Some(parts) => {
+                split += 1;
+                for part in parts {
+                    let (offered, rank) = convert_in(field, &chars, &mut typed, part);
+                    record(part, &offered, rank);
+                }
+            }
+            None => record(unit, &offered, rank),
         }
-        let query = query_of(unit);
-        let offered = offered(field, &query.reading, query.okurigana.as_deref());
-        let rank = rank_in(&offered, &query.expected);
-        record(unit, &offered, rank);
     }
+    split
+}
+
+/// Types the text before `unit` that is not typed yet, up to `typed`
+/// characters of `chars` so far, then converts `unit`: the surfaces offered
+/// and its surface's rank.
+fn convert_in(
+    field: &mut impl Field,
+    chars: &[char],
+    typed: &mut usize,
+    unit: &Unit,
+) -> (Vec<String>, Option<usize>) {
+    let upto = unit.position.min(chars.len());
+    if upto > *typed {
+        field.type_text(&chars[*typed..upto].iter().collect::<String>());
+        *typed = upto;
+    }
+    let query = query_of(unit);
+    let offered = offered(field, &query.reading, query.okurigana.as_deref());
+    let rank = rank_in(&offered, &query.expected);
+    (offered, rank)
 }
 
 /// The 1-based rank of the expected candidate, if it is offered at all. As
@@ -1045,5 +1086,53 @@ mod tests {
         });
 
         assert_eq!(tallies.score(Class::Word).first, 0);
+    }
+
+    #[test]
+    fn a_compound_not_offered_is_typed_as_its_parts_and_one_offered_whole() {
+        let dictionary =
+            dictionary("ながさき\t長崎\nたんきだいがく\t短期大学\nききいっぱつ\t危機一髪\n");
+        let compound = |position, reading: &str, surface: &str| Unit {
+            compound: true,
+            position,
+            ..unit(reading, surface, None)
+        };
+        let part = |position, reading: &str, surface: &str| Unit {
+            position,
+            ..unit(reading, surface, None)
+        };
+        let units = [
+            compound(0, "ながさきたんきだいがく", "長崎短期大学"),
+            compound(6, "ききいっぱつ", "危機一髪"),
+        ];
+        let parts = HashMap::from([
+            (
+                0,
+                vec![
+                    part(0, "ながさき", "長崎"),
+                    part(2, "たんきだいがく", "短期大学"),
+                ],
+            ),
+            (
+                6,
+                vec![part(6, "きき", "危機"), part(8, "いっぱつ", "一髪")],
+            ),
+        ]);
+        let mut tallies = Tallies::default();
+
+        let split =
+            evaluate_document_with_parts(&mut engine(dictionary), &units, &parts, "", |u, o, r| {
+                tallies.add(u, o, r)
+            });
+
+        assert_eq!(split, 1);
+        let words = tallies.score(Class::Word);
+        assert_eq!((words.units, words.missing), (2, 0), "長崎 and 短期大学");
+        let compounds = tallies.score(Class::Compound);
+        assert_eq!(
+            (compounds.units, compounds.missing),
+            (1, 0),
+            "危機一髪 whole"
+        );
     }
 }

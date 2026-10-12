@@ -2,7 +2,7 @@
 //! units, converting them in parallel, and counting the scores per kind of
 //! source.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::io::BufRead;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use crate::documents::each_document;
 use crate::{
     Class, DocumentsError, Established, Score, Split, Tallies, Unit, UnitsError, as_typed, engine,
-    evaluate_document, read_units, split_of,
+    evaluate_document_with_parts, read_units, split_of,
 };
 
 /// A document of the eval split with its units in position order.
@@ -25,6 +25,9 @@ pub struct EvalDocument {
     pub text: String,
     /// The compound units left out of `units`, in position order.
     pub compounds: Vec<Unit>,
+    /// The units inside each compound `units` types whole, by where it
+    /// starts (see [`compound_parts`]).
+    pub parts: HashMap<usize, Vec<Unit>>,
 }
 
 /// Where `unit` lies in its document: start and end.
@@ -85,6 +88,34 @@ pub fn typed_by_analyzer(
         .collect();
     typed.sort_by_key(|u| u.position);
     typed
+}
+
+/// The units inside each compound of `typed` by where it starts, as
+/// [`typed_by_analyzer`] would type them without it: what a typist types for
+/// a compound no dictionary offers (see [`crate::evaluate_document_with_parts`]).
+pub fn compound_parts(
+    units: &[Unit],
+    typed: &[Unit],
+    established: &Established,
+) -> HashMap<usize, Vec<Unit>> {
+    let units: Vec<Unit> = units
+        .iter()
+        .flat_map(|u| as_typed(u, established))
+        .collect();
+    typed
+        .iter()
+        .filter(|u| u.compound)
+        .map(|compound| {
+            let (start, end) = span_of(compound);
+            let first = units.partition_point(|u| u.position < start);
+            let inside = units[first..]
+                .iter()
+                .take_while(|u| span_of(u).1 <= end)
+                .cloned()
+                .collect();
+            (start, inside)
+        })
+        .collect()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -221,6 +252,7 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
                 units,
                 text: doc.text,
                 compounds,
+                parts: HashMap::new(),
             })
             .map_err(Failed::Caller)?;
         }
@@ -244,6 +276,8 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
 pub struct Evaluation {
     pub by_kind: BTreeMap<String, Tallies>,
     pub agreed: Tallies,
+    /// The compounds not offered, typed as their parts instead.
+    pub split: u64,
 }
 
 impl Evaluation {
@@ -317,12 +351,18 @@ pub fn evaluate_documents(
                 let kind = doc.doc_id.split(':').next().unwrap_or_default();
                 let tallies = part.by_kind.entry(kind.to_owned()).or_default();
                 let agreed = &mut part.agreed;
-                evaluate_document(&mut field, &doc.units, &doc.text, |unit, offered, rank| {
-                    tallies.add(unit, offered, rank);
-                    if agrees(unit) {
-                        agreed.add(unit, offered, rank);
-                    }
-                });
+                part.split += evaluate_document_with_parts(
+                    &mut field,
+                    &doc.units,
+                    &doc.parts,
+                    &doc.text,
+                    |unit, offered, rank| {
+                        tallies.add(unit, offered, rank);
+                        if agrees(unit) {
+                            agreed.add(unit, offered, rank);
+                        }
+                    },
+                );
             }
             part
         })
@@ -333,6 +373,7 @@ pub fn evaluate_documents(
             evaluation.by_kind.entry(kind).or_default().merge(tallies);
         }
         evaluation.agreed.merge(part.agreed);
+        evaluation.split += part.split;
     }
     evaluation
 }
@@ -414,6 +455,7 @@ pub fn keys_diff_tsv(old: &str, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evaluate_document;
 
     // Splits computed apart from this code: aozora:000001 is train,
     // aozora:000013 dev, and aozora:000004 and aozora:000015 eval.
@@ -480,6 +522,7 @@ mod tests {
                     units: units[1..3].to_vec(),
                     text: "漢い字".into(),
                     compounds: Vec::new(),
+                    parts: HashMap::new(),
                 },
                 EvalDocument {
                     doc_id: "aozora:000015".into(),
@@ -487,6 +530,7 @@ mod tests {
                     units: units[4..].to_vec(),
                     text: "あ書".into(),
                     compounds: Vec::new(),
+                    parts: HashMap::new(),
                 },
             ]
         );
@@ -592,6 +636,28 @@ mod tests {
         );
 
         assert_eq!(typed, [compound, unit("aozora:000004", 4, "てき", "的")]);
+    }
+
+    #[test]
+    fn the_parts_of_a_compound_typed_whole_are_the_units_inside_it() {
+        let units = [
+            unit("aozora:000004", 0, "しゃかい", "社会"),
+            unit("aozora:000004", 2, "しゅぎ", "主義"),
+            unit("aozora:000004", 4, "てき", "的"),
+        ];
+        let compound = Unit {
+            compound: true,
+            ..unit("aozora:000004", 0, "しゃかいしゅぎ", "社会主義")
+        };
+        let typed = typed_by_analyzer(
+            &units,
+            std::slice::from_ref(&compound),
+            &Established::default(),
+        );
+
+        let parts = compound_parts(&units, &typed, &Established::default());
+
+        assert_eq!(parts, HashMap::from([(0, units[..2].to_vec())]));
     }
 
     #[test]
@@ -725,6 +791,7 @@ mod tests {
                     units: units[..1].to_vec(),
                     text: "手紙".into(),
                     compounds: Vec::new(),
+                    parts: HashMap::new(),
                 },
                 EvalDocument {
                     doc_id: "aozora:000004".into(),
@@ -732,6 +799,7 @@ mod tests {
                     units: units[1..3].to_vec(),
                     text: "漢い字".into(),
                     compounds: Vec::new(),
+                    parts: HashMap::new(),
                 },
             ]
         );
@@ -800,6 +868,7 @@ mod tests {
                 .collect(),
             text: String::new(),
             compounds: Vec::new(),
+            parts: HashMap::new(),
         }
     }
 
@@ -874,6 +943,7 @@ mod tests {
         let evaluation = Evaluation {
             by_kind: BTreeMap::from([("law".to_owned(), law), ("aozora".to_owned(), aozora)]),
             agreed: Tallies::default(),
+            split: 0,
         };
 
         assert_eq!(
@@ -957,6 +1027,7 @@ mod model_tests {
             }],
             text: "手神".into(),
             compounds: Vec::new(),
+            parts: HashMap::new(),
         };
         let model = {
             let bits = 10;
