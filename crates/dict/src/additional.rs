@@ -11,7 +11,7 @@ use kanaemi_engine::{Engine, ItemLine, TextDictionary};
 use crate::dictionary::{MIN_COUNT, cost_of, okuri_lines};
 use crate::evaluation::{Query, engine, rank_of};
 use crate::kana::{is_hiragana, is_kanji, is_katakana};
-use crate::{Dictionary, Entry, LineKind, RejectedLines, Unit};
+use crate::{Dictionary, Entry, Established, LineKind, RejectedLines, Unit, as_typed};
 
 /// A Wikipedia article's title, without its qualifier, with the reading its
 /// text gives.
@@ -413,9 +413,16 @@ pub fn read_titles(tsv: impl BufRead) -> Result<Vec<Title>, TitlesError> {
 
 /// A field's dictionary: the stems and words of the units of its documents,
 /// and the `titles` its documents' `texts` use, costing against the units.
+/// The units are counted as typed, as the base dictionary counts its own
+/// (see [`as_typed`]), with the joined words its documents establish.
 /// UniDic's words are left out; the base dictionary has them.
 pub fn field_dictionary(units: &[Unit], titles: &[Title], texts: &[String]) -> Dictionary {
-    let mut dictionary = Dictionary::build(units, &[]);
+    let established = Established::of(units);
+    let units: Vec<Unit> = units
+        .iter()
+        .flat_map(|u| as_typed(u, &established))
+        .collect();
+    let mut dictionary = Dictionary::build(&units, &[]);
     let added: Vec<Entry> = {
         let have: HashSet<(&str, &str)> = dictionary
             .entries
@@ -514,6 +521,7 @@ mod tests {
             .map(|&(position, reading, surface)| Unit {
                 compound: false,
                 okurigana_variant: false,
+                parts: Vec::new(),
                 doc_id: doc.into(),
                 position,
                 reading: reading.into(),
@@ -777,6 +785,7 @@ mod build_tests {
         Unit {
             compound: false,
             okurigana_variant: false,
+            parts: Vec::new(),
             doc_id: "wikipedia:1".into(),
             position: 0,
             reading: reading.into(),
@@ -846,6 +855,32 @@ mod build_tests {
                 ("構造", cost_of(2, 3)),
             ]
         );
+    }
+
+    #[test]
+    fn a_field_dictionary_counts_a_rare_joined_word_as_its_parts() {
+        let joined = |reading: &str, surface: &str| Unit {
+            parts: vec![crate::Part {
+                offset: 0,
+                reading: "こうぞう".into(),
+                surface: "構造".into(),
+                ..Default::default()
+            }],
+            ..word(reading, surface)
+        };
+        let units = [
+            joined("こうぞうてき", "構造的"),
+            joined("こうぞうじょう", "構造上"),
+        ];
+
+        let dictionary = field_dictionary(&units, &[], &[]);
+
+        let surfaces: Vec<&str> = dictionary
+            .entries
+            .iter()
+            .map(|e| e.surface.as_str())
+            .collect();
+        assert_eq!(surfaces, ["構造"]);
     }
 
     #[test]

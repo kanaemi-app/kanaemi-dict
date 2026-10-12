@@ -1,7 +1,7 @@
 //! Conversion units: the pieces of text Kanaemi converts in one go, cut from
 //! Sudachi's morphemes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead};
 
 use kanaemi_engine::{MAX_SUFFIX_KANA, terminal_ending};
@@ -9,6 +9,7 @@ use kanaemi_engine::{MAX_SUFFIX_KANA, terminal_ending};
 use crate::analyzer::is_break;
 use crate::conjugation::{KanaemiType, kanaemi_type};
 use crate::counted::reading_counted_after;
+use crate::dictionary::MIN_COUNT;
 use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana, is_voicing_of};
 use crate::numeral::{Notation, Number, read_number};
 use crate::{Token, UnidicReadings, Words, is_word, katakana_to_hiragana};
@@ -40,6 +41,116 @@ pub struct Unit {
     /// such spellings.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub okurigana_variant: bool,
+    /// The words to convert of a word joined with its affixes that no
+    /// lexicon has (山田 of 山田さん; さん is typed as it is), which a typist
+    /// types apart. Empty for any other unit, and for a joined word a
+    /// lexicon has (大相撲).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<Part>,
+}
+
+/// A word inside a unit, `offset` characters from the unit's start.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Part {
+    pub offset: usize,
+    pub reading: String,
+    pub surface: String,
+    /// The stem of a part Kanaemi conjugates (臭 of the 臭い of 熱臭い), as a
+    /// unit has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stem_reading: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stem_surface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conjugation: Option<String>,
+    /// The conjugation type of a part Kanaemi's table does not know, as a
+    /// unit has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_conjugation: Option<String>,
+}
+
+/// The words joined with affixes that no lexicon has but that the documents
+/// write often enough for the dictionary to take them (皆さん, お酒): words
+/// a typist types whole, as the dictionary has them.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Established {
+    words: HashSet<(String, String)>,
+}
+
+impl Established {
+    /// The joined words of `units` met outside the compounds at least as
+    /// often as the dictionary takes a word. Units come document by
+    /// document, as `build/units.jsonl` holds them. A place inside a compound
+    /// (ハイド氏 in ジキル博士とハイド氏) is typed as the compound, and the
+    /// dictionary counts a word met mostly there only where it stands outside
+    /// (see [`crate::fragment_surfaces`]); counted there, the word would be
+    /// typed whole where the dictionary has no line for it.
+    pub fn of<U: std::borrow::Borrow<Unit>>(units: impl IntoIterator<Item = U>) -> Self {
+        let mut counts: HashMap<(String, String), usize> = HashMap::new();
+        let mut doc_id = String::new();
+        let mut joined: Vec<(usize, usize, (String, String))> = Vec::new();
+        let mut compounds: Vec<(usize, usize)> = Vec::new();
+        let mut flush = |joined: &mut Vec<_>, compounds: &mut Vec<(usize, usize)>| {
+            let spans = crate::Spans::new(std::mem::take(compounds));
+            for (start, end, key) in joined.drain(..) {
+                if !spans.covers(start, end) {
+                    *counts.entry(key).or_default() += 1;
+                }
+            }
+        };
+        for unit in units {
+            let unit = unit.borrow();
+            if unit.doc_id != doc_id {
+                flush(&mut joined, &mut compounds);
+                doc_id.clone_from(&unit.doc_id);
+            }
+            let span = (unit.position, unit.position + unit.surface.chars().count());
+            if unit.compound {
+                compounds.push(span);
+            } else if !unit.parts.is_empty() {
+                joined.push((span.0, span.1, (unit.reading.clone(), unit.surface.clone())));
+            }
+        }
+        flush(&mut joined, &mut compounds);
+        Self {
+            words: counts
+                .into_iter()
+                .filter(|(_, n)| *n >= MIN_COUNT)
+                .map(|(key, _)| key)
+                .collect(),
+        }
+    }
+
+    fn has(&self, unit: &Unit) -> bool {
+        self.words
+            .contains(&(unit.reading.clone(), unit.surface.clone()))
+    }
+}
+
+/// The units a typist types for `unit`: its parts when it has any (山田 of
+/// 山田さん) and is not `established`, else the unit itself. The evaluation
+/// types so, and the dictionary and the model count and learn so.
+pub fn as_typed(unit: &Unit, established: &Established) -> Vec<Unit> {
+    if unit.parts.is_empty() || established.has(unit) {
+        return vec![unit.clone()];
+    }
+    unit.parts
+        .iter()
+        .map(|p| Unit {
+            doc_id: unit.doc_id.clone(),
+            position: unit.position + p.offset,
+            reading: p.reading.clone(),
+            surface: p.surface.clone(),
+            stem_reading: p.stem_reading.clone(),
+            stem_surface: p.stem_surface.clone(),
+            conjugation: p.conjugation.clone(),
+            unknown_conjugation: p.unknown_conjugation.clone(),
+            numeric: None,
+            compound: false,
+            okurigana_variant: false,
+            parts: Vec::new(),
+        })
+        .collect()
 }
 
 /// A unit that holds a number, in the form of Kanaemi's numeric items: the
@@ -90,6 +201,8 @@ pub(crate) struct LineUnit {
     /// A conjugating word spelled with other okurigana than its normalized
     /// form (小い for 小さい), whether it makes a stem or not.
     pub(crate) okurigana_variant: bool,
+    /// See [`Unit::parts`].
+    pub(crate) parts: Vec<Part>,
 }
 
 /// The stem of a word Kanaemi conjugates.
@@ -153,6 +266,7 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
                 unknown_conjugation: u.unknown_conjugation,
                 numeric: u.numeric,
                 compound,
+                parts: u.parts,
             });
         }
         line_start += line.chars().count() + 1;
@@ -279,13 +393,36 @@ fn cut_line(tokens: &[Token], readings: &UnidicReadings) -> (Vec<LineUnit>, Vec<
 /// verbs and suffixes make with the word before (多すぎる), which overlap the
 /// units they join.
 fn cut_words(tokens: &[Token], readings: &UnidicReadings) -> (Vec<LineUnit>, Vec<LineUnit>) {
-    let tokens = join_affixes(tokens, readings);
+    let (tokens, parts) = join_affixes(tokens, readings);
     let (joined_tokens, joined_at) = join_auxiliaries(tokens.clone());
     let joined = units_of(&joined_tokens, readings)
         .into_iter()
         .filter(|u| joined_at.contains(&u.begin))
         .collect();
-    (units_of(&tokens, readings), joined)
+    let mut units = units_of(&tokens, readings);
+    for unit in &mut units {
+        let Some((surface, reading, p)) = parts.get(&unit.begin) else {
+            continue;
+        };
+        // A conjugating word takes in the auxiliaries after it (熱臭かった),
+        // and so does its last part when it conjugates.
+        let (Some(rest), Some(rest_reading)) = (
+            unit.surface.strip_prefix(surface.as_str()),
+            unit.reading.strip_prefix(reading.as_str()),
+        ) else {
+            continue;
+        };
+        let mut p = p.clone();
+        if let Some(last) = p.last_mut().filter(|last| {
+            last.conjugation.is_some()
+                && last.offset + last.surface.chars().count() == surface.chars().count()
+        }) {
+            last.surface.push_str(rest);
+            last.reading.push_str(rest_reading);
+        }
+        unit.parts = p;
+    }
+    (units, joined)
 }
 
 fn units_of(tokens: &[Token], readings: &UnidicReadings) -> Vec<LineUnit> {
@@ -455,6 +592,7 @@ fn word_of_numeral(tokens: &[Token], after: usize, readings: &UnidicReadings) ->
         unknown_conjugation: None,
         numeric: None,
         okurigana_variant: false,
+        parts: Vec::new(),
     })
 }
 
@@ -509,6 +647,7 @@ fn numeric_unit(
         unknown_conjugation: None,
         numeric: Some(numeric),
         okurigana_variant: false,
+        parts: Vec::new(),
     })
 }
 
@@ -527,6 +666,7 @@ fn plain(token: &Token) -> LineUnit {
         numeric: None,
         okurigana_variant: conjugation_of(token).is_some()
             && is_okurigana_variant(&token.dictionary_form, &token.normalized_form),
+        parts: Vec::new(),
     }
 }
 
@@ -596,39 +736,88 @@ fn take_in(mut unit: LineUnit, mut okuri: usize, rest: &[Token]) -> (LineUnit, u
     (unit, taken)
 }
 
+/// The surface and reading of a joined word and its parts (see
+/// [`Unit::parts`]), by where the word begins.
+type JoinedParts = HashMap<usize, (String, String, Vec<Part>)>;
+
 /// Joins a prefix to the content word after it and a suffix to the noun or
 /// pronoun before it, unless the lexicon has the joined word and no reading
-/// of it can stand for the joined readings.
-fn join_affixes(tokens: &[Token], readings: &UnidicReadings) -> Vec<Token> {
-    let mut out: Vec<Token> = Vec::new();
-    let mut prefix: Option<Token> = None;
+/// of it can stand for the joined readings. The parts of each joined word
+/// no lexicon has are kept beside the tokens.
+fn join_affixes(tokens: &[Token], readings: &UnidicReadings) -> (Vec<Token>, JoinedParts) {
+    // Each token of `out`, and of the prefix waiting, with the words it was
+    // joined of: a word joined partway that the lexicon has (大御所 of
+    // 大御所的) stays one word, read as the lexicon reads it.
+    let mut out: Vec<(Token, Vec<Token>)> = Vec::new();
+    let mut prefix: Option<(Token, Vec<Token>)> = None;
+    let words_of = |(token, of): (Token, Vec<Token>)| {
+        if of.len() > 1 && !readings.in_lexicon(&token.surface).is_empty() {
+            vec![token]
+        } else {
+            of
+        }
+    };
     for token in tokens {
-        let mut token = token.clone();
+        let mut token = (token.clone(), vec![token.clone()]);
         if let Some(p) = prefix.take() {
             match PREFIX_HEADS
-                .contains(&token.pos[0].as_str())
-                .then(|| joined(&p, &token, readings))
+                .contains(&token.0.pos[0].as_str())
+                .then(|| joined(&p.0, &token.0, readings))
                 .flatten()
             {
-                Some(j) => token = j,
+                Some(j) => token = (j, [words_of(p), words_of(token)].concat()),
                 None => out.push(p),
             }
         }
-        if token.pos[0] == "接頭辞" {
+        if token.0.pos[0] == "接頭辞" {
             prefix = Some(token);
             continue;
         }
-        if token.pos[0] == "接尾辞"
-            && let Some(prev) = out.last_mut().filter(|prev| takes_suffix(prev))
-            && let Some(j) = joined(prev, &token, readings)
+        if token.0.pos[0] == "接尾辞"
+            && let Some(prev) = out.last_mut().filter(|prev| takes_suffix(&prev.0))
+            && let Some(j) = joined(&prev.0, &token.0, readings)
         {
-            *prev = j;
+            let head = std::mem::replace(prev, (j, Vec::new()));
+            prev.1 = words_of(head).into_iter().chain(words_of(token)).collect();
             continue;
         }
         out.push(token);
     }
     out.extend(prefix);
-    out
+    let mut parts = JoinedParts::new();
+    for (token, of) in &out {
+        if of.len() > 1 && readings.in_lexicon(&token.surface).is_empty() {
+            let words = of
+                .iter()
+                .filter(|t| {
+                    needs_conversion(&t.surface)
+                        && is_plain_reading(&t.reading)
+                        && is_word(&t.reading, &t.surface)
+                })
+                .map(|t| {
+                    let stem = conjugation_of(t)
+                        .and_then(|c| stem_of(t, terminal_ending(c)?, c))
+                        .map(|(stem, _)| stem);
+                    Part {
+                        offset: t.begin - token.begin,
+                        reading: t.reading.clone(),
+                        surface: t.surface.clone(),
+                        stem_reading: stem.as_ref().map(|s| s.reading.clone()),
+                        stem_surface: stem.as_ref().map(|s| s.surface.clone()),
+                        conjugation: stem.map(|s| s.conjugation),
+                        unknown_conjugation: conjugation_of(t)
+                            .filter(|&c| c != OUTSIDE_TABLE && terminal_ending(c).is_none())
+                            .map(str::to_owned),
+                    }
+                })
+                .collect();
+            parts.insert(
+                token.begin,
+                (token.surface.clone(), token.reading.clone(), words),
+            );
+        }
+    }
+    (out.into_iter().map(|(t, _)| t).collect(), parts)
 }
 
 /// `head` and `tail` as one word with the part of speech of `tail`, read as
@@ -830,6 +1019,7 @@ mod tests {
         let unit = Unit {
             compound: false,
             okurigana_variant: false,
+            parts: Vec::new(),
             doc_id: "a:1".into(),
             position: 3,
             reading: "ã¦ãã¿".into(),
@@ -919,6 +1109,7 @@ mod tests {
             unknown_conjugation: None,
             numeric: None,
             okurigana_variant: false,
+            parts: Vec::new(),
         }
     }
 
@@ -1218,9 +1409,200 @@ mod tests {
             ]),
             [
                 conjugated(1, "まち", "待ち", ("ま", "待", "五段-タ行")),
-                plain(4, "やまださん", "山田さん"),
-                plain(9, "かれら", "彼ら"),
+                with_parts(plain(4, "やまださん", "山田さん"), &[(0, "やまだ", "山田")]),
+                with_parts(plain(9, "かれら", "彼ら"), &[(0, "かれ", "彼")]),
             ]
+        );
+    }
+
+    fn with_parts(unit: LineUnit, parts: &[(usize, &str, &str)]) -> LineUnit {
+        LineUnit {
+            parts: parts
+                .iter()
+                .map(|(offset, reading, surface)| Part {
+                    offset: *offset,
+                    reading: (*reading).into(),
+                    surface: (*surface).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..unit
+        }
+    }
+
+    fn joined_unit(position: usize, reading: &str, surface: &str, head: (&str, &str)) -> Unit {
+        Unit {
+            doc_id: "d".into(),
+            position,
+            reading: reading.into(),
+            surface: surface.into(),
+            stem_reading: None,
+            stem_surface: None,
+            conjugation: None,
+            unknown_conjugation: None,
+            numeric: None,
+            compound: false,
+            okurigana_variant: false,
+            parts: vec![Part {
+                offset: 0,
+                reading: head.0.into(),
+                surface: head.1.into(),
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn a_joined_word_met_as_often_as_the_dictionary_takes_one_is_typed_whole() {
+        let minna = joined_unit(0, "みなさん", "皆さん", ("みな", "皆"));
+        let terashima = joined_unit(0, "てらしまさん", "寺島さん", ("てらしま", "寺島"));
+        let units = vec![minna.clone(); MIN_COUNT]
+            .into_iter()
+            .chain([terashima.clone()]);
+
+        let established = Established::of(units);
+
+        assert_eq!(as_typed(&minna, &established), std::slice::from_ref(&minna));
+        let parts = as_typed(&terashima, &established);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            (parts[0].reading.as_str(), parts[0].surface.as_str()),
+            ("てらしま", "寺島")
+        );
+        assert!(parts[0].parts.is_empty());
+    }
+
+    #[test]
+    fn a_joined_word_met_only_inside_compounds_is_not_established() {
+        let hyde = |doc: &str, position| Unit {
+            doc_id: doc.into(),
+            ..joined_unit(position, "はいどし", "ハイド氏", ("はいど", "ハイド"))
+        };
+        let title = |doc: &str| Unit {
+            doc_id: doc.into(),
+            compound: true,
+            ..joined_unit(
+                0,
+                "じきるはかせとはいどし",
+                "ジキル博士とハイド氏",
+                ("", ""),
+            )
+        };
+        let inside = [title("a"), hyde("a", 6), title("b"), hyde("b", 6)];
+        let outside = [hyde("c", 0), hyde("d", 0)];
+
+        assert!(!Established::of(&inside).has(&hyde("e", 0)));
+        assert!(Established::of(inside.iter().chain(&outside)).has(&hyde("e", 0)));
+    }
+
+    #[test]
+    fn a_word_joined_with_its_affixes_keeps_its_parts_only_when_no_lexicon_has_it() {
+        let units = cut_knowing(
+            &[("おおずもう", "大相撲")],
+            &[
+                "大/おお/接頭辞,*,*,*,*,*/大",
+                "相撲/すもう/名詞,普通名詞,一般,*,*,*/相撲",
+                "を/を/助詞,格助詞,*,*,*,*/を",
+                "元/もと/接頭辞,*,*,*,*,*/元",
+                "社長/しゃちょう/名詞,普通名詞,一般,*,*,*/社長",
+                "さん/さん/接尾辞,名詞的,一般,*,*,*/さん",
+            ],
+        );
+
+        assert_eq!(
+            units,
+            [
+                plain(0, "おおずもう", "大相撲"),
+                with_parts(
+                    plain(4, "もとしゃちょうさん", "元社長さん"),
+                    &[(0, "もと", "元"), (1, "しゃちょう", "社長")]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_conjugating_part_keeps_its_stem_and_takes_in_what_its_word_took_in() {
+        let units = cut(&[
+            "熱/ねつ/名詞,普通名詞,一般,*,*,*/熱",
+            "臭かっ/くさかっ/接尾辞,形容詞的,*,*,形容詞,連用形-促音便/臭い",
+            "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
+        ]);
+
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert_eq!(
+            units[0].parts,
+            [
+                Part {
+                    offset: 0,
+                    reading: "ねつ".into(),
+                    surface: "熱".into(),
+                    ..Default::default()
+                },
+                Part {
+                    offset: 1,
+                    reading: "くさかった".into(),
+                    surface: "臭かった".into(),
+                    stem_reading: Some("くさ".into()),
+                    stem_surface: Some("臭".into()),
+                    conjugation: Some("形容詞".into()),
+                    unknown_conjugation: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_part_of_a_conjugation_type_the_table_does_not_know_keeps_the_type() {
+        let units = cut(&[
+            "事/こと/名詞,普通名詞,一般,*,*,*/事",
+            "易し/やすし/接尾辞,形容詞的,*,*,文語形容詞-ク,終止形-一般/易し",
+        ]);
+
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert_eq!(
+            units[0]
+                .parts
+                .iter()
+                .map(|p| (p.surface.as_str(), p.unknown_conjugation.as_deref()))
+                .collect::<Vec<_>>(),
+            [("事", None), ("易し", Some("文語形容詞-ク"))]
+        );
+    }
+
+    #[test]
+    fn a_part_that_could_be_no_unit_is_not_kept() {
+        let units = cut(&[
+            "全/ぜん/接頭辞,*,*,*,*,*/全",
+            "っ切り/っきり/名詞,普通名詞,一般,*,*,*/っ切り",
+        ]);
+
+        assert_eq!(
+            units,
+            [with_parts(
+                plain(0, "ぜんっきり", "全っ切り"),
+                &[(0, "ぜん", "全")]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_word_the_lexicon_has_inside_a_longer_joined_word_stays_one_part() {
+        let units = cut_knowing(
+            &[("おおごしょ", "大御所")],
+            &[
+                "大/だい/接頭辞,*,*,*,*,*/大",
+                "御所/ごしょ/名詞,普通名詞,一般,*,*,*/御所",
+                "的/てき/接尾辞,形状詞的,*,*,*,*/的",
+            ],
+        );
+
+        assert_eq!(
+            units,
+            [with_parts(
+                plain(0, "おおごしょてき", "大御所的"),
+                &[(0, "おおごしょ", "大御所"), (3, "てき", "的")]
+            )]
         );
     }
 
@@ -2209,6 +2591,7 @@ mod tests {
         let mut unit = Unit {
             compound: true,
             okurigana_variant: false,
+            parts: Vec::new(),
             doc_id: "a:1".into(),
             position: 0,
             reading: "ろてんぶろ".into(),

@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use kanaemi_dict::{
     Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Class, Corrections,
-    CorrectionsError, CutError, Dictionary, DistError, DocumentsError, EvalDocument,
+    CorrectionsError, CutError, Dictionary, DistError, DocumentsError, Established, EvalDocument,
     EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, ReadingsError,
     RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement,
-    check_words, clans, common_words, correction_uses, correction_uses_tsv, counted_reading,
-    counted_voicings, counted_words, counter_words, cut_documents, dictionary_lines,
-    document_sources, document_texts, each_document_with_units, engine, eval_documents,
-    evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
+    as_typed, check_words, clans, common_words, correction_uses, correction_uses_tsv,
+    counted_reading, counted_voicings, counted_words, counter_words, cut_documents,
+    dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
+    eval_documents, evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
     fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv, listed_dictionary,
     mismatches_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols,
     name_readings, nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections,
@@ -461,6 +461,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         path: BASE_TITLES.into(),
         source,
     })?;
+    let established = established_words(|doc_id| !train_only || split_of(doc_id) == Split::Train)?;
     let (dictionary, took_titles, took_unihan) = {
         let mut chains = ChainCounter::new(&names);
         let mut reads = TitleReadings::new(&titles);
@@ -478,11 +479,15 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
         let mut total = 0usize;
         let mut dictionary = Dictionary::build_with_lexicon(
-            units.inspect(|unit| {
-                total += 1;
-                chains.observe(unit);
-                reads.observe(unit);
-            }),
+            units
+                .inspect(|unit| {
+                    chains.observe(unit);
+                    reads.observe(unit);
+                })
+                .flat_map(|unit| as_typed(&unit, &established))
+                // Titles and chains cost against the units as the dictionary
+                // counts them.
+                .inspect(|_| total += 1),
             &unidic,
             &lexicon,
         );
@@ -623,7 +628,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
 /// the train documents, and writes the scores per kind of source and class.
 fn evaluate() -> Result<(), Error> {
     let dictionary = train_dictionary()?;
-    let docs = typed_eval_documents()?;
+    let docs = typed_eval_documents(&train_established()?)?;
     let agreed = agreed_readings(&docs)?;
     let evaluation = evaluate_documents(&docs, &dictionary, None, &|unit| agrees(&agreed, unit));
     print_scores("", &evaluation);
@@ -670,12 +675,41 @@ fn write_evaluation(out: &EvaluationOutputs, evaluation: &Evaluation) -> Result<
     Ok(())
 }
 
+/// The joined words typed whole in the documents of build/units.jsonl that
+/// `wanted` takes (see [`Established`]).
+fn established_words(wanted: impl Fn(&str) -> bool) -> Result<Established, Error> {
+    let mut failure = None;
+    let established = Established::of(
+        read_units(open(UNITS)?)
+            .map_while(|unit| {
+                unit.map_err(|source| {
+                    failure = Some(Error::Units {
+                        path: UNITS.into(),
+                        source,
+                    })
+                })
+                .ok()
+            })
+            .filter(|unit| wanted(&unit.doc_id)),
+    );
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(established),
+    }
+}
+
+/// [`established_words`] of the train documents, which the dictionary the
+/// evaluation and the model use is built from.
+fn train_established() -> Result<Established, Error> {
+    established_words(|doc_id| split_of(doc_id) == Split::Train)
+}
+
 /// The eval documents with their units as the evaluation types them (see
 /// [`typed_by_analyzer`]).
-fn typed_eval_documents() -> Result<Vec<EvalDocument>, Error> {
+fn typed_eval_documents(established: &Established) -> Result<Vec<EvalDocument>, Error> {
     let mut docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
     for doc in &mut docs {
-        doc.units = typed_by_analyzer(&doc.units, &doc.compounds);
+        doc.units = typed_by_analyzer(&doc.units, &doc.compounds, established);
     }
     Ok(docs)
 }
@@ -763,6 +797,7 @@ fn train_ranking() -> Result<(), Error> {
     })?;
     let base = std::fs::read(BASE.dictionary).map_err(read_error(BASE.dictionary))?;
     // The fragments the train dictionary counted so, from the same units.
+    let established = train_established()?;
     let fragments = {
         let mut failure = None;
         let fragments = fragment_surfaces(
@@ -776,7 +811,8 @@ fn train_ranking() -> Result<(), Error> {
                     })
                     .ok()
                 })
-                .filter(|unit| split_of(&unit.doc_id) == Split::Train),
+                .filter(|unit| split_of(&unit.doc_id) == Split::Train)
+                .flat_map(|unit| as_typed(&unit, &established)),
         );
         if let Some(failure) = failure {
             return Err(failure);
@@ -795,6 +831,7 @@ fn train_ranking() -> Result<(), Error> {
             &Teaching {
                 dictionary: &dictionary,
                 fragments: &fragments,
+                established: &established,
             },
             &mut examples,
             &mut sources,
@@ -827,7 +864,7 @@ fn train_ranking() -> Result<(), Error> {
         path: MODEL.into(),
         source,
     })?;
-    let docs = typed_eval_documents()?;
+    let docs = typed_eval_documents(&established)?;
     let agreed = agreed_readings(&docs)?;
     let agreed = |unit: &Unit| agrees(&agreed, unit);
     print_scores(
@@ -868,6 +905,7 @@ fn field_names() -> Result<Vec<String>, Error> {
 struct Teaching<'a> {
     dictionary: &'a Arc<TextDictionary>,
     fragments: &'a HashSet<String>,
+    established: &'a Established,
 }
 
 /// Adds the examples of the train documents of `units` and `docs` that are
@@ -892,7 +930,12 @@ fn add_examples(
             .map_init(
                 || engine(teaching.dictionary.clone()),
                 |engine, doc| {
-                    let units = typed_units(&doc.units, &doc.compounds, teaching.fragments);
+                    let units = typed_units(
+                        &doc.units,
+                        &doc.compounds,
+                        teaching.fragments,
+                        teaching.established,
+                    );
                     examples_of_document(engine, &units, &doc.text)
                 },
             )

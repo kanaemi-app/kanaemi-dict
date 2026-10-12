@@ -586,6 +586,7 @@ mod tests {
         Unit {
             compound: false,
             okurigana_variant: false,
+            parts: Vec::new(),
             doc_id: "d".into(),
             position: 0,
             reading: reading.into(),
@@ -814,6 +815,7 @@ mod tests {
         let mut tallies = Tallies::default();
         let variant = Unit {
             okurigana_variant: true,
+            parts: Vec::new(),
             ..unit("かわる", "変る", Some(("か", "変")))
         };
         tallies.add(&variant, &strings(&["変わる"]), None);

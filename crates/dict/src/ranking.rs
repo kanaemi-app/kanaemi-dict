@@ -12,7 +12,7 @@ use kanaemi_engine::{
 };
 
 use crate::kana::is_hiragana;
-use crate::{Query, Spans, Unit, query_of, span_of};
+use crate::{Established, Query, Spans, Unit, as_typed, query_of, span_of};
 
 /// The widest hash a model file allows.
 pub const MAX_BITS: u8 = 28;
@@ -145,20 +145,28 @@ pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Exam
     examples
 }
 
-/// The units of a document a typist types one by one: all but those whose
-/// surface is one of `fragments` and that lie inside one of `compounds`
-/// (一髪 in 危機一髪), which are typed as the compound. The dictionary counts
-/// them so too (see [`crate::fragment_surfaces`]); taught them, the model
-/// would put such a fragment back ahead of the words it lost to.
-pub fn typed_units(units: &[Unit], compounds: &[Unit], fragments: &HashSet<String>) -> Vec<Unit> {
+/// The units of a document a typist types one by one: each word joined with
+/// affixes no lexicon has typed as its parts (see [`crate::as_typed`]) unless
+/// `established`, and then all but those whose surface is one of `fragments`
+/// and that lie inside one of `compounds` (一髪 in 危機一髪), which are typed
+/// as the compound.
+/// The dictionary counts them so too (see [`crate::fragment_surfaces`]);
+/// taught them, the model would put such a fragment back ahead of the words
+/// it lost to.
+pub fn typed_units(
+    units: &[Unit],
+    compounds: &[Unit],
+    fragments: &HashSet<String>,
+    established: &Established,
+) -> Vec<Unit> {
     let spans = Spans::new(compounds.iter().map(span_of));
     units
         .iter()
+        .flat_map(|u| as_typed(u, established))
         .filter(|u| {
             let end = u.position + u.surface.chars().count();
             !(fragments.contains(&u.surface) && spans.covers(u.position, end))
         })
-        .cloned()
         .collect()
 }
 
@@ -455,6 +463,7 @@ mod tests {
         Unit {
             compound: false,
             okurigana_variant: false,
+            parts: Vec::new(),
             doc_id: "d".into(),
             position,
             reading: reading.into(),
@@ -600,9 +609,31 @@ mod tests {
             ..unit(0, "ききいっぱつ", "危機一髪")
         };
 
-        let typed = typed_units(&units, &[compound], &fragments);
+        let typed = typed_units(&units, &[compound], &fragments, &Established::default());
 
         assert_eq!(typed, [units[0].clone(), units[2].clone()]);
+    }
+
+    #[test]
+    fn a_fragment_split_out_of_a_rare_joined_word_inside_a_compound_is_not_typed_alone() {
+        let joined = Unit {
+            parts: vec![crate::Part {
+                offset: 0,
+                reading: "いっぱつ".into(),
+                surface: "一髪".into(),
+                ..Default::default()
+            }],
+            ..unit(2, "いっぱつら", "一髪ら")
+        };
+        let fragments = HashSet::from(["一髪".to_owned()]);
+        let compound = Unit {
+            compound: true,
+            ..unit(0, "ききいっぱつ", "危機一髪")
+        };
+
+        let typed = typed_units(&[joined], &[compound], &fragments, &Established::default());
+
+        assert_eq!(typed, []);
     }
 
     #[test]

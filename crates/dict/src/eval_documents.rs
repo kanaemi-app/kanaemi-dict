@@ -12,8 +12,8 @@ use rayon::prelude::*;
 
 use crate::documents::each_document;
 use crate::{
-    Class, DocumentsError, Score, Split, Tallies, Unit, UnitsError, engine, evaluate_document,
-    read_units, split_of,
+    Class, DocumentsError, Established, Score, Split, Tallies, Unit, UnitsError, as_typed, engine,
+    evaluate_document, read_units, split_of,
 };
 
 /// A document of the eval split with its units in position order.
@@ -38,8 +38,19 @@ pub fn span_of(unit: &Unit) -> (usize, usize) {
 /// compounds that overlap, the one starting first, then the longest, is
 /// typed (朽ち果てた over 朽ち果て); a compound a unit runs out of (社会主義
 /// and 主義的) is not, as the typist cannot type both, and its units are
-/// typed instead.
-pub fn typed_by_analyzer(units: &[Unit], compounds: &[Unit]) -> Vec<Unit> {
+/// typed instead. A word joined with its affixes that no lexicon has and that
+/// is not `established` (山田さん) is typed as its parts, as a typist types it,
+/// and its parts are what a compound may run out of (社会主義 is typed whole
+/// before the 的 of a rare 主義的).
+pub fn typed_by_analyzer(
+    units: &[Unit],
+    compounds: &[Unit],
+    established: &Established,
+) -> Vec<Unit> {
+    let units: Vec<Unit> = units
+        .iter()
+        .flat_map(|u| as_typed(u, established))
+        .collect();
     let mut candidates: Vec<&Unit> = compounds.iter().collect();
     candidates.sort_by_key(|c| {
         let (start, end) = span_of(c);
@@ -410,6 +421,7 @@ mod tests {
         Unit {
             compound: false,
             okurigana_variant: false,
+            parts: Vec::new(),
             doc_id: doc_id.into(),
             position,
             reading: reading.into(),
@@ -489,6 +501,7 @@ mod tests {
         let compound = Unit {
             compound: true,
             okurigana_variant: false,
+            parts: Vec::new(),
             ..unit("aozora:000004", 0, "ろてんぶろ", "露天風呂")
         };
         let units = [parts[0].clone(), compound, parts[1].clone()];
@@ -517,9 +530,68 @@ mod tests {
             unit("aozora:000004", 7, "ふろ", "風呂"),
         ];
 
-        let typed = typed_by_analyzer(&units, &[crisis.clone(), bath.clone()]);
+        let typed = typed_by_analyzer(
+            &units,
+            &[crisis.clone(), bath.clone()],
+            &Established::default(),
+        );
 
         assert_eq!(typed, [crisis, units[2].clone(), bath]);
+    }
+
+    #[test]
+    fn a_word_joined_with_affixes_no_lexicon_has_is_typed_as_its_parts() {
+        let joined = Unit {
+            parts: vec![crate::Part {
+                offset: 0,
+                reading: "やまだ".into(),
+                surface: "山田".into(),
+                ..Default::default()
+            }],
+            ..unit("aozora:000004", 3, "やまださん", "山田さん")
+        };
+        let units = [unit("aozora:000004", 0, "おおずもう", "大相撲"), joined];
+
+        let typed = typed_by_analyzer(&units, &[], &Established::default());
+
+        assert_eq!(
+            typed,
+            [units[0].clone(), unit("aozora:000004", 3, "やまだ", "山田"),]
+        );
+    }
+
+    #[test]
+    fn a_compound_is_typed_whole_when_only_a_rare_joined_word_it_splits_runs_out_of_it() {
+        let joined = Unit {
+            parts: vec![
+                crate::Part {
+                    offset: 0,
+                    reading: "しゅぎ".into(),
+                    surface: "主義".into(),
+                    ..Default::default()
+                },
+                crate::Part {
+                    offset: 2,
+                    reading: "てき".into(),
+                    surface: "的".into(),
+                    ..Default::default()
+                },
+            ],
+            ..unit("aozora:000004", 2, "しゅぎてき", "主義的")
+        };
+        let units = [unit("aozora:000004", 0, "しゃかい", "社会"), joined];
+        let compound = Unit {
+            compound: true,
+            ..unit("aozora:000004", 0, "しゃかいしゅぎ", "社会主義")
+        };
+
+        let typed = typed_by_analyzer(
+            &units,
+            std::slice::from_ref(&compound),
+            &Established::default(),
+        );
+
+        assert_eq!(typed, [compound, unit("aozora:000004", 4, "てき", "的")]);
     }
 
     #[test]
@@ -537,6 +609,7 @@ mod tests {
         let typed = typed_by_analyzer(
             &units,
             &[joined.clone(), compound(0, "くちはて", "朽ち果て")],
+            &Established::default(),
         );
 
         assert_eq!(typed, [joined]);
@@ -553,7 +626,7 @@ mod tests {
             ..unit("aozora:000004", 0, "しゃかいしゅぎ", "社会主義")
         };
 
-        let typed = typed_by_analyzer(&units, &[compound]);
+        let typed = typed_by_analyzer(&units, &[compound], &Established::default());
 
         assert_eq!(typed, units);
     }
@@ -871,6 +944,7 @@ mod model_tests {
             units: vec![Unit {
                 compound: false,
                 okurigana_variant: false,
+                parts: Vec::new(),
                 doc_id: "aozora:1".into(),
                 position: 0,
                 reading: "てがみ".into(),

@@ -437,6 +437,7 @@ mod tests {
         Unit {
             compound: false,
             okurigana_variant: false,
+            parts: Vec::new(),
             doc_id: doc_id.into(),
             position,
             reading: reading.into(),

@@ -364,6 +364,7 @@ mod tests {
             numeric: None,
             compound: false,
             okurigana_variant: false,
+            parts: Vec::new(),
         }
     }
 

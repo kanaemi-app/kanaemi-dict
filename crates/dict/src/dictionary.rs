@@ -552,6 +552,7 @@ pub fn okurigana_dictionary(units: impl IntoIterator<Item = Unit>) -> Dictionary
             .filter(|u| u.okurigana_variant)
             .map(|u| Unit {
                 okurigana_variant: false,
+                parts: Vec::new(),
                 ..u
             }),
         &[],
@@ -791,6 +792,7 @@ mod tests {
         Unit {
             compound: false,
             okurigana_variant: false,
+            parts: Vec::new(),
             doc_id: "d".into(),
             position: 0,
             reading: reading.into(),
@@ -885,6 +887,7 @@ mod tests {
     fn a_word_spelled_with_variant_okurigana_makes_no_entry_but_counts_toward_the_total() {
         let variant = Unit {
             okurigana_variant: true,
+            parts: Vec::new(),
             ..conj("ちいさい", "小い", ("ちいさ", "小"), "形容詞")
         };
         let mut units = repeat(variant, 2);
@@ -899,6 +902,7 @@ mod tests {
     fn the_okurigana_dictionary_holds_the_variant_spellings_alone() {
         let variant = Unit {
             okurigana_variant: true,
+            parts: Vec::new(),
             ..conj("ちいさい", "小い", ("ちいさ", "小"), "形容詞")
         };
         let mut units = repeat(variant, 2);
