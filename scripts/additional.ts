@@ -8,14 +8,16 @@
  * `fetch` sets up the dictionary of YEAR's new words under additional/ if
  * it is not there (this year in Japan by default), and fetches into
  * build/additional/raw the postal code data, Mozc's symbol, emoji and
- * emoticon tables, Wikidata's people and railway stations, and the hot
- * entries of every year with a dictionary. `docs` writes, for each
- * dictionary under additional/, what it is built from into
- * build/additional/NAME/: the documents of its Wikipedia articles, the
- * laws, or the year's hot entries as docs.jsonl, the titles of its articles
- * as titles.tsv, the postal code data as ken_all.csv, Mozc's tables as they
- * are, the people as people.tsv and the stations as stations.tsv. The
- * Wikipedia dump and the laws come from the base dictionary's build/raw.
+ * emoticon tables, Wikidata's people with and without a reading and its
+ * railway stations, and the hot entries of every year with a dictionary.
+ * `docs` writes, for each dictionary under additional/, what it is built
+ * from into build/additional/NAME/: the documents of its Wikipedia articles,
+ * the laws, or the year's hot entries as docs.jsonl, the titles of its
+ * articles as titles.tsv, the postal code data as ken_all.csv, Mozc's tables
+ * as they are, the people as people.tsv, the people without a reading whose
+ * articles' leads read them as wikipedia-people.tsv, and the stations as
+ * stations.tsv. The Wikipedia dump and the laws come from the base
+ * dictionary's build/raw.
  */
 import { join } from "@std/path";
 import { compareUtf8, writeJsonl } from "./docs/extract.ts";
@@ -37,10 +39,20 @@ import {
   notPublishedYet,
   yearInJapan,
 } from "./additional/hatena.ts";
-import { articlesOf, type Title, writeTitlesTo } from "./additional/wikipedia.ts";
+import { articlesOf, personReading, type Title, writeTitlesTo } from "./additional/wikipedia.ts";
 import { NoArticleYet, setUpYear } from "./additional/year.ts";
 import { MOZC_TABLES } from "./additional/mozc.ts";
-import { PEOPLE_FILE, PEOPLE_ID, PEOPLE_URL, PERSON } from "./additional/person.ts";
+import {
+  PEOPLE_FILE,
+  PEOPLE_ID,
+  PEOPLE_URL,
+  PERSON,
+  UNREAD_ID,
+  UNREAD_URL,
+  unreadPeople,
+  WIKIPEDIA_PEOPLE_FILE,
+  wikipediaPeople,
+} from "./additional/person.ts";
 import { STATION, STATIONS_FILE, STATIONS_ID, STATIONS_URL } from "./additional/station.ts";
 
 const ADDITIONAL = "additional";
@@ -76,6 +88,8 @@ async function fetchAll(year: number, refresh: boolean): Promise<void> {
   }
   const people = await get(PEOPLE_ID, PEOPLE_URL, { large: true });
   console.log(`${people.source_id}\t${people.bytes}`);
+  const unread = await get(UNREAD_ID, UNREAD_URL, { large: true });
+  console.log(`${unread.source_id}\t${unread.bytes}`);
   const stations = await get(STATIONS_ID, STATIONS_URL);
   console.log(`${stations.source_id}\t${stations.bytes}`);
   try {
@@ -122,13 +136,24 @@ async function writeDocs(): Promise<void> {
     return record;
   };
 
-  if (dictionaries.some((d) => d.patterns !== undefined)) {
+  const unread = names.has(PERSON)
+    ? unreadPeople(
+      new TextDecoder().decode(await own.read(recordOf(ownRecords, UNREAD_ID, RAW).sha256)),
+    )
+    : undefined;
+  const leadReadings = new Map<string, { surface: string; reading: string }>();
+  if (unread || dictionaries.some((d) => d.patterns !== undefined)) {
     const dump = recordOf(baseRecords, "wikipedia-ja", BASE_RAW);
     const found = await articlesOf(
       bzip2Text(base.path(dump.sha256)),
       dictionaries,
       dump.source_id,
       FIELD_BUDGET,
+      unread && ((page) => {
+        if (!unread.has(page.title)) return;
+        const read = personReading(page.title, page.text);
+        if (read) leadReadings.set(page.title, read);
+      }),
     );
     const years = new Set(dictionaries.filter((d) => d.since !== undefined).map((d) => d.name));
     for (const [name, { docs, titles }] of found) {
@@ -168,12 +193,15 @@ async function writeDocs(): Promise<void> {
     await Deno.writeFile(out, await own.read(record.sha256));
     console.log(`${table.dictionary}\tout: ${out}`);
   }
-  if (names.has(PERSON)) {
+  if (unread) {
     const record = recordOf(ownRecords, PEOPLE_ID, RAW);
     const out = join(BUILD, PERSON, PEOPLE_FILE);
     await Deno.mkdir(join(BUILD, PERSON), { recursive: true });
     await Deno.writeFile(out, await own.read(record.sha256));
     console.log(`${PERSON}\tout: ${out}`);
+    const read = join(BUILD, PERSON, WIKIPEDIA_PEOPLE_FILE);
+    await Deno.writeTextFile(read, wikipediaPeople(unread, leadReadings));
+    console.log(`${PERSON}\tread by leads: ${leadReadings.size} of ${unread.size}\tout: ${read}`);
   }
   if (names.has(STATION)) {
     const record = recordOf(ownRecords, STATIONS_ID, RAW);

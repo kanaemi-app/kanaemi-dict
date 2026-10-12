@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { dump, page } from "../docs/mediawiki_test_helper.ts";
 import { keyHash } from "../select.ts";
-import { articlesOf, baseTitlesOf, fieldsOf, titleReading } from "./wikipedia.ts";
+import { articlesOf, baseTitlesOf, fieldsOf, personReading, titleReading } from "./wikipedia.ts";
 
 async function* once(s: string): AsyncGenerator<string> {
   yield await Promise.resolve(s);
@@ -145,4 +145,91 @@ Deno.test("the base takes no title or name with a digit, as dates would clash wi
   ]);
 
   assertEquals(await baseTitlesOf(once(xml)), { titles: [], names: [] });
+});
+
+Deno.test("a person's reading comes from the lead's bold name, the space between the names kept", () => {
+  assertEquals(
+    personReading("呉清源", "{{Infobox 棋士}}\n'''呉 清源'''（ご せいげん、1914年 - 2014年）は…"),
+    { surface: "呉清源", reading: "ご せいげん" },
+  );
+  assertEquals(
+    personReading("徳川家康", "'''徳川 家康'''（とくがわ いえやす）は…"),
+    { surface: "徳川家康", reading: "とくがわ いえやす" },
+  );
+  assertEquals(
+    personReading("山田太郎", "'''山田太郎'''（やまだたろう）は…"),
+    { surface: "山田太郎", reading: "やまだたろう" },
+    "a name written without a space reads without one",
+  );
+});
+
+Deno.test("a person's reading has a full-width space as one half-width space", () => {
+  assertEquals(
+    personReading("呉清源", "'''呉　清源'''（ご　せいげん）は…"),
+    { surface: "呉清源", reading: "ご せいげん" },
+  );
+  assertEquals(
+    personReading("呉清源", "'''呉清源'''（ ご  せいげん ）は…"),
+    { surface: "呉清源", reading: "ご せいげん" },
+  );
+});
+
+Deno.test("a person's title is matched without its parenthesized qualifier", () => {
+  assertEquals(
+    personReading("山田太郎 (政治家)", "'''山田 太郎'''（やまだ たろう、1950年 - ）は…"),
+    { surface: "山田太郎", reading: "やまだ たろう" },
+  );
+});
+
+Deno.test("a person's reading follows the first bold run that names the title", () => {
+  assertEquals(
+    personReading("呉清源", "'''囲碁'''の棋士。'''呉 清源'''（ご せいげん）は…"),
+    { surface: "呉清源", reading: "ご せいげん" },
+  );
+  assertEquals(
+    personReading("呉清源", "'''''呉 清源'''''（ご せいげん）は…"),
+    { surface: "呉清源", reading: "ご せいげん" },
+    "bold italic",
+  );
+});
+
+Deno.test("a person gets no reading that is not hiragana", () => {
+  assertEquals(personReading("呉清源", "'''呉 清源'''（Wu Qingyuan）は…"), undefined);
+  assertEquals(personReading("呉清源", "'''呉 清源'''（ゴ セイゲン）は…"), undefined);
+  assertEquals(personReading("呉清源", "'''呉 清源'''（1914年 - 2014年）は…"), undefined);
+});
+
+Deno.test("a person gets no reading without a bold run in the lead that names the title", () => {
+  assertEquals(personReading("呉清源", "'''呉泉'''（ご せん）は…"), undefined);
+  assertEquals(personReading("呉清源", "呉 清源（ご せいげん）は…"), undefined);
+  assertEquals(
+    personReading("呉清源", "概要。\n== 経歴 ==\n'''呉 清源'''（ご せいげん）"),
+    undefined,
+    "past the lead",
+  );
+  assertEquals(
+    personReading("呉清源", "<!-- '''呉 清源'''（ご せいげん） -->'''呉 清源'''は…"),
+    undefined,
+    "inside a comment",
+  );
+});
+
+Deno.test("every article is shown to the caller, whether a dictionary takes it or not", async () => {
+  const xml = dump([
+    page(1, 0, "", "'''呉 清源'''（ご せいげん）", "呉清源"),
+    page(2, 0, "", "'''鉄'''（てつ）\n[[Category:鉄道]]", "鉄"),
+    page(3, 0, '<redirect title="呉清源" />', "#REDIRECT [[呉清源]]", "呉泉"),
+    page(4, 1, "", "'''話'''（はなし）", "話"),
+  ]);
+  const seen: string[] = [];
+
+  await articlesOf(
+    once(xml),
+    [{ name: "railway", patterns: [/鉄道/] }],
+    "wikipedia-ja",
+    100,
+    (page) => seen.push(page.title),
+  );
+
+  assertEquals(seen, ["呉清源", "鉄"]);
 });

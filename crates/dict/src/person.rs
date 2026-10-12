@@ -73,6 +73,18 @@ pub fn wikidata_people(text: &str) -> Vec<Person> {
     people.into_values().collect()
 }
 
+/// `people` with the people of `read_by_leads` whose items `people` lacks, in
+/// the order of their items: a person Wikidata reads keeps Wikidata's
+/// reading over the one an article's lead gives.
+pub fn with_people_read_by_leads(people: Vec<Person>, read_by_leads: Vec<Person>) -> Vec<Person> {
+    let mut all: BTreeMap<String, Person> = read_by_leads
+        .into_iter()
+        .map(|p| (p.item.clone(), p))
+        .collect();
+    all.extend(people.into_iter().map(|p| (p.item.clone(), p)));
+    all.into_values().collect()
+}
+
 /// The parts of a reading split by spaces, each in plain hiragana; none
 /// when a part keeps other characters than kana.
 fn split_reading(reading: &str) -> Option<Vec<String>> {
@@ -339,6 +351,10 @@ mod tests {
             ("の", '野'),
             ("ま", '真'),
             ("と", '人'),
+            ("ご", '呉'),
+            ("せい", '清'),
+            ("げん", '源'),
+            ("せん", '泉'),
         ]
         .map(|(r, k)| (r.to_owned(), k));
         name_readings(&mozc)
@@ -511,5 +527,48 @@ mod tests {
             cost("とくがわ") < cost("いえやす"),
             "three bear 徳川, two 家康"
         );
+    }
+
+    #[test]
+    fn people_read_by_wikipedia_leads_enter_split_by_the_lead_s_space() {
+        let read_by_leads = "?item\t?kana\t?label\t?links\t?ja\t?birth\n\
+            <http://www.wikidata.org/entity/Q541005>\t\"ご せいげん\"\t\"呉清源\"@ja\t20\t<https://ja.wikipedia.org/wiki/x>\t1914-06-12T00:00:00Z\n\
+            <http://www.wikidata.org/entity/Q9>\t\"ご せん\"\t\"呉泉\"@ja\t1\t<https://ja.wikipedia.org/wiki/y>\t\n";
+        let people = with_people_read_by_leads(Vec::new(), wikidata_people(read_by_leads));
+
+        let dict = person_dictionary(&people, &readings(), &BTreeSet::new());
+
+        let lines: BTreeSet<(&str, &str)> = dict
+            .entries
+            .iter()
+            .map(|e| (e.reading.as_str(), e.surface.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            BTreeSet::from([("ごせいげん", "呉清源"), ("ごせん", "呉泉"), ("ご", "呉")])
+        );
+    }
+
+    #[test]
+    fn a_person_wikidata_reads_keeps_wikidata_s_reading_over_a_lead_s() {
+        let person = |reading: &str, sitelinks| Person {
+            item: "Q1".into(),
+            label: "徳川家康".into(),
+            readings: BTreeSet::from([parts(reading)]),
+            sitelinks,
+            ja_article: true,
+            born: None,
+        };
+        let by_lead = Person {
+            item: "Q2".into(),
+            ..person("とくがわ いえ", 1)
+        };
+
+        let people = with_people_read_by_leads(
+            vec![person("とくがわ いえやす", 90)],
+            vec![person("ほげ", 1), by_lead.clone()],
+        );
+
+        assert_eq!(people, [person("とくがわ いえやす", 90), by_lead]);
     }
 }

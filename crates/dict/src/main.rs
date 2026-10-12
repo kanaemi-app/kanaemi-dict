@@ -28,7 +28,7 @@ use kanaemi_dict::{
     sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take, text_units,
     title_entries, train, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv,
     unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
-    word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -125,6 +125,9 @@ const EMOTICON: &str = "emoticon";
 /// The additional dictionary of person names, taken from Wikidata's people.
 const PERSON: &str = "person";
 const PEOPLE_SOURCE: &str = "wikidata-people";
+/// Wikidata's people with an article in Japanese and no reading, whom the
+/// leads of their articles read.
+const UNREAD_PEOPLE_SOURCE: &str = "wikidata-people-unread";
 /// The additional dictionary of station names, taken from Wikidata's stations.
 const STATION: &str = "station";
 const STATIONS_SOURCE: &str = "wikidata-stations";
@@ -1591,15 +1594,21 @@ fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
                 sources.into_iter().map(String::from).collect(),
             )
         } else if name == PERSON {
-            let people = wikidata_people(&read_to_string(format!(
+            let mut sources = BTreeSet::from([PEOPLE_SOURCE.to_owned(), KANJI_SOURCE.to_owned()]);
+            let mut people = wikidata_people(&read_to_string(format!(
                 "{ADDITIONAL_BUILD}/{name}/people.tsv"
             ))?);
+            let read_by_leads = format!("{ADDITIONAL_BUILD}/{name}/wikipedia-people.tsv");
+            if std::path::Path::new(&read_by_leads).exists() {
+                people = with_people_read_by_leads(
+                    people,
+                    wikidata_people(&read_to_string(read_by_leads)?),
+                );
+                sources.extend([UNREAD_PEOPLE_SOURCE, TITLES_SOURCE].map(String::from));
+            }
             let readings = name_readings(&mozc_readings(&read_to_string(KANJI_TABLE)?));
             let clans = clans(&read_to_string(format!("{ADDITIONAL}/{name}/uji.txt"))?);
-            (
-                person_dictionary(&people, &readings, &clans),
-                BTreeSet::from([PEOPLE_SOURCE.to_owned(), KANJI_SOURCE.to_owned()]),
-            )
+            (person_dictionary(&people, &readings, &clans), sources)
         } else if name == STATION {
             let stations = wikidata_stations(&read_to_string(format!(
                 "{ADDITIONAL_BUILD}/{name}/stations.tsv"

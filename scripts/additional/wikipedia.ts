@@ -4,7 +4,7 @@
  * and the titles and names of every article and redirect for the base.
  */
 import { type Document, documentOf } from "../docs/document.ts";
-import { categoriesOf, dumpPages, isDisambiguation } from "../docs/mediawiki.ts";
+import { categoriesOf, dumpPages, isDisambiguation, type Page } from "../docs/mediawiki.ts";
 import { finishLines, normalize } from "../docs/text.ts";
 import { stripWikitext } from "../docs/wikitext.ts";
 import { HashBudget, keyHash } from "../select.ts";
@@ -43,13 +43,15 @@ export function fieldsOf(
  * disambiguation pages left out. A field takes the documents of its articles
  * in the SHA-256 order of their doc IDs until their characters reach
  * `budget`, with the titles of those articles; a year takes only the titles
- * of its articles.
+ * of its articles. Every article but a redirect is also shown to `visit`,
+ * so that whatever else is taken of the dump is taken in the same pass.
  */
 export async function articlesOf(
   xml: AsyncIterable<string>,
   dictionaries: Dictionary[],
   sourceId: string,
   budget: number,
+  visit?: (page: Page) => void,
 ): Promise<Map<string, Articles>> {
   const wanted = dictionaries.filter((d) => d.patterns !== undefined);
   const fields = new Map(
@@ -61,6 +63,7 @@ export async function articlesOf(
   );
   const articles = dumpPages(xml, (h) => h.ns === "0" && !h.redirect);
   for await (const page of articles) {
+    visit?.(page);
     if (isDisambiguation(page.text)) continue;
     const matched = fieldsOf(categoriesOf(page.text), Number(page.id), wanted);
     if (matched.length === 0) continue;
@@ -158,6 +161,35 @@ export function titleReading(
   return reading && HIRAGANA.test(reading)
     ? { surface: normalized, reading: normalize(reading) }
     : undefined;
+}
+
+const BOLD = /'''(.+?)'''/g;
+const HEADING = /^==/m;
+const NAME_READING = /^[\p{Script=Hiragana}ー]+(?: [\p{Script=Hiragana}ー]+)*$/u;
+
+/**
+ * A person's article title, without its parenthesized qualifier, with the
+ * reading the lead gives right after the first bold run that names the
+ * title, spaces aside: a lead writes a person's name and its reading with a
+ * space between family and given name (呉 清源、ご せいげん), and the
+ * reading keeps that space, as one half-width space. The reading must be
+ * hiragana.
+ */
+export function personReading(
+  title: string,
+  wikitext: string,
+): { surface: string; reading: string } | undefined {
+  const surface = nameOf(title);
+  const name = surface.replace(/\s+/g, "");
+  if (name === "") return undefined;
+  const lead = wikitext.replace(COMMENT, "").split(HEADING)[0];
+  for (const bold of lead.matchAll(BOLD)) {
+    if (normalize(bold[1].replace(/^'+|'+$/g, "").replace(/\s+/g, "")) !== name) continue;
+    const after = lead.slice(bold.index + bold[0].length).match(/^'*\s*[（(]([^、,，）);；]+)/);
+    const reading = after && normalize(after[1].replace(/\s+/g, " ").trim());
+    return reading && NAME_READING.test(reading) ? { surface, reading } : undefined;
+  }
+  return undefined;
 }
 
 function toHiragana(katakana: string): string {

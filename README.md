@@ -42,7 +42,7 @@ dictionaries = ["custom", "kanaemi-base.tsv", "kanaemi-railway.tsv", "kanaemi-it
 | 記号・顔文字 | Mozc の記号の表、顔文字の表 | BSD-3-Clause |
 | 絵文字 | Mozc の絵文字の表（読みは Unicode CLDR から） | BSD-3-Clause、Unicode License v3 |
 | 地名 | 日本郵便の郵便番号データ | 日本郵便は著作権を主張せず、自由に配布できる |
-| 人名 | Wikidata の人物の読み仮名、Mozc の単漢字の表（姓と名を分けるのに使う） | CC0 1.0、BSD-3-Clause |
+| 人名 | Wikidata の人物の読み仮名、読み仮名のない人物の Wikipedia 日本語版の記事の冒頭の読み、Mozc の単漢字の表（姓と名を分けるのに使う） | CC0 1.0、CC BY-SA 4.0、BSD-3-Clause |
 | 駅名 | Wikidata の日本の鉄道駅の読み仮名 | CC0 1.0 |
 
 ## 辞書を作る
@@ -66,7 +66,7 @@ just dictionary --train-only   # 評価と学習に使う、学習用の文書�
 just evaluate                  # 基本辞書を評価し、候補に出ない単位と並びの損失を数え、前の実行と比べる
 
 # 追加辞書
-just additional-fetch          # 郵便番号データ、Mozc の記号・絵文字・顔文字の表、Wikidata の人物と駅、その年の人気エントリーを取得する
+just additional-fetch          # 郵便番号データ、Mozc の記号・絵文字・顔文字の表、Wikidata の人物（読み仮名のない人物も）と駅、その年の人気エントリーを取得する
 just additional-docs           # 追加辞書ごとの文書を取り出す
 just additional                # 追加辞書を作る
 

@@ -1,6 +1,6 @@
 # 人名は Wikidata の読み仮名から取り、人名の追加辞書にする
 
-状態：採用
+状態：採用（読み仮名のない人物の人名は `20261012-supplement-person-names-with-wikipedia-readings.md` で、Wikipedia の記事の冒頭の読みから補う）
 
 ## 背景
 
