@@ -87,7 +87,7 @@ flowchart LR
 | `evaluation-missing-reasons.tsv` | 候補に出なかった単位を、なぜ出なかったかとともに（モデルなしだけ）。理由は、Kanaemi が変換の経緯（`Engine::explain`）で落としたと示す項目のもの（`not-conjugated`、`okurigana-mismatch`、`hidden`、`not-filled`、`shadowed`）、辞書がその表記を、送り仮名を指定して打つ単位ならその表記を作る語幹（食べ の 食べ、書い の 書）を、ほかの読みでだけ持つ（`other-reading`）、辞書にない（`not-in-dictionary`）。数を含む単位は、読みが数を埋め込む前の形なので分けない（`numeric`） |
 | `evaluation-loss-reasons.tsv` | 損失のある読みを、最善の並びの 1 位の表記が、実際に 1 位に出たものになぜ負けたかとともに（モデルなしだけ）。理由は、前の文を打たずに変換したときの経緯（`Engine::explain`）で、送り仮名を指定して出た候補を先にする決まりで負けた（`okuri-first`）、語幹から作る形の上乗せのコストで負けた（`conjugated`）、辞書のコストで負けた（`cost`）、前の文を打たないときは 1 位でない（`in-context`）。数を含む読みは分けない（`numeric`） |
 
-`just evaluate --with NAME...` は、学習用の文書だけの基本辞書の後ろに追加辞書 `build/dictionaries/NAME.tsv` を並べ、打つ人が追加辞書も入れたときにどれだけ候補に出るかを測る。同じ表を、`evaluation-with` で始まる名前で書く（`evaluation-missing-sample.tsv` は書かない）。追加辞書は学習用と評価用に分けずに作るが、分野の追加辞書は基本辞書と別の文書から、人名・地名・記号の追加辞書は文書の外の一覧から作るので、評価用の文書を含まない。
+`just evaluate --with NAME...` は、学習用の文書だけの基本辞書の後ろに追加辞書 `build/dictionaries/NAME.tsv` を並べ、打つ人が追加辞書も入れたときにどれだけ候補に出るかを測る。同じ表を、`evaluation-with` で始まる名前で書く（`evaluation-missing-sample.tsv` は書かない）。追加辞書は学習用と評価用に分けずに作るが、分野の追加辞書は基本辞書と別の文書から、人名・地名・記号の追加辞書は文書の外の一覧から作るので、評価用の文書を含まない。ただ、追加辞書は、評価用の文書も含めた基本辞書が持つ行を持たない。評価用の文書に出る語（出町柳駅）は基本辞書が持つので追加辞書になく、学習用の文書だけの基本辞書と並べると、追加辞書で拾える数を少なく測る。
 
 ## 正解集と確かめの一覧
 
