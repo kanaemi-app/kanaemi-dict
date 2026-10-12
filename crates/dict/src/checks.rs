@@ -577,6 +577,8 @@ mod tests {
                 .iter()
                 .map(|s| Candidate {
                     surface: (*s).into(),
+                    source: None,
+                    preview: None,
                 })
                 .collect()
         }

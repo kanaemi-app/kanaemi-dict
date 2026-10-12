@@ -904,6 +904,8 @@ mod tests {
                 .iter()
                 .map(|c| Candidate {
                     surface: (*c).into(),
+                    source: None,
+                    preview: None,
                 })
                 .collect()
         }
