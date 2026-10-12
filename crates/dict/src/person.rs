@@ -84,13 +84,13 @@ fn split_reading(reading: &str) -> Option<Vec<String>> {
         .filter(|parts| !parts.is_empty())
 }
 
-fn is_name_char(c: char) -> bool {
+pub(crate) fn is_name_char(c: char) -> bool {
     is_kanji(c) || is_hiragana(c) || is_katakana(c) || matches!(c, '々' | 'ー')
 }
 
 /// The leading signed integer of a field, quoted or not (`"9"`, `1955-12-16T…`,
 /// `-0100-01-01T…`).
-fn number(field: &str) -> Option<i64> {
+pub(crate) fn number(field: &str) -> Option<i64> {
     let text = field.trim_start_matches('"');
     let sign = if text.starts_with('-') { -1 } else { 1 };
     let digits: String = text

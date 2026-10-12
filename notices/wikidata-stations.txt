@@ -1,0 +1,4 @@
+Wikidata の駅の読み仮名（P1814）
+https://www.wikidata.org/（QLever https://qlever.dev/ の Wikidata の索引から取った）
+
+駅名の辞書の駅名と読みは、Wikidata の日本の鉄道駅の項目の日本語のラベルと読み仮名から取った。並びには、項目のサイトリンク数を使った。Wikidata の構造化データは CC0 1.0（https://creativecommons.org/publicdomain/zero/1.0/）で提供されている。

@@ -7,7 +7,7 @@
 ## 辞書
 
 - 基本辞書：広い分野の文章から作る辞書。並べ替えのモデルと組で配る。
-- 追加辞書：基本辞書に足して使う辞書。基本辞書にない語だけを持つ。分野の辞書（鉄道、山岳、医療、IT など）、その年の新語の辞書、地名の辞書、法律の辞書、送り仮名の揺れ（小い、行なう）の辞書、記号・絵文字・顔文字の辞書、人名の辞書がある。どの追加辞書があるかは [additional/](additional/) を見る。
+- 追加辞書：基本辞書に足して使う辞書。基本辞書にない語だけを持つ。分野の辞書（鉄道、山岳、医療、IT など）、その年の新語の辞書、地名の辞書、法律の辞書、送り仮名の揺れ（小い、行なう）の辞書、記号・絵文字・顔文字の辞書、人名の辞書、駅名の辞書がある。どの追加辞書があるかは [additional/](additional/) を見る。
 
 ## 使い方
 
@@ -43,6 +43,7 @@ dictionaries = ["custom", "kanaemi-base.tsv", "kanaemi-railway.tsv", "kanaemi-it
 | 絵文字 | Mozc の絵文字の表（読みは Unicode CLDR から） | BSD-3-Clause、Unicode License v3 |
 | 地名 | 日本郵便の郵便番号データ | 日本郵便は著作権を主張せず、自由に配布できる |
 | 人名 | Wikidata の人物の読み仮名、Mozc の単漢字の表（姓と名を分けるのに使う） | CC0 1.0、BSD-3-Clause |
+| 駅名 | Wikidata の日本の鉄道駅の読み仮名 | CC0 1.0 |
 
 ## 辞書を作る
 
@@ -65,7 +66,7 @@ just dictionary --train-only   # 評価と学習に使う、学習用の文書�
 just evaluate                  # 基本辞書を評価し、候補に出ない単位と並びの損失を数え、前の実行と比べる
 
 # 追加辞書
-just additional-fetch          # 郵便番号データ、Mozc の記号・絵文字・顔文字の表、Wikidata の人物、その年の人気エントリーを取得する
+just additional-fetch          # 郵便番号データ、Mozc の記号・絵文字・顔文字の表、Wikidata の人物と駅、その年の人気エントリーを取得する
 just additional-docs           # 追加辞書ごとの文書を取り出す
 just additional                # 追加辞書を作る
 

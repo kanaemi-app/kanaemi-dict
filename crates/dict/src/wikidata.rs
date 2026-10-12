@@ -82,6 +82,17 @@ pub(crate) fn unqualified(label: &str) -> String {
     cut.map_or(label, |at| &label[..at]).trim().to_owned()
 }
 
+/// `reading` of `label` with えき after it when the label is a station's
+/// and the reading is not: many stations read only their name (天王寺駅
+/// てんのうじ).
+pub(crate) fn station_reading(label: &str, reading: &str) -> String {
+    if label.ends_with('駅') && !reading.ends_with("えき") {
+        format!("{reading}えき")
+    } else {
+        reading.to_owned()
+    }
+}
+
 /// A word of the base dictionary that reads none of the ways the Wikidata
 /// items of its surface read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,13 +129,7 @@ pub fn wikidata_mismatches<'a>(
     let mut labels: BTreeMap<&str, Label> = BTreeMap::new();
     for r in readings.iter().filter(|r| has_kanji(&r.label)) {
         let label = labels.entry(r.label.as_str()).or_default();
-        // Many stations read only their name (天王寺駅 てんのうじ).
-        let reading = if r.label.ends_with('駅') && !r.reading.ends_with("えき") {
-            format!("{}えき", r.reading)
-        } else {
-            r.reading.clone()
-        };
-        label.readings.insert(reading);
+        label.readings.insert(station_reading(&r.label, &r.reading));
         label.items.insert(r.item.clone());
         label.p31.extend(r.p31.clone());
     }

@@ -25,9 +25,10 @@ use kanaemi_dict::{
     nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections, parse_word_cases,
     paths_of, person_dictionary, place_dictionary, place_names, plain_words, read_names,
     read_title_entries, read_titles, read_units, reading_form, sample_tsv, shared_readings,
-    sources_file, split_of, take, text_units, title_entries, train, typed_by_analyzer, typed_units,
-    unihan_readings, unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people,
-    wikidata_readings, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    sources_file, split_of, station_dictionary, take, text_units, title_entries, train,
+    typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv, unnamed_words,
+    wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations, word_misses_tsv,
+    word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -119,6 +120,9 @@ const EMOTICON: &str = "emoticon";
 /// The additional dictionary of person names, taken from Wikidata's people.
 const PERSON: &str = "person";
 const PEOPLE_SOURCE: &str = "wikidata-people";
+/// The additional dictionary of station names, taken from Wikidata's stations.
+const STATION: &str = "station";
+const STATIONS_SOURCE: &str = "wikidata-stations";
 /// The sources every dictionary read with the analyzer has: the analyzer's
 /// dictionary, the dictionary that checks its readings, and the UniDic
 /// lexicon they are checked against and the base takes words from, and the
@@ -1552,6 +1556,14 @@ fn build_additional(names: &[&str]) -> Result<(), Error> {
             (
                 person_dictionary(&people, &readings, &clans),
                 BTreeSet::from([PEOPLE_SOURCE.to_owned(), KANJI_SOURCE.to_owned()]),
+            )
+        } else if name == STATION {
+            let stations = wikidata_stations(&read_to_string(format!(
+                "{ADDITIONAL_BUILD}/{name}/stations.tsv"
+            ))?);
+            (
+                station_dictionary(&stations),
+                BTreeSet::from([STATIONS_SOURCE.to_owned()]),
             )
         } else if name == PLACE {
             (
