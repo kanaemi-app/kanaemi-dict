@@ -1,0 +1,2 @@
+# sha256 70ea56c5651fd13795fbaa3947abcdfe8b2c63c415282ab815e83e9522df6ce1
+wikidata-stations
