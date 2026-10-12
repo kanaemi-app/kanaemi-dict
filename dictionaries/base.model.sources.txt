@@ -1,4 +1,4 @@
-# sha256 f16abe54ea219b887c5bca348beba1099699dcb08f8c9da8ccba4ded126e3aa6
+# sha256 93d17cad179b853816eb63fae00fd33a728346fe2db777f97b2c2caf67874b32
 # pairs 9aeeee374c22a68e79fed4d75e52d5cca302f7b64ad29e2a7e1c03694e8a8b19
 aozora-text
 egov-all-xml
