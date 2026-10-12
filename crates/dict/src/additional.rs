@@ -424,10 +424,17 @@ pub fn field_dictionary(units: &[Unit], titles: &[Title], texts: &[String]) -> D
         .collect();
     let mut dictionary = Dictionary::build(&units, &[]);
     let added: Vec<Entry> = {
+        // A line conjugated forms make (笑い of 笑う) is not the word written
+        // whole a title is, so the title still costs it.
         let have: HashSet<(&str, &str)> = dictionary
             .entries
             .iter()
-            .filter(|e| e.conjugation.is_none())
+            .filter(|e| {
+                e.conjugation.is_none()
+                    && !dictionary
+                        .whole_forms
+                        .contains_key(&(e.reading.clone(), e.surface.clone()))
+            })
             .map(|e| (e.reading.as_str(), e.surface.as_str()))
             .collect();
         title_entries(titles, texts.iter().map(String::as_str), units.len())
@@ -435,8 +442,7 @@ pub fn field_dictionary(units: &[Unit], titles: &[Title], texts: &[String]) -> D
             .filter(|e| !have.contains(&(e.reading.as_str(), e.surface.as_str())))
             .collect()
     };
-    dictionary.entries.extend(added);
-    dictionary.okuri = okuri_lines(&dictionary.entries, dictionary.rare_cost);
+    dictionary.add_words(added);
     dictionary
 }
 
@@ -881,6 +887,36 @@ mod build_tests {
             .map(|e| e.surface.as_str())
             .collect();
         assert_eq!(surfaces, ["構造"]);
+    }
+
+    #[test]
+    fn a_title_spelled_as_a_conjugated_form_costs_as_the_title() {
+        let form = Unit {
+            stem_reading: Some("わら".into()),
+            stem_surface: Some("笑".into()),
+            conjugation: Some("五段-ワア行".into()),
+            ..word("わらい", "笑い")
+        };
+        let titles = [title("わらい", "笑い")];
+        let texts = ["笑い。笑い。".to_owned()];
+        for forms in [1, 2] {
+            let units: Vec<Unit> = std::iter::repeat_n(form.clone(), forms)
+                .chain([word("こうぞう", "構造"), word("こうぞう", "構造")])
+                .collect();
+
+            let dictionary = field_dictionary(&units, &titles, &texts);
+
+            let line = dictionary
+                .to_text("t")
+                .lines()
+                .find(|l| l.starts_with("わらい\t笑い\t\t"))
+                .map(str::to_owned);
+            assert_eq!(
+                line,
+                Some(format!("わらい\t笑い\t\t{}", cost_of(2, units.len()))),
+                "{forms} form(s)"
+            );
+        }
     }
 
     #[test]

@@ -59,6 +59,13 @@ pub struct Dictionary {
     /// units the dictionary counts, or comes from UniDic alone; `None` for a
     /// dictionary not counted from units.
     pub rare_cost: Option<u32>,
+    /// The cost of the line of each word written whole that conjugated forms
+    /// also count (書く under かく), in place of its entry's. The
+    /// documents type a conjugated form with its okurigana marked (か*く), so
+    /// the line costs as the units written whole alone, or, when those are
+    /// too few to enter, behind every word met at least [`MIN_COUNT`] times.
+    /// The entry keeps the cost of both, which its okurigana line takes.
+    pub whole_forms: HashMap<(String, String), u32>,
     pub report: Report,
 }
 
@@ -233,6 +240,7 @@ impl Dictionary {
         // A whole form and a plain word with the same reading and surface are
         // one item, so they share one count.
         let mut counts: HashMap<Key, usize> = HashMap::new();
+        let mut form_counts: HashMap<(String, String), usize> = HashMap::new();
         let mut numeric_counts: HashMap<(String, String), usize> = HashMap::new();
         let mut numeric_written: HashMap<String, usize> = HashMap::new();
         let mut surfaces: HashMap<String, usize> = HashMap::new();
@@ -279,6 +287,9 @@ impl Dictionary {
                 *counts
                     .entry((unit.reading.clone(), unit.surface.clone(), None))
                     .or_default() += 1;
+                *form_counts
+                    .entry((unit.reading.clone(), unit.surface.clone()))
+                    .or_default() += 1;
             }
             let okuri = unit
                 .surface
@@ -312,6 +323,23 @@ impl Dictionary {
             }
         }
 
+        let rare_cost = (total > 0).then(|| cost_of(MIN_COUNT, total));
+        // UniDic and the lexicon read a conjugated form as a word too (無い as
+        // ない), so their costs, which can come ahead of rare counted words,
+        // are not taken for these lines.
+        let whole_forms: HashMap<(String, String), u32> = form_counts
+            .into_iter()
+            .map(|((reading, surface), forms)| {
+                let count = counts[&(reading.clone(), surface.clone(), None)];
+                let whole = count.saturating_sub(forms);
+                let cost = if whole >= MIN_COUNT {
+                    cost_of(whole, total)
+                } else {
+                    cost_of(count, total) + rare_cost.unwrap_or_default()
+                };
+                ((reading, surface), cost)
+            })
+            .collect();
         let mut costs: HashMap<Key, u32> = HashMap::new();
         for (key, count) in counts {
             if count >= MIN_COUNT {
@@ -353,7 +381,6 @@ impl Dictionary {
             })
             .collect();
 
-        let rare_cost = (total > 0).then(|| cost_of(MIN_COUNT, total));
         Self {
             okuri: okuri_lines(&entries, rare_cost),
             numeric: numeric_entries(numeric_counts, total),
@@ -364,6 +391,7 @@ impl Dictionary {
                 .collect(),
             entries,
             rare_cost,
+            whole_forms,
             report: Report {
                 unknown_conjugations: unknown.into_iter().collect(),
                 disallowed_okurigana: disallowed
@@ -417,6 +445,13 @@ impl Dictionary {
             })
             .collect();
         for word in words {
+            if word.conjugation.is_none()
+                && let Some(whole) = self
+                    .whole_forms
+                    .get_mut(&(word.reading.clone(), word.surface.clone()))
+            {
+                *whole = (*whole).min(word.cost);
+            }
             let key = (
                 word.reading.clone(),
                 word.surface.clone(),
@@ -438,6 +473,8 @@ impl Dictionary {
     pub fn drop_words(&mut self, drops: impl Fn(&str, &str) -> bool) {
         self.entries.retain(|e| !drops(&e.reading, &e.surface));
         self.okuri.retain(|e| !drops(&e.reading, &e.surface));
+        self.whole_forms
+            .retain(|(reading, surface), _| !drops(reading, surface));
     }
 
     /// The dictionary as Kanaemi's text dictionary, described as the official
@@ -465,8 +502,25 @@ impl Dictionary {
                 })
             })
             .collect();
-        let mut lines: Vec<(&Entry, LineKind)> = self
+        let words: Vec<Entry> = self
             .entries
+            .iter()
+            .map(|e| {
+                let whole = e
+                    .conjugation
+                    .is_none()
+                    .then(|| {
+                        self.whole_forms
+                            .get(&(e.reading.clone(), e.surface.clone()))
+                    })
+                    .flatten();
+                Entry {
+                    cost: whole.copied().unwrap_or(e.cost),
+                    ..e.clone()
+                }
+            })
+            .collect();
+        let mut lines: Vec<(&Entry, LineKind)> = words
             .iter()
             .map(|e| (e, LineKind::Word))
             .chain(numeric.iter().map(|e| (e, LineKind::Numeric)))
@@ -1549,6 +1603,63 @@ mod tests {
             cost(3, 13)
         );
         assert_eq!(dict.rare_cost, Some(cost(2, 13)));
+    }
+
+    /// The cost of the line `reading surface` with no conjugation type in
+    /// `dict`'s text.
+    fn line_cost(dict: &Dictionary, reading: &str, surface: &str) -> Option<u32> {
+        dict.to_text("t").lines().find_map(|line| {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields[..] {
+                [r, s, "", c] if r == reading && s == surface => c.parse().ok(),
+                _ => None,
+            }
+        })
+    }
+
+    #[test]
+    fn a_conjugated_form_typed_whole_comes_behind_every_counted_word_of_its_reading() {
+        let units: Vec<Unit> = [
+            repeat(conj("かく", "書く", ("か", "書"), "五段-カ行"), 5),
+            repeat(word("かく", "各"), 2),
+            repeat(conj("かく", "描く", ("か", "描"), "五段-カ行"), 1),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[unidic("かく", "書く"), unidic("かく", "描く")]);
+
+        assert_eq!(line_cost(&dict, "かく", "各"), Some(cost(2, 8)));
+        assert_eq!(
+            line_cost(&dict, "かく", "書く"),
+            Some(cost(5, 8) + cost(2, 8)),
+        );
+        assert_eq!(
+            line_cost(&dict, "かく", "描く"),
+            Some(cost(1, 8) + cost(2, 8)),
+            "a form met once, which UniDic brings in, stays behind the forms met more",
+        );
+        assert_eq!(
+            find(&dict.okuri, "か*く", "書く").unwrap().cost,
+            cost(5, 8),
+            "typed with its okurigana, the form keeps its count",
+        );
+    }
+
+    #[test]
+    fn a_word_written_whole_as_often_as_a_word_enters_costs_by_those_units_alone() {
+        let units: Vec<Unit> = [
+            repeat(conj("わらい", "笑い", ("わら", "笑"), "五段-ワア行"), 5),
+            repeat(word("わらい", "笑い"), 2),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(line_cost(&dict, "わらい", "笑い"), Some(cost(2, 7)));
+        assert_eq!(
+            find(&dict.okuri, "わら*い", "笑い").unwrap().cost,
+            cost(7, 7)
+        );
     }
 
     #[test]

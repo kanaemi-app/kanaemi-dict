@@ -203,12 +203,13 @@ fn push_typing(
 }
 
 /// The other ways a unit may be typed. A conjugating unit, typed with the
-/// first kana of its okurigana marked, also whole (かいた for 書いた), and
-/// with all of its okurigana marked (か*いた) when that is more than the
-/// first kana. A numeric unit with its number in kanji, typed with the number
-/// as digits, also with the number in kana (にほん for 二本). Without them the
-/// model sees such a form only as a wrong candidate of another word typed
-/// whole, and learns to put it last.
+/// first kana of its okurigana marked, also with all of its okurigana marked
+/// (か*いた for 書いた) when that is more than the first kana; not whole
+/// (かいた), which a typist types for a word written whole (各 for かく). A
+/// numeric unit with its number in kanji, typed with the number as digits,
+/// also with the number in kana (にほん for 二本). Without them the model sees
+/// such a form only as a wrong candidate of another word typed whole, and
+/// learns to put it last.
 fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
     if let Some(numeric) = &unit.numeric {
         if !numeric.surface.contains("{kanji}") || numeric.kana.is_empty() {
@@ -223,11 +224,6 @@ fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
     if query.okurigana.is_none() {
         return Vec::new();
     }
-    let whole = Query {
-        reading: unit.reading.clone(),
-        okurigana: None,
-        expected: unit.surface.clone(),
-    };
     let okurigana: String = {
         let mut kana: Vec<char> = unit
             .surface
@@ -239,14 +235,13 @@ fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
         kana.into_iter().collect()
     };
     if okurigana.chars().count() < 2 || !unit.reading.ends_with(&okurigana) {
-        return vec![whole];
+        return Vec::new();
     }
-    let marked = Query {
+    vec![Query {
         reading: unit.reading.clone(),
         okurigana: Some(okurigana),
         expected: unit.surface.clone(),
-    };
-    vec![whole, marked]
+    }]
 }
 
 /// Examples kept as blocks, each loaded whole when trained on, so that only
@@ -533,19 +528,16 @@ mod tests {
     }
 
     #[test]
-    fn a_conjugated_form_is_also_typed_whole_and_with_all_its_okurigana() {
+    fn a_conjugated_form_is_also_typed_with_all_its_okurigana_but_never_whole() {
         let form = conjugated(0, "かいた", "書いた", ("か", "書"));
         assert_eq!(
             other_typings(&form, &query_of(&form)),
-            [
-                typing("かいた", None, "書いた"),
-                typing("かいた", Some("いた"), "書いた")
-            ]
+            [typing("かいた", Some("いた"), "書いた")]
         );
         let terminal = conjugated(0, "かく", "書く", ("か", "書"));
         assert_eq!(
             other_typings(&terminal, &query_of(&terminal)),
-            [typing("かく", None, "書く")],
+            [],
             "く alone is the first kana already"
         );
         let word = unit(0, "てがみ", "手紙");
@@ -564,12 +556,12 @@ mod tests {
 
         let examples = examples_of_document(&engine, &units, "書いた漢");
 
-        assert_eq!(examples.len(), 8, "3 typings of 書いた and 漢, each twice");
+        assert_eq!(examples.len(), 6, "2 typings of 書いた and 漢, each twice");
         let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
         assert!(correct_of(0).contains(&index("rs\u{1f}かいた\u{1f}書いた")));
-        assert!(correct_of(4).contains(&index("rs\u{1f}かい\u{1f}書い")));
+        assert!(correct_of(2).contains(&index("rs\u{1f}かい\u{1f}書い")));
         assert!(
-            correct_of(6).contains(&index("hc\u{1f}1\u{1f}漢")),
+            correct_of(4).contains(&index("hc\u{1f}1\u{1f}漢")),
             "one commit before 漢"
         );
     }

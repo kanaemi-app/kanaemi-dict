@@ -1,6 +1,6 @@
 # 並べ替えのモデルは、活用する語の形を打つどの打ち方でも学習する
 
-状態：採用
+状態：一部置き換え（そのまま打つ打ち方での学習は `20261012-rank-conjugated-forms-typed-whole-behind-the-words-of-their-reading.md` でやめた）
 
 ## 背景
 
