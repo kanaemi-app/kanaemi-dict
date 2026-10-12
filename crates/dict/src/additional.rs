@@ -464,7 +464,7 @@ pub fn year_dictionary(
     let entries = title_entries(&titles, year.iter().map(String::as_str), units);
     let rare_cost = (units > 0).then(|| cost_of(MIN_COUNT, units));
     Dictionary {
-        okuri: okuri_lines(&entries, rare_cost),
+        okuri: okuri_lines(&entries, rare_cost, |_| false),
         entries,
         rare_cost,
         ..Default::default()

@@ -390,7 +390,7 @@ impl Dictionary {
             .collect();
 
         Self {
-            okuri: okuri_lines(&entries, rare_cost),
+            okuri: okuri_lines(&entries, rare_cost, typed_marked(&whole_forms)),
             numeric: numeric_entries(numeric_counts, total),
             numeric_written: numeric_written
                 .into_iter()
@@ -473,7 +473,11 @@ impl Dictionary {
                 }
             }
         }
-        self.okuri = okuri_lines(&self.entries, self.rare_cost);
+        self.okuri = okuri_lines(
+            &self.entries,
+            self.rare_cost,
+            typed_marked(&self.whole_forms),
+        );
     }
 
     /// Removes the words `drops` tells by their reading and surface, with
@@ -672,29 +676,51 @@ pub fn nihon_readings(entries: &[Entry]) -> Vec<Entry> {
         .collect()
 }
 
+/// Whether an entry is typed with its okurigana marked: a stem, or a word
+/// written whole that conjugated forms count (see
+/// [`Dictionary::whole_forms`]).
+fn typed_marked(whole_forms: &HashMap<(String, String), u32>) -> impl Fn(&Entry) -> bool + '_ {
+    |e| e.conjugation.is_some() || whole_forms.contains_key(&(e.reading.clone(), e.surface.clone()))
+}
+
 /// The okurigana lines of `entries`, each at the cheapest cost of the
 /// entries it follows from, but for a line of one kanji costing `rare_cost` or
 /// more, which is mostly kana written for a kanji (祈とう, 気っぷ) rather than
-/// okurigana.
-pub(crate) fn okuri_lines(entries: &[Entry], rare_cost: Option<u32>) -> Vec<Entry> {
-    let mut okuri: BTreeMap<(String, String), u32> = BTreeMap::new();
+/// okurigana. A line that follows only from words the documents type whole,
+/// as `typed_marked` tells them from the forms typed with their okurigana
+/// marked (長さ, 来て), costs `rare_cost` more, behind every word met at
+/// least [`MIN_COUNT`] times that is typed so (流さ, 着て).
+pub(crate) fn okuri_lines(
+    entries: &[Entry],
+    rare_cost: Option<u32>,
+    typed_marked: impl Fn(&Entry) -> bool,
+) -> Vec<Entry> {
+    // The cheapest cost of each line, and of the entries typed marked.
+    let mut okuri: BTreeMap<(String, String), (u32, Option<u32>)> = BTreeMap::new();
     for entry in entries {
         if let Some(key) = okuri_line(&entry.reading, &entry.surface) {
+            let marked = typed_marked(entry).then_some(entry.cost);
             okuri
                 .entry(key)
-                .and_modify(|c| *c = (*c).min(entry.cost))
-                .or_insert(entry.cost);
+                .and_modify(|(c, m)| {
+                    *c = (*c).min(entry.cost);
+                    *m = match (*m, marked) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                })
+                .or_insert((entry.cost, marked));
         }
     }
     okuri
         .into_iter()
-        .filter(|((_, surface), cost)| {
+        .filter(|((_, surface), (cost, _))| {
             surface.chars().count() > 2 || rare_cost.is_none_or(|rare| *cost < rare)
         })
-        .map(|((reading, surface), cost)| Entry {
+        .map(|((reading, surface), (cost, marked))| Entry {
             reading,
             surface,
-            cost,
+            cost: marked.unwrap_or(cost + rare_cost.unwrap_or_default()),
             conjugation: None,
         })
         .collect()
@@ -1227,7 +1253,7 @@ mod tests {
         ];
 
         assert_eq!(
-            okuri_lines(&entries, None),
+            okuri_lines(&entries, None, |_| true),
             [entry("だんちょうのおも*い", "断腸の思い", None, 700)]
         );
     }
@@ -1703,6 +1729,27 @@ mod tests {
     }
 
     #[test]
+    fn an_okurigana_line_of_words_typed_whole_alone_comes_behind_the_forms_typed_marked() {
+        let units: Vec<Unit> = [
+            repeat(word("ながさ", "長さ"), 5),
+            repeat(conj("ながさ", "流さ", ("なが", "流"), "五段-サ行"), 3),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(
+            find(&dict.okuri, "なが*さ", "流さ").unwrap().cost,
+            cost(3, 8)
+        );
+        assert_eq!(
+            find(&dict.okuri, "なが*さ", "長さ").unwrap().cost,
+            cost(5, 8) + cost(2, 8),
+            "長さ is typed ながさ, not with its okurigana marked"
+        );
+    }
+
+    #[test]
     fn one_kanji_lines_of_rare_words_are_left_out() {
         let entries = [
             entry("きとう", "祈とう", None, 1631),
@@ -1712,7 +1759,7 @@ mod tests {
         ];
 
         let lines = |rare| -> Vec<(String, String)> {
-            okuri_lines(&entries, rare)
+            okuri_lines(&entries, rare, |_| false)
                 .into_iter()
                 .map(|e| (e.reading, e.surface))
                 .collect()
