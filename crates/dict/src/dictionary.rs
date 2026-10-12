@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use kanaemi_engine::{InvalidLine, ItemLine, TextDictionary, mark_placeholders, may_follow_stem};
 
-use crate::kana::{HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji};
+use crate::kana::{HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji, unvoiced};
 use crate::{UnidicWord, Unit};
 
 /// The label of the base dictionary in its description line.
@@ -383,6 +383,27 @@ impl Dictionary {
 
     /// Adds `words` that no unit made, keeping the smaller cost of a word
     /// already there, with their okurigana lines.
+    /// Adds `entries` to the numeric items; a line already there keeps the
+    /// smaller cost.
+    pub fn add_numeric(&mut self, entries: impl IntoIterator<Item = Entry>) {
+        let mut at: HashMap<(String, String), usize> = self
+            .numeric
+            .iter()
+            .enumerate()
+            .map(|(i, e)| ((e.reading.clone(), e.surface.clone()), i))
+            .collect();
+        for entry in entries {
+            let key = (entry.reading.clone(), entry.surface.clone());
+            match at.get(&key) {
+                Some(&i) => self.numeric[i].cost = self.numeric[i].cost.min(entry.cost),
+                None => {
+                    at.insert(key, self.numeric.len());
+                    self.numeric.push(entry);
+                }
+            }
+        }
+    }
+
     pub fn add_words(&mut self, words: impl IntoIterator<Item = Entry>) {
         let mut at: HashMap<Key, usize> = self
             .entries
@@ -616,10 +637,14 @@ pub(crate) fn okuri_lines(entries: &[Entry], rare_cost: Option<u32>) -> Vec<Entr
         .collect()
 }
 
-/// Numeric entries from their counts, each with the readings whose first kana
-/// after the number is another of its plain, voiced and semi-voiced forms
-/// (`{}ほん` and `{}ぼん` from `{}ぽん`), as the reading changes with the
-/// number before it. A reading met more than once keeps its smallest cost.
+/// Numeric entries from their counts. A counter of the は row also takes the
+/// readings whose first kana after the number is another of its plain, voiced
+/// and semi-voiced forms (`{}ほん` and `{}ぼん` from `{}ぽん`), as it changes
+/// with the number before it: the analyzer reads 本 as ぽん after any number.
+/// No other row voices after a number by rule (回 stays かい); one that does
+/// after some numbers (三階 as さんがい) takes its voiced lines from the small
+/// counted words (see [`crate::counted_voicings`]). A reading met more than
+/// once keeps its smallest cost.
 fn numeric_entries(counts: HashMap<(String, String), usize>, total: usize) -> Vec<Entry> {
     let mut costs: BTreeMap<(String, String), u32> = BTreeMap::new();
     for ((reading, surface), count) in counts {
@@ -627,7 +652,12 @@ fn numeric_entries(counts: HashMap<(String, String), usize>, total: usize) -> Ve
             continue;
         }
         let cost = cost_of(count, total);
-        for reading in voicings(&reading) {
+        let readings = if voices_freely(&reading) {
+            voicings(&reading)
+        } else {
+            vec![reading]
+        };
+        for reading in readings {
             costs
                 .entry((reading, surface.clone()))
                 .and_modify(|c| *c = (*c).min(cost))
@@ -645,10 +675,19 @@ fn numeric_entries(counts: HashMap<(String, String), usize>, total: usize) -> Ve
         .collect()
 }
 
+/// Whether the first kana after the first `{}` of `reading` is of the は row,
+/// voiced or not.
+fn voices_freely(reading: &str) -> bool {
+    reading
+        .split_once("{}")
+        .and_then(|(_, after)| after.chars().next())
+        .is_some_and(|first| "はひふへほ".contains(unvoiced(first)))
+}
+
 /// `reading` with the first kana after its first `{}` in each of its plain,
 /// voiced and semi-voiced forms; `reading` alone when that kana has no other
 /// form.
-fn voicings(reading: &str) -> Vec<String> {
+pub(crate) fn voicings(reading: &str) -> Vec<String> {
     let family = reading.split_once("{}").and_then(|(before, after)| {
         let mut chars = after.chars();
         let first = chars.next()?;
@@ -982,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn a_numeric_entry_takes_every_voicing_of_the_first_kana_after_the_number() {
+    fn a_numeric_entry_of_the_ha_row_takes_every_voicing_and_no_other_does() {
         let units: Vec<Unit> = [
             repeat(counted("3ぽん", "3本", ("{}ぽん", "{}本", "3")), 2),
             repeat(
@@ -1006,16 +1045,32 @@ mod tests {
         assert_eq!(
             items,
             [
-                ("{}かつ", "{}月", c),
                 ("{}がつ", "{}月", c),
                 ("{}にん", "{}人", c),
                 ("{}ほん", "{}本", c),
                 ("{}ぼん", "{}本", c),
                 ("{}ぽん", "{}本", c),
                 ("だい{}かい", "第{}回", c),
-                ("だい{}がい", "第{}回", c),
             ]
         );
+    }
+
+    #[test]
+    fn added_numeric_entries_keep_the_smaller_cost_of_a_line_met_twice() {
+        let mut dict = Dictionary::build(
+            repeat(counted("3かい", "3階", ("{}かい", "{}階", "3")), 2),
+            &[],
+        );
+        let kept = dict.numeric[0].cost;
+
+        dict.add_numeric([
+            entry("{}がい", "{}階", None, 900),
+            entry("{}かい", "{}階", None, kept + 1),
+        ]);
+
+        assert_eq!(find(&dict.numeric, "{}がい", "{}階").unwrap().cost, 900);
+        assert_eq!(find(&dict.numeric, "{}かい", "{}階").unwrap().cost, kept);
+        assert_eq!(dict.numeric.len(), 2);
     }
 
     #[test]
@@ -1032,7 +1087,11 @@ mod tests {
 
         let cost_of = |reading, surface| find(&dict.numeric, reading, surface).unwrap().cost;
         assert_eq!(cost_of("{}ぼん", "{}本"), cost(5, 14));
-        assert_eq!(cost_of("{}こ", "{}個"), cost(5, 14));
+        assert_eq!(
+            cost_of("{}こ", "{}個"),
+            cost(2, 14),
+            "a counter of the か row is no voicing of another reading"
+        );
         assert_eq!(cost_of("{}ご", "{}個"), cost(5, 14));
     }
 

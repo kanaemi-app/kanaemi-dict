@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::dictionary::voicings;
 use crate::kana::{
     HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji, is_katakana, is_reading_kana,
     unvoiced,
@@ -130,6 +131,91 @@ pub fn counted_words<E>(
     }
     words.sort_by(|a, b| (&a.reading, &a.surface).cmp(&(&b.reading, &b.surface)));
     Ok(words)
+}
+
+/// The voiced numeric lines of the counters a word of `words` of one to ten
+/// with the counter (a small counted word, or a unit the analyzer reads
+/// whole, as 三軒) reads voiced at their head, against the rule (三階 as
+/// さんがい): each
+/// numeric item of such a counter, in every notation of the number, with the
+/// head voiced as the word reads it, at the item's cost. A typist who types
+/// `3がい` means 3階 as one who types さんがい means 三階.
+pub fn counted_voicings<'a>(
+    numeric: &[Entry],
+    words: impl IntoIterator<Item = &'a Entry>,
+) -> Vec<Entry> {
+    // The readings of each word of one of the numbers and something after it.
+    let mut read: HashMap<&str, Vec<&str>> = HashMap::new();
+    for w in words {
+        if NUMBERS.iter().any(|n| w.surface.starts_with(n)) {
+            read.entry(w.surface.as_str())
+                .or_default()
+                .push(w.reading.as_str());
+        }
+    }
+    let mut voiced: Vec<Entry> = Vec::new();
+    for entry in numeric {
+        // The counter after the one placeholder, a prefix before it or not
+        // (約{half-num}軒 read やく{}けん).
+        let Some((_, counter)) = entry.surface.split_once('}') else {
+            continue;
+        };
+        if counter.contains('{') || entry.reading.matches("{}").count() != 1 {
+            continue;
+        }
+        // Only an unvoiced reading voices: 段 read だん takes no たん.
+        let first = |reading: &str| {
+            reading
+                .split_once("{}")
+                .and_then(|(_, after)| after.chars().next())
+        };
+        if first(&entry.reading).is_none_or(|c| unvoiced(c) != c) {
+            continue;
+        }
+        for reading in voicings(&entry.reading) {
+            let after = reading.split_once("{}").map_or("", |(_, after)| after);
+            // A word of a number and the head of the counter (三軒 for 軒当たり)
+            // read ending in at least as many kana of `after` as the head has
+            // characters (げん of げんあたり).
+            let read_so = counter
+                .char_indices()
+                .skip(1)
+                .map(|(i, _)| i)
+                .chain([counter.len()])
+                .any(|end| {
+                    let head = &counter[..end];
+                    let least = head.chars().count();
+                    NUMBERS.iter().any(|n| {
+                        read.get(format!("{n}{head}").as_str())
+                            .is_some_and(|readings| {
+                                readings.iter().any(|r| {
+                                    after
+                                        .char_indices()
+                                        .map(|(i, _)| i)
+                                        .chain([after.len()])
+                                        .skip(least)
+                                        .any(|cut| r.ends_with(&after[..cut]))
+                                })
+                            })
+                    })
+                });
+            if reading == entry.reading
+                || !read_so
+                || voiced
+                    .iter()
+                    .any(|v| v.reading == reading && v.surface == entry.surface)
+            {
+                continue;
+            }
+            voiced.push(Entry {
+                reading,
+                surface: entry.surface.clone(),
+                conjugation: None,
+                cost: entry.cost,
+            });
+        }
+    }
+    voiced
 }
 
 /// The counters of the numeric items that start with their one placeholder
@@ -311,6 +397,90 @@ mod tests {
     fn a_counter_of_another_sound_changes_nothing() {
         assert_eq!(sound_changes("いち", "まい"), "いちまい");
         assert_eq!(sound_changes("さん", "ばい"), "さんばい");
+    }
+
+    fn line(reading: &str, surface: &str, cost: u32) -> Entry {
+        Entry {
+            reading: reading.into(),
+            surface: surface.into(),
+            conjugation: None,
+            cost,
+        }
+    }
+
+    #[test]
+    fn a_counter_a_counted_word_voices_takes_the_voiced_numeric_lines_of_every_notation() {
+        let numeric = [
+            line("{}かい", "{half-num}階", 900),
+            line("{}かい", "{kanji}階", 1000),
+            line("{}かい", "{half-num}回", 800),
+            line("{}けん", "{half-num}軒", 1200),
+        ];
+        let words = [
+            line("さんがい", "三階", 1500),
+            line("いっかい", "一階", 1500),
+            line("さんかい", "三回", 1500),
+            line("さんけん", "三軒", 1500),
+        ];
+
+        let voiced = counted_voicings(&numeric, &words);
+
+        assert_eq!(
+            voiced,
+            [
+                line("{}がい", "{half-num}階", 900),
+                line("{}がい", "{kanji}階", 1000),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_counter_with_words_after_it_voices_as_the_counter_alone_does() {
+        let numeric = [
+            line("{}けんあたり", "{kanji}軒当たり", 1600),
+            line("{}かいだて", "{half-num}階建て", 1500),
+        ];
+        let words = [
+            line("さんげん", "三軒", 1294),
+            line("さんがい", "三階", 1146),
+        ];
+
+        assert_eq!(
+            counted_voicings(&numeric, &words),
+            [
+                line("{}げんあたり", "{kanji}軒当たり", 1600),
+                line("{}がいだて", "{half-num}階建て", 1500),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_voiced_form_of_an_unvoiced_reading_is_added() {
+        let numeric = [line("{}だん", "{half-num}段", 1300)];
+        let words = [line("いったん", "一段", 1500)];
+
+        assert_eq!(counted_voicings(&numeric, &words), []);
+    }
+
+    #[test]
+    fn a_numeric_item_with_a_prefix_takes_the_voiced_line_with_its_prefix() {
+        let numeric = [line("やく{}けん", "約{half-num}軒", 1500)];
+        let words = [line("さんげん", "三軒", 1294)];
+
+        let voiced = counted_voicings(&numeric, &words);
+
+        assert_eq!(voiced, [line("やく{}げん", "約{half-num}軒", 1500)]);
+    }
+
+    #[test]
+    fn a_word_of_the_dictionary_beside_the_counted_words_also_voices_its_counter() {
+        let numeric = [line("{}けん", "{half-num}軒", 1150)];
+        let entries = [line("さんげん", "三軒", 1294), line("てがみ", "手紙", 900)];
+        let counted = [line("いっけん", "一軒", 1380)];
+
+        let voiced = counted_voicings(&numeric, entries.iter().chain(&counted));
+
+        assert_eq!(voiced, [line("{}げん", "{half-num}軒", 1150)]);
     }
 
     fn readings(words: &[(&str, &str)]) -> UnidicReadings {

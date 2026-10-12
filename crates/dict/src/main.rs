@@ -15,18 +15,18 @@ use kanaemi_dict::{
     EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, ReadingsError,
     RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WriteError, agreement, check_words,
-    clans, common_words, correction_uses, correction_uses_tsv, counted_reading, counted_words,
-    counter_words, cut_documents, dictionary_lines, document_sources, document_texts,
-    each_document_with_units, engine, eval_documents, evaluate_documents, examples_of_document,
-    excluded_readings, field_dictionary, fragment_surfaces, gather, is_word, kanji_entries,
-    listed_dictionary, mismatches_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings,
-    mozc_symbols, name_readings, nihon_readings, okurigana_dictionary, parse_corrections,
-    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
-    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
-    shared_readings, sources_file, split_of, take, text_units, title_entries, train,
-    typed_as_entries, typed_units, unihan_readings, unnamed_words, wikidata_mismatches,
-    wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv, write_atomically,
-    year_dictionary,
+    clans, common_words, correction_uses, correction_uses_tsv, counted_reading, counted_voicings,
+    counted_words, counter_words, cut_documents, dictionary_lines, document_sources,
+    document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
+    examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
+    kanji_entries, listed_dictionary, mismatches_tsv, model_file, mozc_emoji, mozc_emoticons,
+    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
+    parse_corrections, parse_word_cases, paths_of, person_dictionary, place_dictionary,
+    place_names, plain_words, read_names, read_title_entries, read_titles, read_units,
+    reading_form, sample_tsv, shared_readings, sources_file, split_of, take, text_units,
+    title_entries, train, typed_as_entries, typed_units, unihan_readings, unnamed_words,
+    wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv,
+    write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -496,6 +496,13 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 source,
             })?
         };
+        let before = dictionary.numeric.len();
+        let voiced = counted_voicings(
+            &dictionary.numeric,
+            dictionary.entries.iter().chain(&counted),
+        );
+        dictionary.add_numeric(voiced);
+        println!("counted voicings: {}", dictionary.numeric.len() - before);
         dictionary.add_words(counted);
         let nihon = nihon_readings(&dictionary.entries);
         println!("nihon: {}", nihon.len());
