@@ -266,6 +266,14 @@ impl Dictionary {
             }
             if let Some(t) = &unit.unknown_conjugation {
                 *unknown.entry(t.clone()).or_default() += 1;
+                // Kanaemi cannot conjugate the type, so the form is typed
+                // whole, as a word outside the table is (如く, 若き). One in
+                // kanji alone is mostly misread (深 as こし of 深掘り).
+                if okuri_line(&unit.reading, &unit.surface).is_some() {
+                    *counts
+                        .entry((unit.reading.clone(), unit.surface.clone(), None))
+                        .or_default() += 1;
+                }
                 continue;
             }
             let (Some(stem_reading), Some(stem_surface), Some(conjugation)) =
@@ -1541,6 +1549,38 @@ mod tests {
             dict.report.unknown_conjugations,
             [("文語四段-ハ行".to_owned(), 2)]
         );
+    }
+
+    #[test]
+    fn a_form_of_a_type_the_table_does_not_know_is_a_word_written_whole_when_it_shows_its_okurigana()
+     {
+        let unknown = |reading: &str, surface: &str, conjugation: &str| Unit {
+            unknown_conjugation: Some(conjugation.into()),
+            ..word(reading, surface)
+        };
+        let units = [
+            repeat(unknown("わかき", "若き", "文語形容詞-ク"), 2),
+            repeat(unknown("ごとく", "如く", "文語助動詞-ゴトシ"), 3),
+            repeat(unknown("そうろう", "候", "文語四段-ハ行"), 2),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        let mut words: Vec<(&str, &str, u32)> = dict
+            .entries
+            .iter()
+            .map(|e| (e.reading.as_str(), e.surface.as_str(), e.cost))
+            .collect();
+        words.sort();
+        assert_eq!(
+            words,
+            [
+                ("ごとく", "如く", cost(3, 7)),
+                ("わかき", "若き", cost(2, 7))
+            ]
+        );
+        assert_eq!(dict.report.unknown_conjugations.len(), 3);
     }
 
     #[test]
