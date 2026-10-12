@@ -161,13 +161,7 @@ pub fn miss_reasons_tsv(
             )
         };
         *by_reason.entry(reason).or_default() += units;
-        let typed = match okurigana {
-            Some(first) => format!(
-                "{}*{first}",
-                reading.strip_suffix(first.as_str()).unwrap_or(reading)
-            ),
-            None => reading.clone(),
-        };
+        let typed = typed(reading, okurigana.as_deref());
         rows.push((
             *units,
             format!(
@@ -178,6 +172,93 @@ pub fn miss_reasons_tsv(
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let mut tsv = String::from("class\treading\texpected\tunits\treason\tdetail\n");
+    for (_, row) in rows {
+        writeln!(tsv, "{row}").expect("writing to a String never fails");
+    }
+    (tsv, by_reason)
+}
+
+/// The reading as a typist marks it: `か*い` for かい typed with its
+/// okurigana from い.
+fn typed(reading: &str, okurigana: Option<&str>) -> String {
+    match okurigana {
+        Some(first) => format!("{}*{first}", reading.strip_suffix(first).unwrap_or(reading)),
+        None => reading.to_owned(),
+    }
+}
+
+/// Why `top` came before `best` in `explanation`, with no text before and
+/// nothing committed: `okuri-first` when `best` ranked before it until
+/// Kanaemi put candidates found with the okurigana first, `conjugated` when
+/// `best` is built from a stem, which costs more than a word found whole,
+/// and `top` is not, `cost` when `top` simply costs less; `in-context` when
+/// `top` does not come first here at all, so the text before the units put
+/// it there. And a detail to look at: each one's cost and item.
+pub fn loss_reason(explanation: &Explanation, best: &str, top: &str) -> (&'static str, String) {
+    let find = |surface: &str| {
+        explanation
+            .candidates
+            .iter()
+            .find(|c| c.facts.surface == surface)
+    };
+    let (Some(b), Some(t)) = (find(best), find(top)) else {
+        return ("in-context", String::new());
+    };
+    if explanation
+        .candidates
+        .first()
+        .is_none_or(|first| first.facts.surface != top)
+    {
+        return ("in-context", String::new());
+    }
+    let shown = |c: &kanaemi_engine::Explained| {
+        let item = c
+            .origins
+            .first()
+            .map(|o| shown_item(&o.item))
+            .unwrap_or_default();
+        format!("{} {item}", c.facts.cost)
+    };
+    let detail = format!("best {} / top {}", shown(b), shown(t));
+    let reason = if b.ranked < t.ranked {
+        "okuri-first"
+    } else if b.facts.built && !t.facts.built {
+        "conjugated"
+    } else {
+        "cost"
+    };
+    (reason, detail)
+}
+
+/// The table of the keys whose first candidates lost to the best order's,
+/// with why (see [`loss_reason`]): class, reading as typed, the surface the
+/// best order puts first, the candidate that came first, the loss, reason
+/// and detail, the greatest loss first; and the loss of each reason. A
+/// numeric key falls under `numeric`, as in [`miss_reasons_tsv`].
+pub fn loss_reasons_tsv(
+    engine: &Engine,
+    losses: &[(Class, Key, String, String, i64)],
+) -> (String, BTreeMap<&'static str, i64>) {
+    let mut rows: Vec<(i64, String)> = Vec::new();
+    let mut by_reason: BTreeMap<&'static str, i64> = BTreeMap::new();
+    for (class, (reading, okurigana), best, top, loss) in losses {
+        let (reason, detail) = if *class == Class::Numeric {
+            ("numeric", String::new())
+        } else {
+            loss_reason(&engine.explain(reading, okurigana.as_deref()), best, top)
+        };
+        *by_reason.entry(reason).or_default() += loss;
+        rows.push((
+            *loss,
+            format!(
+                "{}\t{}\t{best}\t{top}\t{loss}\t{reason}\t{detail}",
+                class.name(),
+                typed(reading, okurigana.as_deref())
+            ),
+        ));
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut tsv = String::from("class\treading\tbest\ttop\tloss\treason\tdetail\n");
     for (_, row) in rows {
         writeln!(tsv, "{row}").expect("writing to a String never fails");
     }
@@ -287,6 +368,24 @@ mod tests {
             reason("かい", "い", "会い"),
             "not-in-dictionary",
             "会 is a word written whole, no stem of 会い"
+        );
+    }
+
+    #[test]
+    fn a_loss_falls_under_what_put_the_top_candidate_first() {
+        let engine = engine_of(
+            "かく\t書く\t\t5\nかく\t各\t\t9\nか\t書\t五段-カ行\t100\nかいた\t海田\t\t300\n",
+        );
+        let reason = |reading: &str, best: &str, top: &str| {
+            loss_reason(&engine.explain(reading, None), best, top).0
+        };
+
+        assert_eq!(reason("かく", "各", "書く"), "cost");
+        assert_eq!(reason("かいた", "書いた", "海田"), "conjugated");
+        assert_eq!(
+            reason("かく", "書く", "各"),
+            "in-context",
+            "各 is not first without the text"
         );
     }
 }

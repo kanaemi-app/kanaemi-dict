@@ -372,6 +372,23 @@ impl Tallies {
         tsv
     }
 
+    /// The keys whose first candidates lost to the best order's, each with
+    /// its class, the surface the best order puts first, the candidate that
+    /// came first most often and the loss, in class and key order.
+    pub fn losses(&self) -> Vec<(Class, Key, String, String, i64)> {
+        self.each_key()
+            .into_iter()
+            .filter_map(|(class, key, tally)| {
+                let loss = tally.score().loss();
+                (loss > 0).then(|| {
+                    let best = most(&tally.offered).map_or("", |(s, _)| s);
+                    let top = most(&tally.tops).map_or("", |(s, _)| s);
+                    (class, key.clone(), best.to_owned(), top.to_owned(), loss)
+                })
+            })
+            .collect()
+    }
+
     /// The table of the keys whose first candidates differ from the best
     /// order's: class, reading, offered units, the surface the best order
     /// puts first and its units, the units first, the loss, and the

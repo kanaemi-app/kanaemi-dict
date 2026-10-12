@@ -2,7 +2,7 @@
 //! dictionary from them and evaluates it, and builds the additional
 //! dictionaries, reading and writing under the current directory.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
@@ -20,14 +20,14 @@ use kanaemi_dict::{
     dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
     eval_documents, evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
     fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv, listed_dictionary,
-    mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings,
-    mozc_symbols, name_readings, nihon_readings, okurigana_dictionary, parse_check_cases,
-    parse_corrections, parse_word_cases, paths_of, person_dictionary, place_dictionary,
-    place_names, plain_words, read_names, read_title_entries, read_titles, read_units,
-    reading_form, sample_tsv, shared_readings, sources_file, split_of, take, text_units,
-    title_entries, train, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv,
-    unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv,
-    word_scores_tsv, write_atomically, year_dictionary,
+    loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons,
+    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
+    parse_check_cases, parse_corrections, parse_word_cases, paths_of, person_dictionary,
+    place_dictionary, place_names, plain_words, read_names, read_title_entries, read_titles,
+    read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of, take,
+    text_units, title_entries, train, typed_by_analyzer, typed_units, unihan_readings,
+    unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings,
+    word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -85,6 +85,8 @@ const EVALUATION: EvaluationOutputs = EvaluationOutputs {
 /// Why [`EVALUATION`]'s units were not offered their surface, as Kanaemi
 /// explains each conversion.
 const MISSING_REASONS: &str = "build/evaluation-missing-reasons.tsv";
+/// Why the first candidates of [`EVALUATION`]'s keys lost to the best order.
+const LOSS_REASONS: &str = "build/evaluation-loss-reasons.tsv";
 const DICTIONARIES: &str = "build/dictionaries";
 /// Where each additional dictionary is set up, one directory per dictionary.
 const ADDITIONAL: &str = "additional";
@@ -636,24 +638,36 @@ fn evaluate() -> Result<(), Error> {
     let evaluation = evaluate_documents(&docs, &dictionary, None, &|unit| agrees(&agreed, unit));
     print_scores("", &evaluation);
     write_evaluation(&EVALUATION, &evaluation)?;
-    let (tsv, by_reason) = miss_reasons_tsv(
-        &engine(dictionary),
-        &evaluation.all().missing(),
+    let engine = engine(dictionary);
+    let all = evaluation.all();
+    let (missing, by_reason) = miss_reasons_tsv(
+        &engine,
+        &all.missing(),
         &Readings::parse(read_to_string(BASE_TRAIN.dictionary)?),
     );
-    write_atomically(MISSING_REASONS, |w| {
-        w.write_all(tsv.as_bytes())
-            .map_err(write_error(MISSING_REASONS))
+    write_reasons(MISSING_REASONS, "missing", &missing, &by_reason)?;
+    let (losses, by_reason) = loss_reasons_tsv(&engine, &all.losses());
+    write_reasons(LOSS_REASONS, "loss", &losses, &by_reason)?;
+    println!("documents: {}, out: {}", docs.len(), EVALUATION.scores);
+    Ok(())
+}
+
+/// Writes a table of reasons to `path`, and prints how much of `what` each
+/// reason holds.
+fn write_reasons<N: std::fmt::Display>(
+    path: &str,
+    what: &str,
+    tsv: &str,
+    by_reason: &BTreeMap<&str, N>,
+) -> Result<(), Error> {
+    write_atomically(path, |w| {
+        w.write_all(tsv.as_bytes()).map_err(write_error(path))
     })?;
     let reasons: Vec<String> = by_reason
         .iter()
-        .map(|(reason, units)| format!("{reason} {units}"))
+        .map(|(reason, n)| format!("{reason} {n}"))
         .collect();
-    println!(
-        "missing by reason: {}, out: {MISSING_REASONS}",
-        reasons.join(", ")
-    );
-    println!("documents: {}, out: {}", docs.len(), EVALUATION.scores);
+    println!("{what} by reason: {}, out: {path}", reasons.join(", "));
     Ok(())
 }
 

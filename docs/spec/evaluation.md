@@ -85,6 +85,7 @@ flowchart LR
 | `evaluation-diff.tsv` | 前の実行から、候補に出ない数か損失が変わった読みを、変わった量の大きい順に |
 | `evaluation-missing-sample.tsv` | 候補に出なかった単位の抜き出し（モデルなしだけ） |
 | `evaluation-missing-reasons.tsv` | 候補に出なかった単位を、なぜ出なかったかとともに（モデルなしだけ）。理由は、Kanaemi が変換の経緯（`Engine::explain`）で落としたと示す項目のもの（`not-conjugated`、`okurigana-mismatch`、`hidden`、`not-filled`、`shadowed`）、辞書がその表記を、送り仮名を指定して打つ単位ならその表記を作る語幹（食べ の 食べ、書い の 書）を、ほかの読みでだけ持つ（`other-reading`）、辞書にない（`not-in-dictionary`）。数を含む単位は、読みが数を埋め込む前の形なので分けない（`numeric`） |
+| `evaluation-loss-reasons.tsv` | 損失のある読みを、最善の並びの 1 位の表記が、実際に 1 位に出たものになぜ負けたかとともに（モデルなしだけ）。理由は、前の文を打たずに変換したときの経緯（`Engine::explain`）で、送り仮名を指定して出た候補を先にする決まりで負けた（`okuri-first`）、語幹から作る形の上乗せのコストで負けた（`conjugated`）、辞書のコストで負けた（`cost`）、前の文を打たないときは 1 位でない（`in-context`）。数を含む読みは分けない（`numeric`） |
 
 ## 正解集と確かめの一覧
 
