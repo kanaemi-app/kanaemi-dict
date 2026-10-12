@@ -84,6 +84,7 @@ flowchart LR
 | `evaluation-keys.tsv` | すべての読みの数字。次の実行と比べるのに使う |
 | `evaluation-diff.tsv` | 前の実行から、候補に出ない数か損失が変わった読みを、変わった量の大きい順に |
 | `evaluation-missing-sample.tsv` | 候補に出なかった単位の抜き出し（モデルなしだけ） |
+| `evaluation-missing-reasons.tsv` | 候補に出なかった単位を、なぜ出なかったかとともに（モデルなしだけ）。理由は、Kanaemi が変換の経緯（`Engine::explain`）で落としたと示す項目のもの（`not-conjugated`、`okurigana-mismatch`、`hidden`、`not-filled`、`shadowed`）、辞書がその表記を、送り仮名を指定して打つ単位ならその表記を作る語幹（食べ の 食べ、書い の 書）を、ほかの読みでだけ持つ（`other-reading`）、辞書にない（`not-in-dictionary`）。数を含む単位は、読みが数を埋め込む前の形なので分けない（`numeric`） |
 
 ## 正解集と確かめの一覧
 

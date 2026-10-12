@@ -12,7 +12,7 @@ use std::sync::Arc;
 use kanaemi_dict::{
     Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Class, Corrections,
     CorrectionsError, CutError, Dictionary, DistError, DocumentsError, Established, EvalDocument,
-    EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, ReadingsError,
+    EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError,
     RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
     Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement,
     as_typed, check_words, clans, common_words, correction_uses, correction_uses_tsv,
@@ -20,14 +20,14 @@ use kanaemi_dict::{
     dictionary_lines, document_sources, document_texts, each_document_with_units, engine,
     eval_documents, evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
     fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv, listed_dictionary,
-    mismatches_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols,
-    name_readings, nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections,
-    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
-    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
-    shared_readings, sources_file, split_of, take, text_units, title_entries, train,
-    typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv, unnamed_words,
-    wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv,
-    write_atomically, year_dictionary,
+    mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings,
+    mozc_symbols, name_readings, nihon_readings, okurigana_dictionary, parse_check_cases,
+    parse_corrections, parse_word_cases, paths_of, person_dictionary, place_dictionary,
+    place_names, plain_words, read_names, read_title_entries, read_titles, read_units,
+    reading_form, sample_tsv, shared_readings, sources_file, split_of, take, text_units,
+    title_entries, train, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv,
+    unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv,
+    word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -82,6 +82,9 @@ const EVALUATION: EvaluationOutputs = EvaluationOutputs {
     diff: "build/evaluation-diff.tsv",
     missing_sample: Some("build/evaluation-missing-sample.tsv"),
 };
+/// Why [`EVALUATION`]'s units were not offered their surface, as Kanaemi
+/// explains each conversion.
+const MISSING_REASONS: &str = "build/evaluation-missing-reasons.tsv";
 const DICTIONARIES: &str = "build/dictionaries";
 /// Where each additional dictionary is set up, one directory per dictionary.
 const ADDITIONAL: &str = "additional";
@@ -633,6 +636,23 @@ fn evaluate() -> Result<(), Error> {
     let evaluation = evaluate_documents(&docs, &dictionary, None, &|unit| agrees(&agreed, unit));
     print_scores("", &evaluation);
     write_evaluation(&EVALUATION, &evaluation)?;
+    let (tsv, by_reason) = miss_reasons_tsv(
+        &engine(dictionary),
+        &evaluation.all().missing(),
+        &Readings::parse(read_to_string(BASE_TRAIN.dictionary)?),
+    );
+    write_atomically(MISSING_REASONS, |w| {
+        w.write_all(tsv.as_bytes())
+            .map_err(write_error(MISSING_REASONS))
+    })?;
+    let reasons: Vec<String> = by_reason
+        .iter()
+        .map(|(reason, units)| format!("{reason} {units}"))
+        .collect();
+    println!(
+        "missing by reason: {}, out: {MISSING_REASONS}",
+        reasons.join(", ")
+    );
     println!("documents: {}, out: {}", docs.len(), EVALUATION.scores);
     Ok(())
 }

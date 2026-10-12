@@ -316,6 +316,23 @@ impl Tallies {
         rows
     }
 
+    /// The surfaces not offered, each with its class, the key it was typed
+    /// under and its units, in class and key order.
+    pub fn missing(&self) -> Vec<(Class, Key, String, u64)> {
+        let mut rows: Vec<(Class, Key, String, u64)> = self
+            .each_key()
+            .into_iter()
+            .flat_map(|(class, key, tally)| {
+                tally
+                    .missing
+                    .iter()
+                    .map(move |(surface, n)| (class, key.clone(), surface.clone(), *n))
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
     /// The table of the units not offered their surface: class, reading,
     /// surface, the candidate that came first most often for the key, and
     /// the units, the most first.
