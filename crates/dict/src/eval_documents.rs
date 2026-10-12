@@ -12,8 +12,8 @@ use rayon::prelude::*;
 
 use crate::documents::each_document;
 use crate::{
-    Class, DocumentsError, Established, Score, Split, Tallies, Unit, UnitsError, as_typed, engine,
-    evaluate_document_with_parts, read_units, split_of,
+    Class, DocumentsError, Established, Score, Split, Tallies, Unit, UnitsError, as_typed,
+    engine_with, evaluate_document_with_parts, read_units, split_of,
 };
 
 /// A document of the eval split with its units in position order.
@@ -330,13 +330,13 @@ impl Evaluation {
     }
 }
 
-/// Converts every document with engines reading `dictionary` alone, ranking
-/// with `model` when given, in parallel by chunks of documents, a few chunks
-/// per thread. Each chunk has its own engine, all sharing the one parsed
-/// dictionary and model. The units `agrees` takes are tallied apart too.
+/// Converts every document with engines reading `dictionaries` alone, in
+/// their order of priority, ranking with `model` when given, in parallel by
+/// chunks of documents, a few chunks per thread. Each chunk has its own
+/// engine, all sharing the parsed dictionaries and model. The units `agrees` takes are tallied apart too.
 pub fn evaluate_documents(
     docs: &[EvalDocument],
-    dictionary: &Arc<TextDictionary>,
+    dictionaries: &[Arc<TextDictionary>],
     model: Option<&Arc<RankingModel>>,
     agrees: &(dyn Fn(&Unit) -> bool + Sync),
 ) -> Evaluation {
@@ -344,7 +344,7 @@ pub fn evaluate_documents(
     let parts: Vec<Evaluation> = docs
         .par_chunks(chunk)
         .map(|chunk| {
-            let mut field = engine(dictionary.clone());
+            let mut field = engine_with(dictionaries);
             field.set_model(model.cloned());
             let mut part = Evaluation::default();
             for doc in chunk {
@@ -455,7 +455,7 @@ pub fn keys_diff_tsv(old: &str, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::evaluate_document;
+    use crate::{engine, evaluate_document};
 
     // Splits computed apart from this code: aozora:000001 is train,
     // aozora:000013 dev, and aozora:000004 and aozora:000015 eval.
@@ -898,7 +898,9 @@ mod tests {
             .num_threads(1)
             .build()
             .unwrap()
-            .install(|| evaluate_documents(&docs, &dictionary, None, &|_| false));
+            .install(|| {
+                evaluate_documents(&docs, std::slice::from_ref(&dictionary), None, &|_| false)
+            });
 
         let mut alone: BTreeMap<String, Tallies> = BTreeMap::new();
         for doc in &docs {
@@ -1042,8 +1044,18 @@ mod model_tests {
             Arc::new(model)
         };
 
-        let without = evaluate_documents(std::slice::from_ref(&doc), &dictionary, None, &|_| false);
-        let with = evaluate_documents(&[doc], &dictionary, Some(&model), &|_| false);
+        let without = evaluate_documents(
+            std::slice::from_ref(&doc),
+            std::slice::from_ref(&dictionary),
+            None,
+            &|_| false,
+        );
+        let with = evaluate_documents(
+            &[doc],
+            std::slice::from_ref(&dictionary),
+            Some(&model),
+            &|_| false,
+        );
 
         assert_eq!(without.all().total().first, 0);
         assert_eq!(with.all().total().first, 1);

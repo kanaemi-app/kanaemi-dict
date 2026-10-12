@@ -63,9 +63,10 @@ dictionary *flags:
 # Convert the eval documents' units with build/dictionaries/base-train.tsv, counting the units not offered and the loss
 # against the best order without context into build/evaluation.tsv, with the units not offered, the readings that
 # lost and every reading in build/evaluation-{misses,losses,keys}.tsv, and what changed since the run before in
-# build/evaluation-diff.tsv (see docs/spec/evaluation.md).
-evaluate:
-    cargo run --release -p kanaemi-dict -- evaluate
+# build/evaluation-diff.tsv (see docs/spec/evaluation.md); `--with NAME...` adds the additional dictionaries
+# build/dictionaries/NAME.tsv after it, writing build/evaluation-with*.tsv instead.
+evaluate *flags:
+    cargo run --release -p kanaemi-dict -- evaluate {{flags}}
 
 # Set up this year's dictionary of new words (or YEAR's: `--year YEAR`) if it is not there, and fetch the postal code
 # data, Mozc's symbol, emoji and emoticon tables, Wikidata's people and the hot entries of every year with a dictionary into build/additional/raw.

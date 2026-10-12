@@ -18,16 +18,16 @@ use kanaemi_dict::{
     as_typed, check_words, clans, common_words, compound_parts, correction_uses,
     correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
     cut_documents, dictionary_lines, document_sources, document_texts, each_document_with_units,
-    engine, eval_documents, evaluate_documents, examples_of_document, excluded_readings,
-    field_dictionary, fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv,
-    listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji,
-    mozc_emoticons, mozc_readings, mozc_symbols, name_readings, nihon_readings,
-    okurigana_dictionary, parse_check_cases, parse_corrections, parse_word_cases, paths_of,
-    person_dictionary, place_dictionary, place_names, plain_words, read_names, read_title_entries,
-    read_titles, read_units, reading_form, sample_tsv, shared_readings, sources_file, split_of,
-    take, text_units, title_entries, train, typed_by_analyzer, typed_units, unihan_readings,
-    unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings,
-    word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    engine, engine_with, eval_documents, evaluate_documents, examples_of_document,
+    excluded_readings, field_dictionary, fragment_surfaces, gather, is_word, kanji_entries,
+    keys_diff_tsv, listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv,
+    model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols, name_readings,
+    nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections, parse_word_cases,
+    paths_of, person_dictionary, place_dictionary, place_names, plain_words, read_names,
+    read_title_entries, read_titles, read_units, reading_form, sample_tsv, shared_readings,
+    sources_file, split_of, take, text_units, title_entries, train, typed_by_analyzer, typed_units,
+    unihan_readings, unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people,
+    wikidata_readings, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -87,6 +87,21 @@ const EVALUATION: EvaluationOutputs = EvaluationOutputs {
 const MISSING_REASONS: &str = "build/evaluation-missing-reasons.tsv";
 /// Why the first candidates of [`EVALUATION`]'s keys lost to the best order.
 const LOSS_REASONS: &str = "build/evaluation-loss-reasons.tsv";
+/// [`EVALUATION`] with additional dictionaries after the base.
+const WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
+    scores: "build/evaluation-with.tsv",
+    misses: "build/evaluation-with-misses.tsv",
+    losses: "build/evaluation-with-losses.tsv",
+    keys: "build/evaluation-with-keys.tsv",
+    previous_keys: "build/evaluation-with-keys.previous.tsv",
+    diff: "build/evaluation-with-diff.tsv",
+    missing_sample: None,
+};
+/// [`MISSING_REASONS`] and [`LOSS_REASONS`] of [`WITH_ADDITIONAL`].
+const WITH_ADDITIONAL_REASONS: (&str, &str) = (
+    "build/evaluation-with-missing-reasons.tsv",
+    "build/evaluation-with-loss-reasons.tsv",
+);
 const DICTIONARIES: &str = "build/dictionaries";
 /// Where each additional dictionary is set up, one directory per dictionary.
 const ADDITIONAL: &str = "additional";
@@ -214,7 +229,13 @@ usage: kanaemi-dict units
          their surface and the loss against the best order without context
          to build/evaluation.tsv, with the units not offered, the readings
          that lost, every reading and what changed since the run before in
-         build/evaluation-{misses,losses,keys,diff}.tsv
+         build/evaluation-{misses,losses,keys,diff}.tsv, and why units were
+         not offered and readings lost in
+         build/evaluation-{missing,loss}-reasons.tsv
+       kanaemi-dict evaluate --with NAME...
+         evaluate with the additional dictionaries
+         build/dictionaries/NAME.tsv after the base, writing
+         build/evaluation-with*.tsv instead
        kanaemi-dict additional [NAME...]
          build the additional dictionaries NAME, or every one under
          additional/, from build/additional/NAME/ into
@@ -335,7 +356,8 @@ fn main() -> ExitCode {
         ["units"] => cut_units(),
         ["dictionary"] => build_dictionary(false),
         ["dictionary", "--train-only"] => build_dictionary(true),
-        ["evaluate"] => evaluate(),
+        ["evaluate"] => evaluate(&[]),
+        ["evaluate", "--with", ref names @ ..] if !names.is_empty() => evaluate(names),
         ["additional", ref names @ ..] => build_additional(names),
         ["ranking"] => train_ranking(),
         ["take"] => take_built(),
@@ -630,25 +652,33 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
 }
 
 /// Converts the units of the eval documents with the dictionary built from
-/// the train documents, and writes the scores per kind of source and class.
-fn evaluate() -> Result<(), Error> {
-    let dictionary = train_dictionary()?;
+/// the train documents, followed by the additional dictionaries `with` built
+/// under build/dictionaries/, and writes the scores per kind of source and
+/// class: those of the base alone to [`EVALUATION`], those with additional
+/// dictionaries to [`WITH_ADDITIONAL`].
+fn evaluate(with: &[&str]) -> Result<(), Error> {
+    let (outputs, reasons) = if with.is_empty() {
+        (&EVALUATION, (MISSING_REASONS, LOSS_REASONS))
+    } else {
+        (&WITH_ADDITIONAL, WITH_ADDITIONAL_REASONS)
+    };
+    let dictionaries = with_additional(train_dictionary()?, with)?;
     let docs = typed_eval_documents(&train_established()?)?;
     let agreed = agreed_readings(&docs)?;
-    let evaluation = evaluate_documents(&docs, &dictionary, None, &|unit| agrees(&agreed, unit));
+    let evaluation = evaluate_documents(&docs, &dictionaries, None, &|unit| agrees(&agreed, unit));
     print_scores("", &evaluation);
-    write_evaluation(&EVALUATION, &evaluation)?;
-    let engine = engine(dictionary);
+    write_evaluation(outputs, &evaluation)?;
+    let engine = engine_with(&dictionaries);
     let all = evaluation.all();
-    let (missing, by_reason) = miss_reasons_tsv(
-        &engine,
-        &all.missing(),
-        &Readings::parse(read_to_string(BASE_TRAIN.dictionary)?),
-    );
-    write_reasons(MISSING_REASONS, "missing", &missing, &by_reason)?;
+    let texts = std::iter::once(BASE_TRAIN.dictionary.to_owned())
+        .chain(with.iter().map(|name| format!("{DICTIONARIES}/{name}.tsv")))
+        .map(|path| read_to_string(&path))
+        .collect::<Result<String, Error>>()?;
+    let (missing, by_reason) = miss_reasons_tsv(&engine, &all.missing(), &Readings::parse(texts));
+    write_reasons(reasons.0, "missing", &missing, &by_reason)?;
     let (losses, by_reason) = loss_reasons_tsv(&engine, &all.losses());
-    write_reasons(LOSS_REASONS, "loss", &losses, &by_reason)?;
-    println!("documents: {}, out: {}", docs.len(), EVALUATION.scores);
+    write_reasons(reasons.1, "loss", &losses, &by_reason)?;
+    println!("documents: {}, out: {}", docs.len(), outputs.scores);
     Ok(())
 }
 
@@ -909,9 +939,14 @@ fn train_ranking() -> Result<(), Error> {
     let agreed = |unit: &Unit| agrees(&agreed, unit);
     print_scores(
         "without the model: ",
-        &evaluate_documents(&docs, &dictionary, None, &agreed),
+        &evaluate_documents(&docs, std::slice::from_ref(&dictionary), None, &agreed),
     );
-    let with = evaluate_documents(&docs, &dictionary, Some(&Arc::new(model)), &agreed);
+    let with = evaluate_documents(
+        &docs,
+        std::slice::from_ref(&dictionary),
+        Some(&Arc::new(model)),
+        &agreed,
+    );
     print_scores("with the model: ", &with);
     write_evaluation(&RANKING_EVALUATION, &with)?;
     println!("out: {MODEL}, evaluation: {}", RANKING_EVALUATION.scores);
