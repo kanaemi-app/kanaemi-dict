@@ -60,7 +60,10 @@ units:
 dictionary *flags:
     cargo run --release -p kanaemi-dict -- dictionary {{flags}}
 
-# Convert the eval documents' units with build/dictionaries/base-train.tsv into build/evaluation.tsv.
+# Convert the eval documents' units with build/dictionaries/base-train.tsv, counting the units not offered and the loss
+# against the best order without context into build/evaluation.tsv, with the units not offered, the readings that
+# lost and every reading in build/evaluation-{misses,losses,keys}.tsv, and what changed since the run before in
+# build/evaluation-diff.tsv (see docs/spec/evaluation.md).
 evaluate:
     cargo run --release -p kanaemi-dict -- evaluate
 
@@ -80,7 +83,8 @@ additional *names:
     cargo run --release -p kanaemi-dict -- additional {{names}}
 
 # Train the ranking model into build/dictionaries/base.model on the candidates of build/dictionaries/base-train.tsv,
-# paired with build/dictionaries/base.tsv (build it first), and measure the eval documents without and with it into build/ranking-evaluation.tsv.
+# paired with build/dictionaries/base.tsv (build it first), and measure the eval documents without and with it,
+# writing the tables of `just evaluate` with it as build/ranking-*.tsv.
 ranking:
     cargo run --release -p kanaemi-dict -- ranking
 
@@ -92,8 +96,9 @@ take:
 dist:
     cargo run --release -p kanaemi-dict -- dist
 
-# Convert the word set evaluation/words.tsv with the base dictionary and model of dictionaries/, without and with the model,
-# into build/check-words.tsv and the words that did not come first into build/check-words-misses.tsv;
+# Convert the word set evaluation/words.tsv and the checks evaluation/checks.tsv with the base dictionary and model of
+# dictionaries/, without and with the model, into build/check-words.tsv, the words not offered or not first after
+# their text into build/check-words-misses.tsv, and the checks not met into build/check-list.tsv;
 # `--build` converts build/dictionaries/base.tsv instead, without a model; `--with NAME...` (last) adds the additional
 # dictionaries build/dictionaries/NAME.tsv after the base dictionary.
 check-words *flags:

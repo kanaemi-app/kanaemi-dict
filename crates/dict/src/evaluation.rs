@@ -1,6 +1,9 @@
-//! Measures a dictionary by converting units with Kanaemi and finding where
-//! each unit's surface ranks among the candidates.
+//! Measures a dictionary by converting units with Kanaemi: whether each
+//! unit's surface is offered at all, and how many come first against the
+//! best order that does not look at the text around them.
 
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -8,13 +11,16 @@ use std::sync::Arc;
 use kanaemi_core::{Converter, Effect};
 use kanaemi_engine::{Engine, LineSink, Selections, Slot, TextDictionary};
 use kanaemi_functions::LuauFunctions;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::Unit;
 use crate::dictionary::okuri_line;
 use crate::kana::hiragana_to_katakana;
+use crate::numeral::Number;
+use crate::read_number;
 
 /// What a unit is typed as and the candidate that should come out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Query {
     pub reading: String,
     /// The first kana of the okurigana, when the typist marks where it starts.
@@ -46,116 +52,416 @@ pub fn query_of(unit: &Unit) -> Query {
     })
 }
 
-impl Query {
-    /// What the core reports when this query's expected candidate is
-    /// committed: the reading as converted, with the okurigana it was
-    /// converted with.
-    fn committed(&self) -> Effect {
-        Effect::Committed {
-            reading: self.reading.clone(),
-            okurigana: self.okurigana.clone(),
-            surface: self.expected.clone(),
+/// The candidates Kanaemi shows on one page.
+pub const PAGE: usize = 9;
+
+/// What a unit is typed as: the reading with the first kana of the okurigana
+/// when it is marked. A numeric unit's reading keeps its placeholder
+/// (`{}がい`), so every number typed before the same words falls under one
+/// key.
+pub type Key = (String, Option<String>);
+
+/// The key a unit falls under, and its surface as counted there: a numeric
+/// unit's with its notation's placeholder (`{half-num}階`), so 3階 and 5階
+/// count as one surface and 三階 as another.
+pub fn key_of(unit: &Unit) -> (Key, String) {
+    match &unit.numeric {
+        Some(n) => ((n.reading.clone(), None), n.surface.clone()),
+        None => {
+            let query = query_of(unit);
+            ((query.reading, query.okurigana), query.expected)
         }
     }
 }
 
-/// Units converted and where their expected candidates ranked.
+/// How the units of one key came out.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct KeyTally {
+    /// The units offered their surface, by that surface.
+    offered: HashMap<String, u64>,
+    /// The units not offered their surface, by that surface.
+    missing: HashMap<String, u64>,
+    first: u64,
+    page: u64,
+    /// The candidates that came first, as counted under the key.
+    tops: HashMap<String, u64>,
+}
+
+fn add_counts(into: &mut HashMap<String, u64>, from: HashMap<String, u64>) {
+    for (surface, n) in from {
+        *into.entry(surface).or_default() += n;
+    }
+}
+
+/// The surface counted most, the first in byte order of those tied.
+fn most(counts: &HashMap<String, u64>) -> Option<(&str, u64)> {
+    counts
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(s, n)| (s.as_str(), *n))
+}
+
+impl KeyTally {
+    fn merge(&mut self, other: KeyTally) {
+        add_counts(&mut self.offered, other.offered);
+        add_counts(&mut self.missing, other.missing);
+        self.first += other.first;
+        self.page += other.page;
+        add_counts(&mut self.tops, other.tops);
+    }
+
+    fn score(&self) -> Score {
+        let offered: u64 = self.offered.values().sum();
+        let missing: u64 = self.missing.values().sum();
+        let best_page = {
+            let mut counts: Vec<u64> = self.offered.values().copied().collect();
+            counts.sort_unstable_by(|a, b| b.cmp(a));
+            counts.iter().take(PAGE).sum()
+        };
+        Score {
+            units: offered + missing,
+            missing,
+            first: self.first,
+            best_first: most(&self.offered).map_or(0, |(_, n)| n),
+            page: self.page,
+            best_page,
+        }
+    }
+}
+
+/// How many units were converted, how many were not offered their surface,
+/// and how many of the rest came first and on the first page, against the
+/// best order without the text around them: the one that puts the surface
+/// the units of a key want most first, and the next ones after it. Ordering
+/// is measured on the offered units alone, so a unit not offered counts as
+/// missing only.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Score {
-    pub units: usize,
-    /// Units whose expected candidate was among the candidates.
-    pub covered: usize,
-    /// Units whose expected candidate came first.
-    pub first: usize,
-    /// The 1-based ranks of the covered units, summed.
-    pub rank_sum: usize,
+    pub units: u64,
+    pub missing: u64,
+    pub first: u64,
+    pub best_first: u64,
+    pub page: u64,
+    pub best_page: u64,
 }
 
 impl Score {
-    pub(crate) fn add(&mut self, rank: Option<usize>) {
-        self.units += 1;
-        if let Some(rank) = rank {
-            self.covered += 1;
-            self.first += usize::from(rank == 1);
-            self.rank_sum += rank;
-        }
+    /// The units the best order without the text gets first and this did
+    /// not; below 0 when the text around the units gets more first.
+    pub fn loss(&self) -> i64 {
+        self.best_first as i64 - self.first as i64
+    }
+
+    /// [`Score::loss`] for the first page.
+    pub fn page_loss(&self) -> i64 {
+        self.best_page as i64 - self.page as i64
     }
 
     pub fn merge(&mut self, other: Score) {
         self.units += other.units;
-        self.covered += other.covered;
+        self.missing += other.missing;
         self.first += other.first;
-        self.rank_sum += other.rank_sum;
+        self.best_first += other.best_first;
+        self.page += other.page;
+        self.best_page += other.best_page;
     }
+}
 
-    /// The mean rank of the covered units; 0 when none is covered.
-    pub fn mean_rank(&self) -> f64 {
-        if self.covered == 0 {
-            return 0.0;
+/// How the units of every key came out.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Tally {
+    keys: HashMap<Key, KeyTally>,
+}
+
+impl Tally {
+    /// Counts `unit`, offered `offered`, its surface at `rank`.
+    pub fn add(&mut self, unit: &Unit, offered: &[String], rank: Option<usize>) {
+        let (key, surface) = key_of(unit);
+        let top = match (offered.first(), &unit.numeric) {
+            (None, _) => String::new(),
+            (Some(top), Some(n)) => with_notation(top, &n.value).unwrap_or_else(|| top.clone()),
+            (Some(top), None) => top.clone(),
+        };
+        let tally = self.keys.entry(key).or_default();
+        *tally.tops.entry(top).or_default() += 1;
+        match rank {
+            None => *tally.missing.entry(surface).or_default() += 1,
+            Some(rank) => {
+                *tally.offered.entry(surface).or_default() += 1;
+                tally.first += u64::from(rank == 1);
+                tally.page += u64::from(rank <= PAGE);
+            }
         }
-        self.rank_sum as f64 / self.covered as f64
+    }
+
+    pub fn merge(&mut self, other: Tally) {
+        for (key, tally) in other.keys {
+            self.keys.entry(key).or_default().merge(tally);
+        }
+    }
+
+    /// Every key's score added up; the best order is the best of each key.
+    pub fn score(&self) -> Score {
+        let mut score = Score::default();
+        for tally in self.keys.values() {
+            score.merge(tally.score());
+        }
+        score
     }
 }
 
-/// Scores without and with the commit history.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Scores {
-    pub fresh: Score,
-    pub with_history: Score,
-}
-
-impl Scores {
-    pub fn merge(&mut self, other: Scores) {
-        self.fresh.merge(other.fresh);
-        self.with_history.merge(other.with_history);
+/// The reading of `key` as a typist marks it: `か*い` for かい typed with
+/// its okurigana from い.
+fn shown(key: &Key) -> String {
+    match &key.1 {
+        Some(first) => {
+            let before = key.0.strip_suffix(first.as_str()).unwrap_or(&key.0);
+            format!("{before}*{first}")
+        }
+        None => key.0.clone(),
     }
 }
 
-/// Scores of the numeric units and of the other units apart.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ClassScores {
-    pub numeric: Scores,
-    pub other: Scores,
+/// The kinds of unit scored apart: a word of the analyzer's smallest units,
+/// a compound it groups typed whole, a unit that holds a number, and a
+/// conjugating word spelled with other okurigana than its normalized form
+/// (分らない), which the base dictionary leaves to a dictionary of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Class {
+    Word,
+    Compound,
+    Numeric,
+    Variant,
 }
 
-impl ClassScores {
-    pub fn merge(&mut self, other: ClassScores) {
-        self.numeric.merge(other.numeric);
-        self.other.merge(other.other);
-    }
+impl Class {
+    pub const ALL: [Class; 4] = [Class::Word, Class::Compound, Class::Numeric, Class::Variant];
 
-    /// Every unit's scores together.
-    pub fn all(&self) -> Scores {
-        let mut all = self.numeric;
-        all.merge(self.other);
-        all
-    }
-
-    /// The table's classes in their order: `numeric`, `other`, `all`.
-    pub fn classes(&self) -> [(&'static str, Scores); 3] {
-        [
-            ("numeric", self.numeric),
-            ("other", self.other),
-            ("all", self.all()),
-        ]
-    }
-
-    fn of(&mut self, unit: &Unit) -> &mut Scores {
-        if unit.numeric.is_some() {
-            &mut self.numeric
+    pub fn of(unit: &Unit) -> Class {
+        if unit.okurigana_variant {
+            Class::Variant
+        } else if unit.numeric.is_some() {
+            Class::Numeric
+        } else if unit.compound {
+            Class::Compound
         } else {
-            &mut self.other
+            Class::Word
         }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Class::Word => "word",
+            Class::Compound => "compound",
+            Class::Numeric => "numeric",
+            Class::Variant => "variant",
+        }
+    }
+
+    /// Whether the base dictionary is to offer the class's surfaces: every
+    /// class but the spellings it leaves out.
+    pub fn in_total(self) -> bool {
+        self != Class::Variant
     }
 }
 
-/// An input field the evaluation types into: a converter that learns what is
-/// committed and typed there.
+/// A tally per class of unit.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Tallies {
+    by_class: HashMap<Class, Tally>,
+}
+
+impl Tallies {
+    pub fn add(&mut self, unit: &Unit, offered: &[String], rank: Option<usize>) {
+        self.by_class
+            .entry(Class::of(unit))
+            .or_default()
+            .add(unit, offered, rank);
+    }
+
+    pub fn merge(&mut self, other: Tallies) {
+        for (class, tally) in other.by_class {
+            self.by_class.entry(class).or_default().merge(tally);
+        }
+    }
+
+    pub fn score(&self, class: Class) -> Score {
+        self.by_class
+            .get(&class)
+            .map(Tally::score)
+            .unwrap_or_default()
+    }
+
+    /// The units of every class the base dictionary is to offer, together.
+    /// A reading typed both as a word and as a compound has one order of
+    /// candidates, so the classes' tallies are merged before the best order
+    /// is taken, not their scores added.
+    pub fn total(&self) -> Score {
+        let mut all = Tally::default();
+        for (class, tally) in &self.by_class {
+            if class.in_total() {
+                all.merge(tally.clone());
+            }
+        }
+        all.score()
+    }
+
+    fn each_key(&self) -> Vec<(Class, &Key, &KeyTally)> {
+        let mut rows: Vec<(Class, &Key, &KeyTally)> = self
+            .by_class
+            .iter()
+            .flat_map(|(class, tally)| tally.keys.iter().map(move |(k, t)| (*class, k, t)))
+            .collect();
+        rows.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        rows
+    }
+
+    /// The table of the units not offered their surface: class, reading,
+    /// surface, the candidate that came first most often for the key, and
+    /// the units, the most first.
+    pub fn misses_tsv(&self) -> String {
+        let mut rows: Vec<(Class, String, &str, &str, u64)> = Vec::new();
+        for (class, key, tally) in self.each_key() {
+            let top = most(&tally.tops).map_or("", |(s, _)| s);
+            for (surface, n) in &tally.missing {
+                rows.push((class, shown(key), surface, top, *n));
+            }
+        }
+        rows.sort_by(|a, b| {
+            b.4.cmp(&a.4)
+                .then_with(|| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)))
+        });
+        let mut tsv = String::from("class\treading\texpected\ttop\tunits\n");
+        for (class, reading, surface, top, n) in rows {
+            writeln!(tsv, "{}\t{reading}\t{surface}\t{top}\t{n}", class.name())
+                .expect("writing to a String never fails");
+        }
+        tsv
+    }
+
+    /// `count` rows of [`Tallies::misses_tsv`] for people to judge whether
+    /// the answer is right or the analyzer's error, picked by a hash of each
+    /// row, the same rows each time, with an empty column to judge in.
+    pub fn missing_sample_tsv(&self, count: usize) -> String {
+        let misses = self.misses_tsv();
+        let mut lines = misses.lines();
+        let header = lines.next().unwrap_or_default();
+        let mut rows: Vec<(u64, &str)> = lines.map(|l| (xxh3_64(l.as_bytes()), l)).collect();
+        rows.sort_unstable();
+        let mut tsv = format!("{header}\tjudgment\n");
+        for (_, line) in rows.into_iter().take(count) {
+            writeln!(tsv, "{line}\t").expect("writing to a String never fails");
+        }
+        tsv
+    }
+
+    /// The table of the keys whose first candidates differ from the best
+    /// order's: class, reading, offered units, the surface the best order
+    /// puts first and its units, the units first, the loss, and the
+    /// candidate that came first most often; the greatest loss first, gains
+    /// last.
+    pub fn losses_tsv(&self) -> String {
+        let mut rows: Vec<(Class, String, Score, &str, &str)> = Vec::new();
+        for (class, key, tally) in self.each_key() {
+            let score = tally.score();
+            if score.loss() != 0 {
+                let best = most(&tally.offered).map_or("", |(s, _)| s);
+                let top = most(&tally.tops).map_or("", |(s, _)| s);
+                rows.push((class, shown(key), score, best, top));
+            }
+        }
+        rows.sort_by(|a, b| {
+            b.2.loss()
+                .cmp(&a.2.loss())
+                .then_with(|| (a.0, &a.1).cmp(&(b.0, &b.1)))
+        });
+        let mut tsv = String::from("class\treading\toffered\tbest\tbest_units\tfirst\tloss\ttop\n");
+        for (class, reading, score, best, top) in rows {
+            writeln!(
+                tsv,
+                "{}\t{reading}\t{}\t{best}\t{}\t{}\t{}\t{top}",
+                class.name(),
+                score.units - score.missing,
+                score.best_first,
+                score.first,
+                score.loss(),
+            )
+            .expect("writing to a String never fails");
+        }
+        tsv
+    }
+
+    /// The table of every key, to compare one evaluation with another:
+    /// class, reading, units, missing, first, best first, page, best page,
+    /// in class and reading order.
+    pub fn keys_tsv(&self) -> String {
+        let mut tsv =
+            String::from("class\treading\tunits\tmissing\tfirst\tbest_first\tpage\tbest_page\n");
+        for (class, key, tally) in self.each_key() {
+            let s = tally.score();
+            writeln!(
+                tsv,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                class.name(),
+                shown(key),
+                s.units,
+                s.missing,
+                s.first,
+                s.best_first,
+                s.page,
+                s.best_page,
+            )
+            .expect("writing to a String never fails");
+        }
+        tsv
+    }
+}
+
+/// `surface` with the first run of number characters that writes `value` as
+/// the placeholder of its notation (`{kanji}階` for 三階), as a numeric unit's
+/// surface is written.
+pub(crate) fn with_notation(surface: &str, value: &str) -> Option<String> {
+    let (start, end, number) = number_run(surface, value)?;
+    Some(format!(
+        "{}{}{}",
+        &surface[..start],
+        number.notation.placeholder(),
+        &surface[end..]
+    ))
+}
+
+/// Where the first run of number characters writing `value` lies in
+/// `surface`, and the number it writes.
+fn number_run(surface: &str, value: &str) -> Option<(usize, usize, Number)> {
+    let is_number_char = |c: char| {
+        c.is_ascii_digit()
+            || ('０'..='９').contains(&c)
+            || c == ','
+            || "〇一二三四五六七八九十百千万億兆京壱弐参拾".contains(c)
+    };
+    let mut start = None;
+    for (i, c) in surface.char_indices().chain([(surface.len(), ' ')]) {
+        match (start, i < surface.len() && is_number_char(c)) {
+            (None, true) => start = Some(i),
+            (Some(s), false) => {
+                if let Some(number) = read_number(&surface[s..i]).filter(|n| n.value == value) {
+                    return Some((s, i, number));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// An input field the evaluation types into: a converter that reads the
+/// text typed there.
 pub trait Field: Converter {
-    /// Forgets everything learned, as for a typist who has never committed.
+    /// Forgets the field's text and anything learned, as for a typist who
+    /// has never committed.
     fn start_over(&mut self);
     fn type_text(&mut self, text: &str);
-    fn commit(&mut self, query: &Query);
 }
 
 impl Field for Engine {
@@ -170,49 +476,48 @@ impl Field for Engine {
     fn type_text(&mut self, text: &str) {
         self.learn(&Effect::Typed(text.to_owned()));
     }
-
-    fn commit(&mut self, query: &Query) {
-        self.learn(&query.committed());
-    }
 }
 
-/// Converts a document's units in order. `fresh` never sees a commit or
-/// text; `with_history` starts the document over, takes the document's
-/// `text` before each unit as the text typed so far, and commits each
-/// expected candidate, as one input field the typist stays in.
+/// Converts a document's units in order, handing `record` each unit with
+/// the surfaces offered and its surface's rank, in one input field that
+/// starts the document over and takes the document's `text` before each
+/// unit as the text typed so far. Nothing is committed: a commit moves what
+/// was picked up the next time, which is Kanaemi learning the typist, not
+/// the dictionary. A model reads the text before the unit.
 pub fn evaluate_document(
-    fresh: &impl Converter,
-    with_history: &mut impl Field,
+    field: &mut impl Field,
     units: &[Unit],
     text: impl AsRef<str>,
-) -> ClassScores {
-    let mut scores = ClassScores::default();
-    with_history.start_over();
+    mut record: impl FnMut(&Unit, &[String], Option<usize>),
+) {
+    field.start_over();
     let chars: Vec<char> = text.as_ref().chars().collect();
     let mut typed = 0;
     for unit in units {
         let upto = unit.position.min(chars.len());
         if upto > typed {
-            with_history.type_text(&chars[typed..upto].iter().collect::<String>());
+            field.type_text(&chars[typed..upto].iter().collect::<String>());
             typed = upto;
         }
         let query = query_of(unit);
-        let class = scores.of(unit);
-        class.fresh.add(rank_of(fresh, &query));
-        class.with_history.add(rank_of(with_history, &query));
-        with_history.commit(&query);
+        let offered = offered(field, &query.reading, query.okurigana.as_deref());
+        let rank = rank_in(&offered, &query.expected);
+        record(unit, &offered, rank);
     }
-    scores
 }
 
 /// The 1-based rank of the expected candidate, if it is offered at all. As
 /// Kanaemi does, the reading's katakana follows the conversion results when
 /// they lack it, with okurigana given or not.
 pub(crate) fn rank_of(converter: &impl Converter, query: &Query) -> Option<usize> {
-    offered(converter, &query.reading, query.okurigana.as_deref())
-        .iter()
-        .position(|s| *s == query.expected)
-        .map(|i| i + 1)
+    rank_in(
+        &offered(converter, &query.reading, query.okurigana.as_deref()),
+        &query.expected,
+    )
+}
+
+fn rank_in(offered: &[String], expected: &str) -> Option<usize> {
+    offered.iter().position(|s| s == expected).map(|i| i + 1)
 }
 
 /// The surfaces Kanaemi offers for `reading`, best first: the conversion
@@ -293,12 +598,28 @@ mod tests {
         }
     }
 
+    fn numeric(reading: &str, surface: &str, placed: (&str, &str), value: &str) -> Unit {
+        Unit {
+            numeric: Some(Numeric {
+                reading: placed.0.into(),
+                surface: placed.1.into(),
+                value: value.into(),
+                kana: String::new(),
+            }),
+            ..unit(reading, surface, None)
+        }
+    }
+
     fn query(reading: &str, okurigana: Option<&str>, expected: &str) -> Query {
         Query {
             reading: reading.into(),
             okurigana: okurigana.map(Into::into),
             expected: expected.into(),
         }
+    }
+
+    fn strings(surfaces: &[&str]) -> Vec<String> {
+        surfaces.iter().map(|s| (*s).into()).collect()
     }
 
     #[test]
@@ -338,81 +659,263 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_reports_the_reading_and_okurigana_it_was_converted_with() {
+    fn a_unit_falls_under_what_is_typed_and_a_numeric_one_under_its_placeholders() {
         assert_eq!(
-            query("かい", Some("い"), "書い").committed(),
-            Effect::Committed {
-                reading: "かい".into(),
-                okurigana: Some("い".into()),
-                surface: "書い".into(),
-            }
+            key_of(&unit("かいた", "書いた", Some(("か", "書")))),
+            (
+                ("かい".to_owned(), Some("い".to_owned())),
+                "書い".to_owned()
+            )
         );
         assert_eq!(
-            query("てがみ", None, "手紙").committed(),
-            Effect::Committed {
-                reading: "てがみ".into(),
-                okurigana: None,
-                surface: "手紙".into(),
-            }
+            key_of(&numeric("3がい", "3階", ("{}がい", "{half-num}階"), "3")),
+            (("{}がい".to_owned(), None), "{half-num}階".to_owned())
         );
     }
 
     #[test]
-    fn mean_rank_is_over_the_covered_units_only() {
-        let mut score = Score::default();
-        assert_eq!(score.mean_rank(), 0.0);
+    fn the_number_of_a_surface_becomes_its_notations_placeholder() {
+        assert_eq!(with_notation("3階", "3").as_deref(), Some("{half-num}階"));
+        assert_eq!(with_notation("三階", "3").as_deref(), Some("{kanji}階"));
+        assert_eq!(
+            with_notation("第3回", "3").as_deref(),
+            Some("第{half-num}回")
+        );
+        assert_eq!(
+            with_notation("二〇一七年", "2017").as_deref(),
+            Some("{kanji-num}年")
+        );
+        assert_eq!(
+            with_notation("1,000円", "1000").as_deref(),
+            Some("{grouped-num}円")
+        );
+        assert_eq!(with_notation("一重", "2"), None, "another number");
+        assert_eq!(with_notation("ひとつ", "1"), None);
+    }
 
-        for rank in [Some(1), Some(3), None] {
-            score.add(rank);
+    fn tally(rows: &[(&str, &[&str], u64)]) -> Tally {
+        let mut tally = Tally::default();
+        for (surface, offered, n) in rows {
+            let offered = strings(offered);
+            let rank = rank_in(&offered, surface);
+            for _ in 0..*n {
+                tally.add(&unit("てがみ", surface, None), &offered, rank);
+            }
         }
+        tally
+    }
+
+    #[test]
+    fn the_loss_is_what_the_best_order_gets_first_and_the_dictionary_did_not() {
+        let order: &[&str] = &["手神", "手紙"];
+
+        let score = tally(&[("手紙", order, 55), ("手神", order, 45)]).score();
 
         assert_eq!(
             score,
             Score {
-                units: 3,
-                covered: 2,
-                first: 1,
-                rank_sum: 4,
+                units: 100,
+                missing: 0,
+                first: 45,
+                best_first: 55,
+                page: 100,
+                best_page: 100,
             }
         );
-        assert_eq!(score.mean_rank(), 2.0);
+        assert_eq!(score.loss(), 10);
     }
 
-    /// Offers `candidates` for every reading, the surfaces committed since it
-    /// started over first, latest first.
+    #[test]
+    fn a_surface_wanted_far_more_often_loses_much_when_second() {
+        let order: &[&str] = &["手神", "手紙"];
+
+        let score = tally(&[("手紙", order, 95), ("手神", order, 5)]).score();
+
+        assert_eq!(score.loss(), 90);
+    }
+
+    #[test]
+    fn a_unit_not_offered_counts_as_missing_alone() {
+        let order: &[&str] = &["手紙"];
+
+        let score = tally(&[("手紙", order, 2), ("手神", order, 3)]).score();
+
+        assert_eq!(score.missing, 3);
+        assert_eq!((score.first, score.best_first), (2, 2));
+        assert_eq!(score.loss(), 0);
+    }
+
+    #[test]
+    fn the_best_page_holds_the_nine_surfaces_wanted_most() {
+        let surfaces: Vec<String> = (0..10).map(|i| format!("項{i}")).collect();
+        let mut order: Vec<&str> = vec!["香"; PAGE];
+        order.extend(surfaces.iter().map(String::as_str));
+        let rows: Vec<(&str, &[&str], u64)> = surfaces
+            .iter()
+            .map(|s| (s.as_str(), order.as_slice(), 1))
+            .collect();
+
+        let score = tally(&rows).score();
+
+        assert_eq!((score.page, score.best_page), (0, PAGE as u64));
+        assert_eq!(score.page_loss(), PAGE as i64);
+    }
+
+    #[test]
+    fn a_text_that_gets_more_first_than_the_best_order_is_a_gain() {
+        let mut tally = Tally::default();
+        let letter = unit("てがみ", "手紙", None);
+        let god = unit("てがみ", "手神", None);
+        tally.add(&letter, &strings(&["手紙", "手神"]), Some(1));
+        tally.add(&god, &strings(&["手神", "手紙"]), Some(1));
+
+        assert_eq!(tally.score().loss(), -1);
+    }
+
+    #[test]
+    fn numbers_written_the_same_way_fall_under_one_key_with_their_first_candidates() {
+        let mut tally = Tally::default();
+        for (reading, surface, value) in [("3がい", "3階", "3"), ("5がい", "5階", "5")] {
+            let floor = numeric(reading, surface, ("{}がい", "{half-num}階"), value);
+            let first = format!("{value}回");
+            tally.add(&floor, &strings(&[&first, surface]), Some(2));
+        }
+        let mut tallies = Tallies::default();
+        tallies.by_class.insert(Class::Numeric, tally);
+
+        assert_eq!(
+            tallies.losses_tsv(),
+            "class\treading\toffered\tbest\tbest_units\tfirst\tloss\ttop\n\
+             numeric\t{}がい\t2\t{half-num}階\t2\t0\t2\t{half-num}回\n"
+        );
+    }
+
+    #[test]
+    fn units_are_tallied_by_class() {
+        let mut tallies = Tallies::default();
+        let compound = Unit {
+            compound: true,
+            ..unit("ろてんぶろ", "露天風呂", None)
+        };
+        let three = numeric("3ぼん", "3本", ("{}ぼん", "{half-num}本"), "3");
+
+        tallies.add(&unit("てがみ", "手紙", None), &strings(&["手紙"]), Some(1));
+        tallies.add(&compound, &strings(&["ロテンブロ"]), None);
+        tallies.add(&three, &strings(&["3本"]), Some(1));
+
+        assert_eq!(tallies.score(Class::Word).first, 1);
+        assert_eq!(tallies.score(Class::Compound).missing, 1);
+        assert_eq!(tallies.score(Class::Numeric).first, 1);
+        assert_eq!(tallies.total().units, 3);
+    }
+
+    #[test]
+    fn a_spelling_with_other_okurigana_is_tallied_apart_and_left_out_of_the_total() {
+        let mut tallies = Tallies::default();
+        let variant = Unit {
+            okurigana_variant: true,
+            ..unit("かわる", "変る", Some(("か", "変")))
+        };
+        tallies.add(&variant, &strings(&["変わる"]), None);
+        tallies.add(&unit("てがみ", "手紙", None), &strings(&["手紙"]), Some(1));
+
+        assert_eq!(Class::of(&variant), Class::Variant);
+        assert_eq!(tallies.score(Class::Variant).missing, 1);
+        assert_eq!((tallies.total().units, tallies.total().missing), (1, 0));
+    }
+
+    #[test]
+    fn a_reading_typed_as_a_word_and_as_a_compound_has_one_best_order_in_the_total() {
+        let mut tallies = Tallies::default();
+        let order = strings(&["W杯", "ワールドカップ"]);
+        for _ in 0..2 {
+            tallies.add(&unit("わーるどかっぷ", "W杯", None), &order, Some(1));
+        }
+        let compound = Unit {
+            compound: true,
+            ..unit("わーるどかっぷ", "ワールドカップ", None)
+        };
+        tallies.add(&compound, &order, Some(2));
+
+        let total = tallies.total();
+
+        assert_eq!((total.first, total.best_first), (2, 2));
+        assert_eq!(total.loss(), 0);
+    }
+
+    #[test]
+    fn the_tables_list_what_was_not_offered_what_lost_and_every_key() {
+        let mut tallies = Tallies::default();
+        let order = strings(&["手神", "手紙"]);
+        for _ in 0..2 {
+            tallies.add(&unit("てがみ", "手紙", None), &order, Some(2));
+        }
+        tallies.add(&unit("てがみ", "手神", None), &order, Some(1));
+        tallies.add(
+            &unit("かいた", "書いた", Some(("か", "書"))),
+            &strings(&["買い"]),
+            None,
+        );
+
+        assert_eq!(
+            tallies.misses_tsv(),
+            "class\treading\texpected\ttop\tunits\n\
+             word\tか*い\t書い\t買い\t1\n"
+        );
+        assert_eq!(
+            tallies.losses_tsv(),
+            "class\treading\toffered\tbest\tbest_units\tfirst\tloss\ttop\n\
+             word\tてがみ\t3\t手紙\t2\t1\t1\t手神\n"
+        );
+        assert_eq!(
+            tallies.keys_tsv(),
+            "class\treading\tunits\tmissing\tfirst\tbest_first\tpage\tbest_page\n\
+             word\tか*い\t1\t1\t0\t0\t0\t0\n\
+             word\tてがみ\t3\t0\t1\t2\t3\t3\n"
+        );
+    }
+
+    #[test]
+    fn the_sample_of_what_was_not_offered_is_the_same_each_time_with_a_column_to_judge() {
+        let mut tallies = Tallies::default();
+        for surface in ["獏", "貘", "漠", "幕"] {
+            tallies.add(&unit("ばく", surface, None), &strings(&["バク"]), None);
+        }
+
+        let sample = tallies.missing_sample_tsv(2);
+
+        assert_eq!(sample, tallies.missing_sample_tsv(2));
+        let lines: Vec<&str> = sample.lines().collect();
+        assert_eq!(lines[0], "class\treading\texpected\ttop\tunits\tjudgment");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1..].iter().all(|l| l.ends_with("\t1\t")));
+    }
+
+    /// Offers `candidates` for every reading, and records the text typed.
     #[derive(Default)]
     struct Fake {
         candidates: Vec<&'static str>,
-        committed: Vec<String>,
         texts: Vec<String>,
     }
 
     impl Converter for Fake {
         fn convert(&self, _reading: &str, _okurigana: Option<&str>) -> Vec<Candidate> {
-            let mut surfaces: Vec<String> = self.committed.iter().rev().cloned().collect();
-            for c in &self.candidates {
-                if !surfaces.iter().any(|s| s == c) {
-                    surfaces.push((*c).into());
-                }
-            }
-            surfaces
-                .into_iter()
-                .map(|surface| Candidate { surface })
+            self.candidates
+                .iter()
+                .map(|c| Candidate {
+                    surface: (*c).into(),
+                })
                 .collect()
         }
     }
 
     impl Field for Fake {
         fn start_over(&mut self) {
-            self.committed.clear();
+            self.texts.clear();
         }
 
         fn type_text(&mut self, text: &str) {
             self.texts.push(text.into());
-        }
-
-        fn commit(&mut self, query: &Query) {
-            self.committed.push(query.expected.clone());
         }
     }
 
@@ -435,83 +938,18 @@ mod tests {
     }
 
     #[test]
-    fn the_text_before_each_unit_reaches_the_field_with_history_only() {
-        let fresh = Fake::default();
-        let mut with_history = Fake::default();
+    fn the_text_before_each_unit_reaches_the_field() {
+        let mut field = Fake {
+            texts: vec!["前の文書".into()],
+            ..Fake::default()
+        };
         let mut units = [unit("かん", "漢", None), unit("じ", "字", None)];
         units[0].position = 1;
         units[1].position = 5;
 
-        evaluate_document(&fresh, &mut with_history, &units, "あ漢い\nう字。");
+        evaluate_document(&mut field, &units, "あ漢い\nう字。", |_, _, _| {});
 
-        assert_eq!(fresh.texts, Vec::<String>::new());
-        assert_eq!(with_history.texts, ["あ", "漢い\nう"]);
-    }
-
-    #[test]
-    fn ranks_are_counted_without_and_with_the_commit_history() {
-        let fake = || Fake {
-            candidates: vec!["手神", "手紙"],
-            committed: vec!["前の文書".into()],
-            ..Fake::default()
-        };
-        let units = [
-            unit("てがみ", "手紙", None),
-            unit("てがみ", "手紙", None),
-            unit("ばく", "獏", None),
-        ];
-
-        let scores = evaluate_document(&fake(), &mut fake(), &units, "");
-
-        assert_eq!(
-            scores.other,
-            Scores {
-                fresh: Score {
-                    units: 3,
-                    covered: 2,
-                    first: 0,
-                    rank_sum: 6,
-                },
-                with_history: Score {
-                    units: 3,
-                    covered: 2,
-                    first: 1,
-                    rank_sum: 3,
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn numeric_units_are_scored_apart_from_the_others() {
-        let fake = || Fake {
-            candidates: vec!["3本", "手紙"],
-            ..Fake::default()
-        };
-        let mut three = unit("3ぽん", "三本", None);
-        three.numeric = Some(Numeric {
-            reading: "{}ぽん".into(),
-            surface: "{kanji}本".into(),
-            value: "3".into(),
-            kana: String::new(),
-        });
-        let units = [three, unit("てがみ", "手紙", None)];
-
-        let scores = evaluate_document(&fake(), &mut fake(), &units, "");
-
-        let missed = Score {
-            units: 1,
-            ..Score::default()
-        };
-        let second = Score {
-            units: 1,
-            covered: 1,
-            first: 0,
-            rank_sum: 2,
-        };
-        assert_eq!(scores.numeric.fresh, missed);
-        assert_eq!(scores.other.fresh, second);
-        assert_eq!(scores.all().fresh, Score { units: 2, ..second });
+        assert_eq!(field.texts, ["あ", "漢い\nう"]);
     }
 
     fn dictionary(text: &str) -> Arc<TextDictionary> {
@@ -527,27 +965,14 @@ mod tests {
             unit("かいた", "書いた", Some(("か", "書"))),
             unit("てがみ", "手紙", None),
         ];
+        let mut tallies = Tallies::default();
 
-        let scores = evaluate_document(
-            &engine(dictionary.clone()),
-            &mut engine(dictionary),
-            &units,
-            "",
-        );
+        evaluate_document(&mut engine(dictionary), &units, "", |u, o, r| {
+            tallies.add(u, o, r)
+        });
 
-        let all_first = Score {
-            units: 2,
-            covered: 2,
-            first: 2,
-            rank_sum: 2,
-        };
-        assert_eq!(
-            scores.other,
-            Scores {
-                fresh: all_first,
-                with_history: all_first,
-            }
-        );
+        let score = tallies.score(Class::Word);
+        assert_eq!((score.units, score.missing, score.first), (2, 0, 2));
     }
 
     #[test]
@@ -572,24 +997,15 @@ mod tests {
     }
 
     #[test]
-    fn each_document_starts_with_nothing_learned_from_the_one_before() {
+    fn a_surface_typed_before_in_the_document_does_not_move_up() {
         let dictionary = dictionary("てがみ\t手紙\t\t100\nてがみ\t手神\t\t200\n");
-        let fresh = engine(dictionary.clone());
-        let mut with_history = engine(dictionary);
-        let picked_often = [
-            unit("てがみ", "手神", None),
-            unit("てがみ", "手神", None),
-            unit("てがみ", "手神", None),
-        ];
-        evaluate_document(&fresh, &mut with_history, &picked_often, "");
+        let units = [unit("てがみ", "手神", None), unit("てがみ", "手神", None)];
+        let mut tallies = Tallies::default();
 
-        let scores = evaluate_document(
-            &fresh,
-            &mut with_history,
-            &[unit("てがみ", "手紙", None)],
-            "",
-        );
+        evaluate_document(&mut engine(dictionary), &units, "", |u, o, r| {
+            tallies.add(u, o, r)
+        });
 
-        assert_eq!(scores.other.with_history.first, 1);
+        assert_eq!(tallies.score(Class::Word).first, 0);
     }
 }

@@ -62,7 +62,7 @@ just base-titles               # Wikipedia の記事とリダイレクトの見�
 just units                     # 文書を変換の単位に切る
 just dictionary                # 基本辞書を作る
 just dictionary --train-only   # 評価と学習に使う、学習用の文書だけの基本辞書を作る
-just evaluate                  # 基本辞書を評価する
+just evaluate                  # 基本辞書を評価し、候補に出ない単位と並びの損失を数え、前の実行と比べる
 
 # 追加辞書
 just additional-fetch          # 郵便番号データ、Mozc の記号・絵文字・顔文字の表、Wikidata の人物、その年の人気エントリーを取得する
@@ -70,7 +70,7 @@ just additional-docs           # 追加辞書ごとの文書を取り出す
 just additional                # 追加辞書を作る
 
 # 並べ替えのモデル
-just ranking                   # モデルを学習し、モデルなしとありで評価する
+just ranking                   # モデルを学習し、モデルなしとありで評価する（評価の仕方は docs/spec/evaluation.md）
 
 # 入れる
 just take                      # 作ったものを確かめて dictionaries/ に入れる
@@ -82,7 +82,7 @@ just dist                      # 配布物にまとめられるかを確かめ�
 `dictionaries/` の辞書は、素材の文書での評価とは別に、解析器の外の答えでも確かめられる（[辞書の確かめ](docs/spec/checks.md)）。
 
 ```sh
-just check-words               # 人が書いた正解集で変換する
+just check-words               # 外部の一覧から取った正解集と、機能ごとの確かめの一覧で変換する
 just check-sample              # 人が判定する項目を層ごとに抜き出す
 just check-readings            # MeCab の読みと食い違う項目を並べる
 just wikidata                  # Wikidata の読み仮名を取得する

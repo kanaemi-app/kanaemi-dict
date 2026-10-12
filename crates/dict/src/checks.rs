@@ -11,7 +11,7 @@ use kanaemi_engine::{RankingModel, TextDictionary, terminal_ending};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::dictionary::UNIDIC_UNSEEN;
-use crate::evaluation::{Field, Score, engine_with, offered};
+use crate::evaluation::{Field, engine_with, offered};
 use crate::kana::{hiragana_to_katakana, is_kanji};
 
 /// One word of the word set: what is typed, after which text, and the
@@ -34,6 +34,8 @@ pub enum WordCasesError {
     Empty(usize),
     #[error("line {0}: nothing after the `*` that marks the okurigana")]
     Okurigana(usize),
+    #[error("line {0}: the expectation is neither `候補` nor `1位`")]
+    Expect(usize),
 }
 
 /// The word set of `evaluation/words.tsv`: category, the text before the
@@ -42,39 +44,42 @@ pub enum WordCasesError {
 pub fn parse_word_cases(text: impl AsRef<str>) -> Result<Vec<WordCase>, WordCasesError> {
     let mut cases = Vec::new();
     for (i, line) in text.as_ref().lines().enumerate() {
-        let number = i + 1;
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let [category, context, reading, accepted] = line.split('\t').collect::<Vec<_>>()[..]
-        else {
-            return Err(WordCasesError::Columns(number));
-        };
-        let accepted: Vec<String> = accepted
-            .split('|')
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
-        if category.is_empty() || reading.is_empty() || accepted.is_empty() {
-            return Err(WordCasesError::Empty(number));
-        }
-        let (reading, okurigana) = match reading.split_once('*') {
-            Some((_, "")) => return Err(WordCasesError::Okurigana(number)),
-            Some((before, after)) => {
-                let first: String = after.chars().take(1).collect();
-                (format!("{before}{after}"), Some(first))
-            }
-            None => (reading.to_owned(), None),
-        };
-        cases.push(WordCase {
-            category: category.into(),
-            context: context.into(),
-            reading,
-            okurigana,
-            accepted,
-        });
+        cases.push(word_case(line, i + 1)?);
     }
     Ok(cases)
+}
+
+/// The word of a line of four columns, the `number`th of its file.
+fn word_case(line: &str, number: usize) -> Result<WordCase, WordCasesError> {
+    let [category, context, reading, accepted] = line.split('\t').collect::<Vec<_>>()[..] else {
+        return Err(WordCasesError::Columns(number));
+    };
+    let accepted: Vec<String> = accepted
+        .split('|')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if category.is_empty() || reading.is_empty() || accepted.is_empty() {
+        return Err(WordCasesError::Empty(number));
+    }
+    let (reading, okurigana) = match reading.split_once('*') {
+        Some((_, "")) => return Err(WordCasesError::Okurigana(number)),
+        Some((before, after)) => {
+            let first: String = after.chars().take(1).collect();
+            (format!("{before}{after}"), Some(first))
+        }
+        None => (reading.to_owned(), None),
+    };
+    Ok(WordCase {
+        category: category.into(),
+        context: context.into(),
+        reading,
+        okurigana,
+        accepted,
+    })
 }
 
 /// How one word of the word set came out.
@@ -114,29 +119,49 @@ pub fn check_words(
     cases.iter().map(|c| check_word(&mut engine, c)).collect()
 }
 
+/// How the words of a word set came out: how many were not offered any
+/// right surface, and of those typed after a text, how many came first.
+/// Without a text a word may be right second, after another word of the
+/// same reading; after one, the text tells them apart.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WordScore {
+    pub words: usize,
+    pub missing: usize,
+    pub after_text: usize,
+    pub after_text_first: usize,
+}
+
+impl WordScore {
+    pub fn add(&mut self, case: &WordCase, result: &WordResult) {
+        self.words += 1;
+        self.missing += usize::from(result.rank.is_none());
+        if !case.context.is_empty() {
+            self.after_text += 1;
+            self.after_text_first += usize::from(result.rank == Some(1));
+        }
+    }
+}
+
 /// The table of `build/check-words.tsv`, one row per category and model
 /// (`off`, `on`), categories in the order of their UTF-8 bytes and `all`
 /// last; `runs` pairs each model label with the results of every case.
 pub fn word_scores_tsv(cases: &[WordCase], runs: &[(&str, &[WordResult])]) -> String {
-    let mut tsv = String::from("category\tmodel\twords\tcovered\tfirst\tmean_rank\n");
+    let mut tsv = String::from("category\tmodel\twords\tmissing\tafter_text\tafter_text_first\n");
     for (label, results) in runs {
-        let mut by_category: BTreeMap<&str, Score> = BTreeMap::new();
-        let mut all = Score::default();
+        let mut by_category: BTreeMap<&str, WordScore> = BTreeMap::new();
+        let mut all = WordScore::default();
         for (case, result) in cases.iter().zip(results.iter()) {
             by_category
                 .entry(&case.category)
                 .or_default()
-                .add(result.rank);
-            all.add(result.rank);
+                .add(case, result);
+            all.add(case, result);
         }
         for (category, score) in by_category.iter().chain([(&"all", &all)]) {
             writeln!(
                 tsv,
-                "{category}\t{label}\t{}\t{}\t{}\t{:.3}",
-                score.units,
-                score.covered,
-                score.first,
-                score.mean_rank()
+                "{category}\t{label}\t{}\t{}\t{}\t{}",
+                score.words, score.missing, score.after_text, score.after_text_first,
             )
             .expect("writing to a String never fails");
         }
@@ -144,27 +169,121 @@ pub fn word_scores_tsv(cases: &[WordCase], runs: &[(&str, &[WordResult])]) -> St
     tsv
 }
 
-/// The table of `build/check-words-misses.tsv`: every case whose right
-/// surface did not come first, with the surface that did and the right one's
-/// rank (empty when not offered).
+/// The table of `build/check-words-misses.tsv`: every word not offered any
+/// right surface (`missing`), and every word typed after a text whose right
+/// surface did not come first (`not-first`), with the surface that did and
+/// the right one's rank (empty when not offered).
 pub fn word_misses_tsv(cases: &[WordCase], runs: &[(&str, &[WordResult])]) -> String {
-    let mut tsv = String::from("category\tmodel\tcontext\treading\taccepted\ttop\trank\n");
+    let mut tsv = String::from("category\tmodel\tmiss\tcontext\treading\taccepted\ttop\trank\n");
     for (label, results) in runs {
         for (case, result) in cases.iter().zip(results.iter()) {
-            if result.rank == Some(1) {
-                continue;
+            let miss = match result.rank {
+                None => "missing",
+                Some(rank) if rank != 1 && !case.context.is_empty() => "not-first",
+                Some(_) => continue,
+            };
+            write_case_row(&mut tsv, &case.category, label, miss, case, result);
+        }
+    }
+    tsv
+}
+
+fn write_case_row(
+    tsv: &mut String,
+    category: &str,
+    label: &str,
+    third: &str,
+    case: &WordCase,
+    result: &WordResult,
+) {
+    writeln!(
+        tsv,
+        "{category}\t{label}\t{third}\t{}\t{}\t{}\t{}\t{}",
+        case.context,
+        case.reading,
+        case.accepted.join("|"),
+        result.top,
+        result.rank.map(|r| r.to_string()).unwrap_or_default(),
+    )
+    .expect("writing to a String never fails");
+}
+
+/// What a check of a feature expects of its word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    /// A right surface is offered.
+    Offered,
+    /// A right surface comes first.
+    First,
+}
+
+impl Expect {
+    fn name(self) -> &'static str {
+        match self {
+            Expect::Offered => "offered",
+            Expect::First => "first",
+        }
+    }
+
+    fn met(self, rank: Option<usize>) -> bool {
+        match self {
+            Expect::Offered => rank.is_some(),
+            Expect::First => rank == Some(1),
+        }
+    }
+}
+
+/// One check of `evaluation/checks.tsv`: a word as in the word set, and what
+/// the feature it checks expects of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckCase {
+    pub case: WordCase,
+    pub expect: Expect,
+}
+
+/// The checks of `evaluation/checks.tsv`: the four columns of the word set,
+/// then `候補` (a right surface is offered) or `1位` (one comes first).
+pub fn parse_check_cases(text: impl AsRef<str>) -> Result<Vec<CheckCase>, WordCasesError> {
+    let mut checks = Vec::new();
+    for (i, line) in text.as_ref().lines().enumerate() {
+        let number = i + 1;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((word, expect)) = line.rsplit_once('\t') else {
+            return Err(WordCasesError::Columns(number));
+        };
+        let expect = match expect {
+            "候補" => Expect::Offered,
+            "1位" => Expect::First,
+            _ => return Err(WordCasesError::Expect(number)),
+        };
+        checks.push(CheckCase {
+            case: word_case(word, number)?,
+            expect,
+        });
+    }
+    Ok(checks)
+}
+
+/// The table of `build/check-list.tsv`: every check whose expectation was
+/// not met, with what it expected, the surface that came first and the right
+/// one's rank (empty when not offered).
+pub fn unmet_checks_tsv(checks: &[CheckCase], runs: &[(&str, &[WordResult])]) -> String {
+    let mut tsv = String::from("category\tmodel\texpect\tcontext\treading\taccepted\ttop\trank\n");
+    for (label, results) in runs {
+        for (check, result) in checks.iter().zip(results.iter()) {
+            if !check.expect.met(result.rank) {
+                let case = &check.case;
+                write_case_row(
+                    &mut tsv,
+                    &case.category,
+                    label,
+                    check.expect.name(),
+                    case,
+                    result,
+                );
             }
-            writeln!(
-                tsv,
-                "{}\t{label}\t{}\t{}\t{}\t{}\t{}",
-                case.category,
-                case.context,
-                case.reading,
-                case.accepted.join("|"),
-                result.top,
-                result.rank.map(|r| r.to_string()).unwrap_or_default(),
-            )
-            .expect("writing to a String never fails");
         }
     }
     tsv
@@ -381,7 +500,6 @@ mod tests {
     use kanaemi_core::{Candidate, Converter};
 
     use super::*;
-    use crate::evaluation::Query;
 
     fn case(
         category: &str,
@@ -472,8 +590,6 @@ mod tests {
         fn type_text(&mut self, text: &str) {
             self.typed.push_str(text);
         }
-
-        fn commit(&mut self, _query: &Query) {}
     }
 
     #[test]
@@ -549,34 +665,96 @@ mod tests {
         assert_eq!(ranks, [Some(1), Some(1)]);
     }
 
+    fn result(rank: Option<usize>, top: &str) -> WordResult {
+        WordResult {
+            rank,
+            top: top.into(),
+        }
+    }
+
     #[test]
-    fn the_word_tables_count_per_category_and_list_what_missed() {
+    fn the_word_tables_count_what_is_missing_and_what_comes_first_after_a_text() {
         let cases = [
             case("b", "", "あ", None, &["亜"]),
             case("a", "x", "い", Some("い"), &["胃", "イ"]),
+            case("c", "前", "う", None, &["宇"]),
+            case("c", "", "え", None, &["絵"]),
         ];
         let off = [
-            WordResult {
-                rank: Some(1),
-                top: "亜".into(),
-            },
-            WordResult {
-                rank: None,
-                top: "井".into(),
-            },
+            result(Some(1), "亜"),
+            result(None, "井"),
+            result(Some(2), "卯"),
+            result(Some(2), "江"),
         ];
 
         assert_eq!(
             word_scores_tsv(&cases, &[("off", &off)]),
-            "category\tmodel\twords\tcovered\tfirst\tmean_rank\n\
-             a\toff\t1\t0\t0\t0.000\n\
-             b\toff\t1\t1\t1\t1.000\n\
-             all\toff\t2\t1\t1\t1.000\n"
+            "category\tmodel\twords\tmissing\tafter_text\tafter_text_first\n\
+             a\toff\t1\t1\t1\t0\n\
+             b\toff\t1\t0\t0\t0\n\
+             c\toff\t2\t0\t1\t0\n\
+             all\toff\t4\t1\t2\t0\n"
         );
         assert_eq!(
             word_misses_tsv(&cases, &[("off", &off)]),
-            "category\tmodel\tcontext\treading\taccepted\ttop\trank\n\
-             a\toff\tx\tい\t胃|イ\t井\t\n"
+            "category\tmodel\tmiss\tcontext\treading\taccepted\ttop\trank\n\
+             a\toff\tmissing\tx\tい\t胃|イ\t井\t\n\
+             c\toff\tnot-first\t前\tう\t宇\t卯\t2\n"
+        );
+    }
+
+    #[test]
+    fn a_check_line_ends_in_what_it_expects() {
+        assert_eq!(
+            parse_check_cases("数\t\t3がい\t3階|三階\t1位\n# x\n数\t\t3げん\t3軒\t候補\n"),
+            Ok(vec![
+                CheckCase {
+                    case: case("数", "", "3がい", None, &["3階", "三階"]),
+                    expect: Expect::First,
+                },
+                CheckCase {
+                    case: case("数", "", "3げん", None, &["3軒"]),
+                    expect: Expect::Offered,
+                },
+            ])
+        );
+        assert_eq!(
+            parse_check_cases("数\t\t3がい\t3階\t上位\n"),
+            Err(WordCasesError::Expect(1))
+        );
+        assert_eq!(
+            parse_check_cases("数\t\t3がい\t1位\n"),
+            Err(WordCasesError::Columns(1))
+        );
+    }
+
+    #[test]
+    fn only_the_checks_whose_expectation_is_not_met_are_listed() {
+        let checks = [
+            CheckCase {
+                case: case("数", "", "3がい", None, &["3階"]),
+                expect: Expect::First,
+            },
+            CheckCase {
+                case: case("数", "", "3げん", None, &["3軒"]),
+                expect: Expect::Offered,
+            },
+            CheckCase {
+                case: case("数", "", "3ぞく", None, &["3足"]),
+                expect: Expect::Offered,
+            },
+        ];
+        let off = [
+            result(Some(2), "3回"),
+            result(Some(4), "三元"),
+            result(None, "3族"),
+        ];
+
+        assert_eq!(
+            unmet_checks_tsv(&checks, &[("off", &off)]),
+            "category\tmodel\texpect\tcontext\treading\taccepted\ttop\trank\n\
+             数\toff\tfirst\t\t3がい\t3階\t3回\t2\n\
+             数\toff\toffered\t\t3ぞく\t3足\t3族\t\n"
         );
     }
 

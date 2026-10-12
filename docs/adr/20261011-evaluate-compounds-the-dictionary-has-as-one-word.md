@@ -1,6 +1,6 @@
 # 素材の文書での評価は、辞書にある複合語を 1 語で打つ
 
-状態：採用
+状態：置き換え（`20261012-measure-missing-words-and-the-loss-against-the-best-order.md` に置き換えた）
 
 ## 背景
 

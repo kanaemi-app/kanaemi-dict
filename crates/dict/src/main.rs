@@ -2,7 +2,7 @@
 //! dictionary from them and evaluates it, and builds the additional
 //! dictionaries, reading and writing under the current directory.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
@@ -10,21 +10,22 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kanaemi_dict::{
-    Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Corrections,
+    Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Class, Corrections,
     CorrectionsError, CutError, Dictionary, DistError, DocumentsError, EvalDocument,
     EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, ReadingsError,
     RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
-    Unit, UnitsError, WordCase, WordCasesError, WordResult, WriteError, agreement, check_words,
-    clans, common_words, correction_uses, correction_uses_tsv, counted_reading, counted_voicings,
-    counted_words, counter_words, cut_documents, dictionary_lines, document_sources,
-    document_texts, each_document_with_units, engine, eval_documents, evaluate_documents,
-    examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
-    kanji_entries, listed_dictionary, mismatches_tsv, model_file, mozc_emoji, mozc_emoticons,
-    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
-    parse_corrections, parse_word_cases, paths_of, person_dictionary, place_dictionary,
-    place_names, plain_words, read_names, read_title_entries, read_titles, read_units,
-    reading_form, sample_tsv, shared_readings, sources_file, split_of, take, text_units,
-    title_entries, train, typed_as_entries, typed_units, unihan_readings, unnamed_words,
+    Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement,
+    check_words, clans, common_words, correction_uses, correction_uses_tsv, counted_reading,
+    counted_voicings, counted_words, counter_words, cut_documents, dictionary_lines,
+    document_sources, document_texts, each_document_with_units, engine, eval_documents,
+    evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
+    fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv, listed_dictionary,
+    mismatches_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols,
+    name_readings, nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections,
+    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
+    read_names, read_title_entries, read_titles, read_units, reading_form, sample_tsv,
+    shared_readings, sources_file, split_of, take, text_units, title_entries, train,
+    typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv, unnamed_words,
     wikidata_mismatches, wikidata_people, wikidata_readings, word_misses_tsv, word_scores_tsv,
     write_atomically, year_dictionary,
 };
@@ -57,7 +58,30 @@ const KANJI_EXCLUDED: &str = "kanji/excluded.tsv";
 const KANJI_SOURCE: &str = "mozc-single-kanji";
 const UNIHAN_SOURCE: &str = "unicode-unihan";
 const UNITS: &str = "build/units.jsonl";
-const EVALUATION: &str = "build/evaluation.tsv";
+/// Where an evaluation of the documents writes: its scores, the units not
+/// offered their surface, the keys whose first candidates lost to the best
+/// order, every key, the keys of the run before, and what changed since.
+struct EvaluationOutputs {
+    scores: &'static str,
+    misses: &'static str,
+    losses: &'static str,
+    keys: &'static str,
+    previous_keys: &'static str,
+    diff: &'static str,
+    /// A sample of the units not offered their surface for people to judge,
+    /// written once, without the model.
+    missing_sample: Option<&'static str>,
+}
+
+const EVALUATION: EvaluationOutputs = EvaluationOutputs {
+    scores: "build/evaluation.tsv",
+    misses: "build/evaluation-misses.tsv",
+    losses: "build/evaluation-losses.tsv",
+    keys: "build/evaluation-keys.tsv",
+    previous_keys: "build/evaluation-keys.previous.tsv",
+    diff: "build/evaluation-diff.tsv",
+    missing_sample: Some("build/evaluation-missing-sample.tsv"),
+};
 const DICTIONARIES: &str = "build/dictionaries";
 /// Where each additional dictionary is set up, one directory per dictionary.
 const ADDITIONAL: &str = "additional";
@@ -95,7 +119,18 @@ const NOTICES: &str = "notices";
 const DIST: &str = "build/dist";
 /// The ranking model, paired with the base dictionary.
 const MODEL: &str = "build/dictionaries/base.model";
-const RANKING_EVALUATION: &str = "build/ranking-evaluation.tsv";
+/// [`EVALUATION`] with the model.
+/// The rows of [`EVALUATION`]'s sample of units not offered their surface.
+const MISSING_SAMPLE: usize = 200;
+const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
+    scores: "build/ranking-evaluation.tsv",
+    misses: "build/ranking-misses.tsv",
+    losses: "build/ranking-losses.tsv",
+    keys: "build/ranking-keys.tsv",
+    previous_keys: "build/ranking-keys.previous.tsv",
+    diff: "build/ranking-diff.tsv",
+    missing_sample: None,
+};
 /// Where the training examples wait, in a file of each run's own, while the
 /// model trains.
 const RANKING_WORK: &str = "build/ranking";
@@ -110,10 +145,15 @@ const BLOCK_BYTES: usize = 4_000_000;
 /// Units of each field's train documents the model also learns from, the
 /// same for every field however much text it has.
 const FIELD_UNITS: usize = 250_000;
-/// The word set people wrote, and where its scores and misses go.
+/// The word set taken from lists outside the analyzer, and where its scores
+/// and misses go.
 const WORDS: &str = "evaluation/words.tsv";
 const CHECK_WORDS: &str = "build/check-words.tsv";
 const CHECK_WORD_MISSES: &str = "build/check-words-misses.tsv";
+/// What each feature expects of its words, and where the checks it does not
+/// meet go.
+const CHECKS: &str = "evaluation/checks.tsv";
+const CHECK_LIST: &str = "build/check-list.tsv";
 /// The model that ships with the base dictionary.
 const KEPT_MODEL: &str = "dictionaries/base.model";
 const CHECK_SAMPLE: &str = "build/check-sample.tsv";
@@ -165,8 +205,11 @@ usage: kanaemi-dict units
          build/dictionaries/base-train.tsv and base-train-report.tsv
        kanaemi-dict evaluate
          convert the units of the eval documents with
-         build/dictionaries/base-train.tsv and write where their surfaces
-         rank to build/evaluation.tsv
+         build/dictionaries/base-train.tsv, and write the units not offered
+         their surface and the loss against the best order without context
+         to build/evaluation.tsv, with the units not offered, the readings
+         that lost, every reading and what changed since the run before in
+         build/evaluation-{misses,losses,keys,diff}.tsv
        kanaemi-dict additional [NAME...]
          build the additional dictionaries NAME, or every one under
          additional/, from build/additional/NAME/ into
@@ -178,7 +221,8 @@ usage: kanaemi-dict units
          base and of each field's additional dictionary, write it to
          build/dictionaries/base.model paired with
          build/dictionaries/base.tsv, and measure the eval documents
-         without and with it into build/ranking-evaluation.tsv
+         without and with it, writing the tables of evaluate with it as
+         build/ranking-*.tsv
        kanaemi-dict take
          put the dictionaries and the model of build/dictionaries/ that have
          a sources record into dictionaries/ in place of those there, once
@@ -187,10 +231,12 @@ usage: kanaemi-dict units
          check dictionaries/ and gather each dictionary with the notice of
          its sources (from notices/) and the license into build/dist/NAME/
        kanaemi-dict check-words
-         convert the words of evaluation/words.tsv with the base dictionary
-         of dictionaries/, without and with its model, and write the scores
-         per category to build/check-words.tsv and the words whose right
-         surface did not come first to build/check-words-misses.tsv
+         convert the words of evaluation/words.tsv and the checks of
+         evaluation/checks.tsv with the base dictionary of dictionaries/,
+         without and with its model, and write the scores per category to
+         build/check-words.tsv, the words not offered or not first after
+         their text to build/check-words-misses.tsv, and the checks not met
+         to build/check-list.tsv
        kanaemi-dict check-words --build
          the same with build/dictionaries/base.tsv, without a model
        kanaemi-dict check-words [--build] --with NAME...
@@ -574,36 +620,106 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
 }
 
 /// Converts the units of the eval documents with the dictionary built from
-/// the train documents, and writes the scores per kind of source.
+/// the train documents, and writes the scores per kind of source and class.
 fn evaluate() -> Result<(), Error> {
     let dictionary = train_dictionary()?;
-    let docs = typed_eval_documents(BASE_TRAIN.dictionary)?;
-    let evaluation = evaluate_documents(&docs, &dictionary, None);
-    write_atomically(EVALUATION, |w| {
-        w.write_all(evaluation.to_tsv().as_bytes())
-            .map_err(write_error(EVALUATION))
-    })?;
+    let docs = typed_eval_documents()?;
+    let agreed = agreed_readings(&docs)?;
+    let evaluation = evaluate_documents(&docs, &dictionary, None, &|unit| agrees(&agreed, unit));
     print_scores("", &evaluation);
-    println!("documents: {}, out: {EVALUATION}", docs.len());
+    write_evaluation(&EVALUATION, &evaluation)?;
+    println!("documents: {}, out: {}", docs.len(), EVALUATION.scores);
     Ok(())
 }
 
-/// The eval documents with their units as a typist types them with the
-/// dictionary at `path`: each compound it has typed whole (see
-/// [`typed_as_entries`]).
-fn typed_eval_documents(path: &str) -> Result<Vec<EvalDocument>, Error> {
-    let text = read_to_string(path)?;
-    let entries: HashSet<(&str, &str)> = dictionary_lines(&text)
-        .filter(|(_, line)| line.conjugation.is_empty())
-        .map(|(_, line)| (line.reading, line.surface))
-        .collect();
+/// Writes every table of `evaluation` to `out`, keeping the keys of the run
+/// before to write what changed since.
+fn write_evaluation(out: &EvaluationOutputs, evaluation: &Evaluation) -> Result<(), Error> {
+    let all = evaluation.all();
+    if std::path::Path::new(out.keys).exists() {
+        std::fs::rename(out.keys, out.previous_keys).map_err(write_error(out.previous_keys))?;
+    }
+    let keys = all.keys_tsv();
+    for (path, tsv) in [
+        (out.scores, evaluation.to_tsv()),
+        (out.misses, all.misses_tsv()),
+        (out.losses, all.losses_tsv()),
+        (out.keys, keys.clone()),
+    ] {
+        write_atomically(path, |w| {
+            w.write_all(tsv.as_bytes()).map_err(write_error(path))
+        })?;
+    }
+    if let Some(path) = out.missing_sample {
+        let tsv = all.missing_sample_tsv(MISSING_SAMPLE);
+        write_atomically(path, |w| {
+            w.write_all(tsv.as_bytes()).map_err(write_error(path))
+        })?;
+    }
+    if std::path::Path::new(out.previous_keys).exists() {
+        let diff = keys_diff_tsv(&read_to_string(out.previous_keys)?, &keys);
+        println!(
+            "changed keys since the run before: {}, out: {}",
+            diff.lines().count() - 1,
+            out.diff
+        );
+        write_atomically(out.diff, |w| {
+            w.write_all(diff.as_bytes()).map_err(write_error(out.diff))
+        })?;
+    }
+    Ok(())
+}
+
+/// The eval documents with their units as the evaluation types them (see
+/// [`typed_by_analyzer`]).
+fn typed_eval_documents() -> Result<Vec<EvalDocument>, Error> {
     let mut docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
     for doc in &mut docs {
-        doc.units = typed_as_entries(&doc.units, &doc.compounds, |reading, surface| {
-            entries.contains(&(reading, surface))
-        });
+        doc.units = typed_by_analyzer(&doc.units, &doc.compounds);
     }
     Ok(docs)
+}
+
+/// The readings MeCab gives the surfaces of the units of `docs` the same as
+/// the analyzer, by surface: answers another analyzer agrees with, less
+/// likely to be the analyzer's errors. Units with a number are left out, as
+/// MeCab reads digits one by one.
+fn agreed_readings(docs: &[EvalDocument]) -> Result<HashMap<String, HashSet<String>>, Error> {
+    let pairs: BTreeSet<(&str, &str)> = docs
+        .iter()
+        .flat_map(|d| &d.units)
+        .filter(|u| u.numeric.is_none())
+        .map(|u| (u.surface.as_str(), u.reading.as_str()))
+        .collect();
+    let forms: Vec<String> = pairs
+        .iter()
+        .map(|(surface, _)| *surface)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let paths = mecab_paths(&forms)?;
+    let at: HashMap<&str, usize> = forms
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.as_str(), i))
+        .collect();
+    let mut agreed: HashMap<String, HashSet<String>> = HashMap::new();
+    for (surface, reading) in pairs {
+        if agreement(reading, &paths[at[surface]]) == Agreement::Agrees {
+            agreed
+                .entry(surface.to_owned())
+                .or_default()
+                .insert(reading.to_owned());
+        }
+    }
+    Ok(agreed)
+}
+
+fn agrees(agreed: &HashMap<String, HashSet<String>>, unit: &Unit) -> bool {
+    agreed
+        .get(&unit.surface)
+        .is_some_and(|readings| readings.contains(&unit.reading))
 }
 
 /// The base dictionary built from the train documents, as Kanaemi reads it.
@@ -612,16 +728,25 @@ fn train_dictionary() -> Result<Arc<TextDictionary>, Error> {
 }
 
 fn print_scores(label: &str, evaluation: &Evaluation) {
-    for (class, scores) in evaluation.all().classes() {
-        for (history, score) in [("off", scores.fresh), ("on", scores.with_history)] {
-            println!(
-                "{label}{class} history {history}: units {}, covered {:.2}%, first {:.2}%, mean rank {:.3}",
-                score.units,
-                percent(score.covered, score.units),
-                percent(score.first, score.units),
-                score.mean_rank(),
-            );
-        }
+    let all = evaluation.all();
+    let rows = Class::ALL
+        .map(|class| (class.name(), all.score(class)))
+        .into_iter()
+        .chain([
+            ("all", all.total()),
+            ("agreed with mecab", evaluation.agreed.total()),
+        ]);
+    for (class, s) in rows {
+        println!(
+            "{label}{class}: units {}, missing {} ({:.2}%), first {} of best {} (loss {}), page loss {}",
+            s.units,
+            s.missing,
+            percent(s.missing as usize, s.units as usize),
+            s.first,
+            s.best_first,
+            s.loss(),
+            s.page_loss(),
+        );
     }
 }
 
@@ -702,18 +827,17 @@ fn train_ranking() -> Result<(), Error> {
         path: MODEL.into(),
         source,
     })?;
-    let docs = typed_eval_documents(BASE_TRAIN.dictionary)?;
+    let docs = typed_eval_documents()?;
+    let agreed = agreed_readings(&docs)?;
+    let agreed = |unit: &Unit| agrees(&agreed, unit);
     print_scores(
         "without the model: ",
-        &evaluate_documents(&docs, &dictionary, None),
+        &evaluate_documents(&docs, &dictionary, None, &agreed),
     );
-    let with = evaluate_documents(&docs, &dictionary, Some(&Arc::new(model)));
+    let with = evaluate_documents(&docs, &dictionary, Some(&Arc::new(model)), &agreed);
     print_scores("with the model: ", &with);
-    write_atomically(RANKING_EVALUATION, |w| {
-        w.write_all(with.to_tsv().as_bytes())
-            .map_err(write_error(RANKING_EVALUATION))
-    })?;
-    println!("out: {MODEL}, evaluation: {RANKING_EVALUATION}");
+    write_evaluation(&RANKING_EVALUATION, &with)?;
+    println!("out: {MODEL}, evaluation: {}", RANKING_EVALUATION.scores);
     Ok(())
 }
 
@@ -849,27 +973,26 @@ fn take_built() -> Result<(), Error> {
     Ok(())
 }
 
-/// Converts the word set with the base dictionary that ships and the built
-/// additional dictionaries `with` after it, without and with its model.
+/// Converts the word set and the checks with the base dictionary that ships
+/// and the built additional dictionaries `with` after it, without and with
+/// its model.
 fn check_kept_words(with: &[&str]) -> Result<(), Error> {
-    let cases = word_cases()?;
     let dictionaries = with_additional(parsed_dictionary(&format!("{KEPT}/base.tsv"))?, with)?;
     let model = RankingModel::open(KEPT_MODEL).map_err(|source| Error::Model {
         path: KEPT_MODEL.into(),
         source,
     })?;
-    let off = check_words(&cases, &dictionaries, None);
-    let on = check_words(&cases, &dictionaries, Some(&Arc::new(model)));
-    write_word_checks(&cases, &[("off", &off), ("on", &on)])
+    check_words_with(
+        &dictionaries,
+        &[("off", None), ("on", Some(Arc::new(model)))],
+    )
 }
 
 /// [`check_kept_words`] with the base dictionary just built, which has no
 /// model paired with it until the model is trained again.
 fn check_built_words(with: &[&str]) -> Result<(), Error> {
-    let cases = word_cases()?;
     let dictionaries = with_additional(parsed_dictionary(BASE.dictionary)?, with)?;
-    let off = check_words(&cases, &dictionaries, None);
-    write_word_checks(&cases, &[("off", &off)])
+    check_words_with(&dictionaries, &[("off", None)])
 }
 
 /// `base` followed by the additional dictionaries `names` built under
@@ -885,33 +1008,60 @@ fn with_additional(
     Ok(dictionaries)
 }
 
-fn word_cases() -> Result<Vec<WordCase>, Error> {
-    parse_word_cases(read_to_string(WORDS)?).map_err(|source| Error::WordCases {
+/// Converts the word set and the checks with `dictionaries` and each model
+/// of `models`, labeled, and writes their tables.
+fn check_words_with(
+    dictionaries: &[Arc<TextDictionary>],
+    models: &[(&str, Option<Arc<RankingModel>>)],
+) -> Result<(), Error> {
+    let cases = parse_word_cases(read_to_string(WORDS)?).map_err(|source| Error::WordCases {
         path: WORDS.into(),
         source,
-    })
-}
-
-fn write_word_checks(cases: &[WordCase], runs: &[(&str, &[WordResult])]) -> Result<(), Error> {
+    })?;
+    let checks = parse_check_cases(read_to_string(CHECKS)?).map_err(|source| Error::WordCases {
+        path: CHECKS.into(),
+        source,
+    })?;
+    let check_words_of: Vec<WordCase> = checks.iter().map(|c| c.case.clone()).collect();
+    let mut word_runs = Vec::new();
+    let mut check_runs = Vec::new();
+    for (label, model) in models {
+        word_runs.push((*label, check_words(&cases, dictionaries, model.as_ref())));
+        check_runs.push((
+            *label,
+            check_words(&check_words_of, dictionaries, model.as_ref()),
+        ));
+    }
+    let word_runs: Vec<(&str, &[WordResult])> =
+        word_runs.iter().map(|(l, r)| (*l, r.as_slice())).collect();
+    let check_runs: Vec<(&str, &[WordResult])> =
+        check_runs.iter().map(|(l, r)| (*l, r.as_slice())).collect();
+    let unmet = unmet_checks_tsv(&checks, &check_runs);
     for (path, tsv) in [
-        (CHECK_WORDS, word_scores_tsv(cases, runs)),
-        (CHECK_WORD_MISSES, word_misses_tsv(cases, runs)),
+        (CHECK_WORDS, word_scores_tsv(&cases, &word_runs)),
+        (CHECK_WORD_MISSES, word_misses_tsv(&cases, &word_runs)),
+        (CHECK_LIST, unmet.clone()),
     ] {
         write_atomically(path, |w| {
             w.write_all(tsv.as_bytes()).map_err(write_error(path))
         })?;
     }
-    for &(label, results) in runs {
-        let first = results.iter().filter(|r| r.rank == Some(1)).count();
-        let covered = results.iter().filter(|r| r.rank.is_some()).count();
+    for (label, results) in &word_runs {
+        let mut score = WordScore::default();
+        for (case, result) in cases.iter().zip(results.iter()) {
+            score.add(case, result);
+        }
         println!(
-            "model {label}: words {}, covered {:.2}%, first {:.2}%",
-            results.len(),
-            percent(covered, results.len()),
-            percent(first, results.len()),
+            "model {label}: words {}, missing {}, first after a text {} of {}",
+            score.words, score.missing, score.after_text_first, score.after_text,
         );
     }
-    println!("out: {CHECK_WORDS}, misses: {CHECK_WORD_MISSES}");
+    println!(
+        "checks: {}, not met: {}",
+        checks.len() * models.len(),
+        unmet.lines().count() - 1
+    );
+    println!("out: {CHECK_WORDS}, misses: {CHECK_WORD_MISSES}, checks not met: {CHECK_LIST}");
     Ok(())
 }
 

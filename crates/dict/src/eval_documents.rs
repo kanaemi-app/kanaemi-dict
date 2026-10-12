@@ -12,8 +12,8 @@ use rayon::prelude::*;
 
 use crate::documents::each_document;
 use crate::{
-    ClassScores, DocumentsError, Split, Unit, UnitsError, engine, evaluate_document, read_units,
-    split_of,
+    Class, DocumentsError, Score, Split, Tallies, Unit, UnitsError, engine, evaluate_document,
+    read_units, split_of,
 };
 
 /// A document of the eval split with its units in position order.
@@ -32,23 +32,15 @@ pub fn span_of(unit: &Unit) -> (usize, usize) {
     (unit.position, unit.position + unit.surface.chars().count())
 }
 
-/// The units of a document as a typist types them: a compound that
-/// `is_entry` tells by reading and surface the dictionary has is typed whole
-/// (危機一髪), in place of the units inside it; any other compound is typed
-/// unit by unit. Kanaemi converts one word at a time, so a compound the
-/// dictionary has is one word to the typist. Of compounds that overlap, the
-/// one starting first, then the longest, is typed (朽ち果てた over 朽ち果て);
-/// a compound a unit runs out of (社会主義 and 主義的) is not, as the typist
-/// cannot type both.
-pub fn typed_as_entries(
-    units: &[Unit],
-    compounds: &[Unit],
-    is_entry: impl Fn(&str, &str) -> bool,
-) -> Vec<Unit> {
-    let mut candidates: Vec<&Unit> = compounds
-        .iter()
-        .filter(|c| is_entry(&c.reading, &c.surface))
-        .collect();
+/// The units of a document the evaluation types, decided by the analyzer
+/// alone so every dictionary is asked the same: each compound typed whole
+/// (危機一髪) in place of the units inside it, and every other unit. Of
+/// compounds that overlap, the one starting first, then the longest, is
+/// typed (朽ち果てた over 朽ち果て); a compound a unit runs out of (社会主義
+/// and 主義的) is not, as the typist cannot type both, and its units are
+/// typed instead.
+pub fn typed_by_analyzer(units: &[Unit], compounds: &[Unit]) -> Vec<Unit> {
+    let mut candidates: Vec<&Unit> = compounds.iter().collect();
     candidates.sort_by_key(|c| {
         let (start, end) = span_of(c);
         (start, std::cmp::Reverse(end))
@@ -234,45 +226,59 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
     }
 }
 
-/// Scores per kind of source, the part of a doc ID before its first `:`.
+/// The tallies per kind of source, the part of a doc ID before its first
+/// `:`, and the tally of the units whose reading another analyzer agrees
+/// with, of every kind.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Evaluation {
-    pub by_kind: BTreeMap<String, ClassScores>,
+    pub by_kind: BTreeMap<String, Tallies>,
+    pub agreed: Tallies,
 }
 
 impl Evaluation {
-    /// Every kind's scores together.
-    pub fn all(&self) -> ClassScores {
-        let mut all = ClassScores::default();
-        for scores in self.by_kind.values() {
-            all.merge(*scores);
+    /// Every kind's tallies together; the best order is the one for all the
+    /// documents.
+    pub fn all(&self) -> Tallies {
+        let mut all = Tallies::default();
+        for tallies in self.by_kind.values() {
+            all.merge(tallies.clone());
         }
         all
     }
 
-    /// The table of `build/evaluation.tsv`: a header, then a row per kind,
-    /// history and class, kinds in the order of their UTF-8 bytes and `all`
-    /// last.
+    /// The table of `build/evaluation.tsv`: a header, then a row per kind
+    /// and class, kinds in the order of their UTF-8 bytes, then `all`, then
+    /// `agreed` for the units another analyzer reads as the answer does;
+    /// classes with `all` last.
     pub fn to_tsv(&self) -> String {
         let all = self.all();
-        let mut tsv = String::from("kind\thistory\tclass\tunits\tcovered\tfirst\tmean_rank\n");
-        for (kind, scores) in self.by_kind.iter().chain([(&"all".to_owned(), &all)]) {
-            for history in ["off", "on"] {
-                for (class, class_scores) in scores.classes() {
-                    let score = match history {
-                        "off" => class_scores.fresh,
-                        _ => class_scores.with_history,
-                    };
-                    writeln!(
-                        tsv,
-                        "{kind}\t{history}\t{class}\t{}\t{}\t{}\t{:.3}",
-                        score.units,
-                        score.covered,
-                        score.first,
-                        score.mean_rank(),
-                    )
-                    .expect("writing to a String never fails");
-                }
+        let (all_name, agreed_name) = ("all".to_owned(), "agreed".to_owned());
+        let kinds = self
+            .by_kind
+            .iter()
+            .chain([(&all_name, &all), (&agreed_name, &self.agreed)]);
+        let mut tsv = String::from(
+            "kind\tclass\tunits\tmissing\tfirst\tbest_first\tloss\tpage\tbest_page\tpage_loss\n",
+        );
+        for (kind, tallies) in kinds {
+            let rows = Class::ALL
+                .map(|class| (class.name(), tallies.score(class)))
+                .into_iter()
+                .chain([("all", tallies.total())]);
+            for (class, s) in rows {
+                writeln!(
+                    tsv,
+                    "{kind}\t{class}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    s.units,
+                    s.missing,
+                    s.first,
+                    s.best_first,
+                    s.loss(),
+                    s.page,
+                    s.best_page,
+                    s.page_loss(),
+                )
+                .expect("writing to a String never fails");
             }
         }
         tsv
@@ -281,46 +287,122 @@ impl Evaluation {
 
 /// Converts every document with engines reading `dictionary` alone, ranking
 /// with `model` when given, in parallel by chunks of documents, a few chunks
-/// per thread. Each chunk has its own pair of engines, all sharing the one
-/// parsed dictionary and model.
+/// per thread. Each chunk has its own engine, all sharing the one parsed
+/// dictionary and model. The units `agrees` takes are tallied apart too.
 pub fn evaluate_documents(
     docs: &[EvalDocument],
     dictionary: &Arc<TextDictionary>,
     model: Option<&Arc<RankingModel>>,
+    agrees: &(dyn Fn(&Unit) -> bool + Sync),
 ) -> Evaluation {
-    let engine = || {
-        let mut engine = engine(dictionary.clone());
-        engine.set_model(model.cloned());
-        engine
-    };
     let chunk = docs.len().div_ceil(rayon::current_num_threads() * 4).max(1);
-    let per_doc: Vec<ClassScores> = docs
+    let parts: Vec<Evaluation> = docs
         .par_chunks(chunk)
-        .flat_map_iter(|chunk| {
-            let fresh = engine();
-            let mut with_history = engine();
-            chunk
-                .iter()
-                .map(|doc| evaluate_document(&fresh, &mut with_history, &doc.units, &doc.text))
-                .collect::<Vec<_>>()
+        .map(|chunk| {
+            let mut field = engine(dictionary.clone());
+            field.set_model(model.cloned());
+            let mut part = Evaluation::default();
+            for doc in chunk {
+                let kind = doc.doc_id.split(':').next().unwrap_or_default();
+                let tallies = part.by_kind.entry(kind.to_owned()).or_default();
+                let agreed = &mut part.agreed;
+                evaluate_document(&mut field, &doc.units, &doc.text, |unit, offered, rank| {
+                    tallies.add(unit, offered, rank);
+                    if agrees(unit) {
+                        agreed.add(unit, offered, rank);
+                    }
+                });
+            }
+            part
         })
         .collect();
     let mut evaluation = Evaluation::default();
-    for (doc, scores) in docs.iter().zip(per_doc) {
-        let kind = doc.doc_id.split(':').next().unwrap_or_default();
-        evaluation
-            .by_kind
-            .entry(kind.to_owned())
-            .or_default()
-            .merge(scores);
+    for part in parts {
+        for (kind, tallies) in part.by_kind {
+            evaluation.by_kind.entry(kind).or_default().merge(tallies);
+        }
+        evaluation.agreed.merge(part.agreed);
     }
     evaluation
+}
+
+/// One key's line of [`Tallies::keys_tsv`].
+struct KeyLine {
+    units: u64,
+    missing: u64,
+    loss: i64,
+}
+
+fn key_lines(tsv: &str) -> BTreeMap<(String, String), KeyLine> {
+    tsv.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\t').collect();
+            let n = |i: usize| f.get(i)?.parse::<u64>().ok();
+            let score = Score {
+                units: n(2)?,
+                missing: n(3)?,
+                first: n(4)?,
+                best_first: n(5)?,
+                ..Score::default()
+            };
+            Some((
+                (f[0].to_owned(), f[1].to_owned()),
+                KeyLine {
+                    units: score.units,
+                    missing: score.missing,
+                    loss: score.loss(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// What changed from `old` to `new`, both tables of every key: the keys
+/// whose units not offered or loss changed, with both, the greatest change
+/// first. A key in one table only counts as nothing in the other.
+pub fn keys_diff_tsv(old: &str, new: &str) -> String {
+    let (old, new) = (key_lines(old), key_lines(new));
+    let none = KeyLine {
+        units: 0,
+        missing: 0,
+        loss: 0,
+    };
+    let mut rows: Vec<(&(String, String), &KeyLine, &KeyLine)> = old
+        .keys()
+        .chain(new.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|k| (k, old.get(k).unwrap_or(&none), new.get(k).unwrap_or(&none)))
+        .filter(|(_, o, n)| o.missing != n.missing || o.loss != n.loss)
+        .collect();
+    let change = |o: &KeyLine, n: &KeyLine| o.missing.abs_diff(n.missing) + o.loss.abs_diff(n.loss);
+    rows.sort_by(|a, b| {
+        change(b.1, b.2)
+            .cmp(&change(a.1, a.2))
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let mut tsv = String::from(
+        "class\treading\tunits\tmissing_before\tmissing_after\tloss_before\tloss_after\n",
+    );
+    for ((class, reading), o, n) in rows {
+        writeln!(
+            tsv,
+            "{class}\t{reading}\t{}\t{}\t{}\t{}\t{}",
+            n.units.max(o.units),
+            o.missing,
+            n.missing,
+            o.loss,
+            n.loss,
+        )
+        .expect("writing to a String never fails");
+    }
+    tsv
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Score, Scores};
 
     // Splits computed apart from this code: aozora:000001 is train,
     // aozora:000013 dev, and aozora:000004 and aozora:000015 eval.
@@ -420,27 +502,24 @@ mod tests {
     }
 
     #[test]
-    fn a_compound_the_dictionary_has_is_typed_whole_in_place_of_its_parts() {
-        let entry = Unit {
+    fn every_compound_is_typed_whole_in_place_of_its_parts() {
+        let compound = |position, reading: &str, surface: &str| Unit {
             compound: true,
-            ..unit("aozora:000004", 0, "ききいっぱつ", "危機一髪")
+            ..unit("aozora:000004", position, reading, surface)
         };
-        let other = Unit {
-            compound: true,
-            ..unit("aozora:000004", 5, "ろてんぶろ", "露天風呂")
-        };
+        let crisis = compound(0, "ききいっぱつ", "危機一髪");
+        let bath = compound(5, "ろてんぶろ", "露天風呂");
         let units = [
             unit("aozora:000004", 0, "きき", "危機"),
             unit("aozora:000004", 2, "いっぱつ", "一髪"),
+            unit("aozora:000004", 4, "と", "と"),
             unit("aozora:000004", 5, "ろてん", "露天"),
             unit("aozora:000004", 7, "ふろ", "風呂"),
         ];
 
-        let typed = typed_as_entries(&units, &[entry.clone(), other], |reading, surface| {
-            (reading, surface) == ("ききいっぱつ", "危機一髪")
-        });
+        let typed = typed_by_analyzer(&units, &[crisis.clone(), bath.clone()]);
 
-        assert_eq!(typed, [entry, units[2].clone(), units[3].clone()]);
+        assert_eq!(typed, [crisis, units[2].clone(), bath]);
     }
 
     #[test]
@@ -455,10 +534,9 @@ mod tests {
             unit("aozora:000004", 2, "はてた", "果てた"),
         ];
 
-        let typed = typed_as_entries(
+        let typed = typed_by_analyzer(
             &units,
             &[joined.clone(), compound(0, "くちはて", "朽ち果て")],
-            |_, _| true,
         );
 
         assert_eq!(typed, [joined]);
@@ -475,7 +553,7 @@ mod tests {
             ..unit("aozora:000004", 0, "しゃかいしゅぎ", "社会主義")
         };
 
-        let typed = typed_as_entries(&units, &[compound], |_, _| true);
+        let typed = typed_by_analyzer(&units, &[compound]);
 
         assert_eq!(typed, units);
     }
@@ -639,67 +717,6 @@ mod tests {
         );
     }
 
-    fn score(units: usize, covered: usize, first: usize, rank_sum: usize) -> Score {
-        Score {
-            units,
-            covered,
-            first,
-            rank_sum,
-        }
-    }
-
-    fn scores(fresh: Score, with_history: Score) -> Scores {
-        Scores {
-            fresh,
-            with_history,
-        }
-    }
-
-    #[test]
-    fn the_table_has_a_row_per_kind_history_and_class_in_byte_order_with_all_last() {
-        let evaluation = Evaluation {
-            by_kind: BTreeMap::from([
-                (
-                    "law".to_owned(),
-                    ClassScores {
-                        numeric: scores(score(1, 1, 0, 2), score(1, 1, 1, 1)),
-                        other: scores(score(3, 2, 2, 3), score(3, 3, 2, 4)),
-                    },
-                ),
-                (
-                    "aozora".to_owned(),
-                    ClassScores {
-                        numeric: Scores::default(),
-                        other: scores(score(2, 0, 0, 0), score(2, 1, 1, 1)),
-                    },
-                ),
-            ]),
-        };
-
-        assert_eq!(
-            evaluation.to_tsv(),
-            "kind\thistory\tclass\tunits\tcovered\tfirst\tmean_rank\n\
-             aozora\toff\tnumeric\t0\t0\t0\t0.000\n\
-             aozora\toff\tother\t2\t0\t0\t0.000\n\
-             aozora\toff\tall\t2\t0\t0\t0.000\n\
-             aozora\ton\tnumeric\t0\t0\t0\t0.000\n\
-             aozora\ton\tother\t2\t1\t1\t1.000\n\
-             aozora\ton\tall\t2\t1\t1\t1.000\n\
-             law\toff\tnumeric\t1\t1\t0\t2.000\n\
-             law\toff\tother\t3\t2\t2\t1.500\n\
-             law\toff\tall\t4\t3\t2\t1.667\n\
-             law\ton\tnumeric\t1\t1\t1\t1.000\n\
-             law\ton\tother\t3\t3\t2\t1.333\n\
-             law\ton\tall\t4\t4\t3\t1.250\n\
-             all\toff\tnumeric\t1\t1\t0\t2.000\n\
-             all\toff\tother\t5\t2\t2\t1.500\n\
-             all\toff\tall\t6\t3\t2\t1.667\n\
-             all\ton\tnumeric\t1\t1\t1\t1.000\n\
-             all\ton\tother\t5\t4\t3\t1.250\n\
-             all\ton\tall\t6\t5\t4\t1.200\n"
-        );
-    }
-
     fn eval_document(doc_id: &str, units: &[(&str, &str)]) -> EvalDocument {
         EvalDocument {
             doc_id: doc_id.into(),
@@ -739,23 +756,100 @@ mod tests {
             .num_threads(1)
             .build()
             .unwrap()
-            .install(|| evaluate_documents(&docs, &dictionary, None));
+            .install(|| evaluate_documents(&docs, &dictionary, None, &|_| false));
 
-        let mut alone: BTreeMap<String, ClassScores> = BTreeMap::new();
+        let mut alone: BTreeMap<String, Tallies> = BTreeMap::new();
         for doc in &docs {
-            let scores = evaluate_document(
-                &engine(dictionary.clone()),
+            let kind = doc.doc_id.split(':').next().unwrap();
+            let tallies = alone.entry(kind.to_owned()).or_default();
+            evaluate_document(
                 &mut engine(dictionary.clone()),
                 &doc.units,
                 &doc.text,
+                |u, o, r| tallies.add(u, o, r),
             );
-            let kind = doc.doc_id.split(':').next().unwrap();
-            alone.entry(kind.to_owned()).or_default().merge(scores);
         }
         assert_eq!(evaluation.by_kind, alone);
         assert_eq!(
-            evaluation.all().all().fresh.units,
-            docs.iter().map(|d| d.units.len()).sum::<usize>()
+            evaluation.all().total().units,
+            docs.iter().map(|d| d.units.len() as u64).sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn the_table_has_a_row_per_kind_and_class_with_all_last() {
+        let order =
+            |surfaces: &[&str]| -> Vec<String> { surfaces.iter().map(|s| (*s).into()).collect() };
+        let mut law = Tallies::default();
+        let letters = order(&["手神", "手紙"]);
+        for surface in ["手紙", "手紙", "手神"] {
+            let rank = letters.iter().position(|s| s == surface).map(|i| i + 1);
+            law.add(&unit("law:1", 0, "てがみ", surface), &letters, rank);
+        }
+        let three = Unit {
+            numeric: Some(crate::Numeric {
+                reading: "{}ぼん".into(),
+                surface: "{half-num}本".into(),
+                value: "3".into(),
+                kana: String::new(),
+            }),
+            ..unit("law:1", 0, "3ぼん", "3本")
+        };
+        law.add(&three, &order(&["三本"]), None);
+        let mut aozora = Tallies::default();
+        aozora.add(&unit("aozora:1", 0, "ばく", "獏"), &order(&["バク"]), None);
+        let evaluation = Evaluation {
+            by_kind: BTreeMap::from([("law".to_owned(), law), ("aozora".to_owned(), aozora)]),
+            agreed: Tallies::default(),
+        };
+
+        assert_eq!(
+            evaluation.to_tsv(),
+            "kind\tclass\tunits\tmissing\tfirst\tbest_first\tloss\tpage\tbest_page\tpage_loss\n\
+             aozora\tword\t1\t1\t0\t0\t0\t0\t0\t0\n\
+             aozora\tcompound\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             aozora\tnumeric\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             aozora\tvariant\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             aozora\tall\t1\t1\t0\t0\t0\t0\t0\t0\n\
+             law\tword\t3\t0\t1\t2\t1\t3\t3\t0\n\
+             law\tcompound\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             law\tnumeric\t1\t1\t0\t0\t0\t0\t0\t0\n\
+             law\tvariant\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             law\tall\t4\t1\t1\t2\t1\t3\t3\t0\n\
+             all\tword\t4\t1\t1\t2\t1\t3\t3\t0\n\
+             all\tcompound\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             all\tnumeric\t1\t1\t0\t0\t0\t0\t0\t0\n\
+             all\tvariant\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             all\tall\t5\t2\t1\t2\t1\t3\t3\t0\n\
+             agreed\tword\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             agreed\tcompound\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             agreed\tnumeric\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             agreed\tvariant\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             agreed\tall\t0\t0\t0\t0\t0\t0\t0\t0\n"
+        );
+    }
+
+    #[test]
+    fn the_diff_lists_the_keys_whose_missing_or_loss_changed_the_greatest_first() {
+        let header = "class\treading\tunits\tmissing\tfirst\tbest_first\tpage\tbest_page\n";
+        let old = format!(
+            "{header}word\tてがみ\t10\t0\t5\t8\t10\t10\n\
+             word\tばく\t3\t3\t0\t0\t0\t0\n\
+             word\tほん\t4\t0\t4\t4\t4\t4\n"
+        );
+        let new = format!(
+            "{header}word\tてがみ\t10\t0\t8\t8\t10\t10\n\
+             word\tばく\t3\t1\t2\t2\t2\t2\n\
+             word\tほん\t4\t0\t4\t4\t4\t4\n\
+             compound\tろてんぶろ\t2\t2\t0\t0\t0\t0\n"
+        );
+
+        assert_eq!(
+            keys_diff_tsv(&old, &new),
+            "class\treading\tunits\tmissing_before\tmissing_after\tloss_before\tloss_after\n\
+             word\tてがみ\t10\t0\t0\t3\t0\n\
+             compound\tろてんぶろ\t2\t0\t2\t0\t0\n\
+             word\tばく\t3\t3\t1\t0\t0\n"
         );
     }
 }
@@ -803,10 +897,10 @@ mod model_tests {
             Arc::new(model)
         };
 
-        let without = evaluate_documents(std::slice::from_ref(&doc), &dictionary, None);
-        let with = evaluate_documents(&[doc], &dictionary, Some(&model));
+        let without = evaluate_documents(std::slice::from_ref(&doc), &dictionary, None, &|_| false);
+        let with = evaluate_documents(&[doc], &dictionary, Some(&model), &|_| false);
 
-        assert_eq!(without.all().all().fresh.first, 0);
-        assert_eq!(with.all().all().fresh.first, 1);
+        assert_eq!(without.all().total().first, 0);
+        assert_eq!(with.all().total().first, 1);
     }
 }
