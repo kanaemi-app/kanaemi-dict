@@ -510,42 +510,35 @@ impl Dictionary {
         label: impl AsRef<str>,
         keep: impl Fn(&ItemLine, LineKind) -> bool,
     ) -> String {
-        let mut out = format!("# Kanaemi 公式辞書・{}（kanaemi-dict）\n", label.as_ref());
-        for (entry, kind) in self.lines() {
-            let line = item_line(&entry, kind);
-            if !keep(&line, kind) {
-                continue;
-            }
-            out.push_str(&line.to_string());
-            out.push('\n');
-        }
-        out
+        text_of(label, &self.kept_lines(keep))
     }
 
-    /// Moves every cost by the same amount, so that the cheapest of the lines
-    /// `keep` keeps costs `start`, as a dictionary made from a list starts at
-    /// the cost of a word met once in the base's text. The differences
-    /// between costs stay.
-    pub fn start_costs_at(&mut self, start: u32, keep: impl Fn(&ItemLine, LineKind) -> bool) {
-        let Some(cheapest) = self
-            .lines()
+    /// [`Dictionary::to_text_where`] with every cost moved by the same
+    /// amount, so that the cheapest of the lines `keep` keeps costs `start`,
+    /// as a dictionary made from a list starts at the cost of a word met once
+    /// in the base's text. The differences between costs stay.
+    pub fn to_text_where_starting_at(
+        &self,
+        label: impl AsRef<str>,
+        start: u32,
+        keep: impl Fn(&ItemLine, LineKind) -> bool,
+    ) -> String {
+        let mut lines = self.kept_lines(keep);
+        if let Some(cheapest) = lines.iter().map(|(entry, _)| entry.cost).min() {
+            for (entry, _) in &mut lines {
+                entry.cost = (i64::from(entry.cost) + i64::from(start) - i64::from(cheapest))
+                    .clamp(0, i64::from(u32::MAX)) as u32;
+            }
+        }
+        text_of(label, &lines)
+    }
+
+    /// The lines `keep` keeps, in the order of [`Dictionary::lines`].
+    fn kept_lines(&self, keep: impl Fn(&ItemLine, LineKind) -> bool) -> Vec<(Entry, LineKind)> {
+        self.lines()
             .into_iter()
             .filter(|(entry, kind)| keep(&item_line(entry, *kind), *kind))
-            .map(|(entry, _)| entry.cost)
-            .min()
-        else {
-            return;
-        };
-        let moved = |cost: &mut u32| {
-            *cost = (i64::from(*cost) + i64::from(start) - i64::from(cheapest))
-                .clamp(0, i64::from(u32::MAX)) as u32;
-        };
-        self.entries
-            .iter_mut()
-            .chain(&mut self.okuri)
-            .chain(&mut self.numeric)
-            .for_each(|e| moved(&mut e.cost));
-        self.whole_forms.values_mut().for_each(moved);
+            .collect()
     }
 
     /// Every line as written, with its cost: by reading, and within a reading
@@ -598,6 +591,17 @@ impl Dictionary {
             Err(RejectedLines(invalid))
         }
     }
+}
+
+/// Kanaemi's text dictionary of `lines`, described as the official dictionary
+/// of `label`.
+fn text_of(label: impl AsRef<str>, lines: &[(Entry, LineKind)]) -> String {
+    let mut out = format!("# Kanaemi 公式辞書・{}（kanaemi-dict）\n", label.as_ref());
+    for (entry, kind) in lines {
+        out.push_str(&item_line(entry, *kind).to_string());
+        out.push('\n');
+    }
+    out
 }
 
 /// The line `entry` of `kind` is written as.
@@ -1836,7 +1840,7 @@ mod tests {
 
     #[test]
     fn costs_start_at_the_given_cost_and_keep_their_differences() {
-        let mut dict = Dictionary {
+        let dict = Dictionary {
             entries: vec![
                 entry("かんじ", "侃士", None, 1183),
                 entry("けんじ", "健志", None, 1012),
@@ -1844,9 +1848,8 @@ mod tests {
             okuri: vec![entry("か*く", "書く", None, 1100)],
             ..Default::default()
         };
-        dict.start_costs_at(1699, |_, _| true);
         assert_eq!(
-            dict.to_text("t"),
+            dict.to_text_where_starting_at("t", 1699, |_, _| true),
             "# Kanaemi 公式辞書・t（kanaemi-dict）\n\
              か*く\t書く\t\t1787\n\
              かんじ\t侃士\t\t1870\n\
@@ -1856,7 +1859,7 @@ mod tests {
 
     #[test]
     fn costs_start_at_the_cheapest_line_that_is_kept() {
-        let mut dict = Dictionary {
+        let dict = Dictionary {
             entries: vec![
                 entry("さとう", "佐藤", None, 500),
                 entry("かんじ", "侃士", None, 1183),
@@ -1865,9 +1868,8 @@ mod tests {
             ..Default::default()
         };
         let kept = |line: &ItemLine, _: LineKind| line.surface != "佐藤";
-        dict.start_costs_at(1699, kept);
         assert_eq!(
-            dict.to_text_where("t", kept),
+            dict.to_text_where_starting_at("t", 1699, kept),
             "# Kanaemi 公式辞書・t（kanaemi-dict）\n\
              かんじ\t侃士\t\t1870\n\
              けんじ\t健志\t\t1699\n"
@@ -1875,13 +1877,33 @@ mod tests {
     }
 
     #[test]
-    fn a_dictionary_with_no_line_kept_keeps_its_costs() {
-        let mut dict = Dictionary {
+    fn a_dictionary_with_no_line_kept_has_no_line_to_start() {
+        let dict = Dictionary {
             entries: vec![entry("さとう", "佐藤", None, 500)],
             ..Default::default()
         };
-        dict.start_costs_at(1699, |_, _| false);
-        assert_eq!(dict.entries[0].cost, 500);
+        assert_eq!(
+            dict.to_text_where_starting_at("t", 1699, |_, _| false),
+            "# Kanaemi 公式辞書・t（kanaemi-dict）\n"
+        );
+    }
+
+    #[test]
+    fn costs_start_at_the_cost_of_a_word_written_whole() {
+        let dict = Dictionary {
+            entries: vec![
+                entry("かく", "書く", None, 900),
+                entry("かんじ", "侃士", None, 1183),
+            ],
+            whole_forms: [(("かく".to_owned(), "書く".to_owned()), 1012)].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            dict.to_text_where_starting_at("t", 1699, |_, _| true),
+            "# Kanaemi 公式辞書・t（kanaemi-dict）\n\
+             かく\t書く\t\t1699\n\
+             かんじ\t侃士\t\t1870\n"
+        );
     }
 
     #[test]

@@ -131,6 +131,9 @@ const UNREAD_PEOPLE_SOURCE: &str = "wikidata-people-unread";
 /// The additional dictionary of station names, taken from Wikidata's stations.
 const STATION: &str = "station";
 const STATIONS_SOURCE: &str = "wikidata-stations";
+/// The additional dictionaries made from lists, whose costs start at the cost
+/// of a word met once in the base's units.
+const LISTS: [&str; 3] = [PERSON, PLACE, STATION];
 /// The sources every dictionary read with the analyzer has: the analyzer's
 /// dictionary, the dictionary that checks its readings, and the UniDic
 /// lexicon they are checked against and the base takes words from, and the
@@ -342,6 +345,8 @@ enum Error {
     Since { path: PathBuf },
     #[error("{}: not a cost", path.display())]
     SeenOnce { path: PathBuf },
+    #[error("{}: cannot remove: {source}", path.display())]
+    Remove { path: PathBuf, source: io::Error },
     #[error("{}: {source}", path.display())]
     Examples { path: PathBuf, source: io::Error },
     #[error(transparent)]
@@ -641,6 +646,17 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             path: outputs.dictionary.into(),
             source,
         })?;
+    // Removed before the base is replaced: left from an earlier build, it
+    // would not be this base's, should the build stop before writing it.
+    match std::fs::remove_file(outputs.seen_once) {
+        Err(source) if source.kind() != io::ErrorKind::NotFound => {
+            return Err(Error::Remove {
+                path: outputs.seen_once.into(),
+                source,
+            });
+        }
+        _ => {}
+    }
     write_atomically(outputs.dictionary, |w| {
         w.write_all(text.as_bytes())
             .map_err(write_error(outputs.dictionary))
@@ -1588,6 +1604,13 @@ fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
             source,
         })?
     };
+    // Read before any dictionary is built, so a missing cost fails the build
+    // up front.
+    let seen_once = names
+        .iter()
+        .any(|name| LISTS.contains(&name.as_str()))
+        .then(|| seen_once_cost(base_outputs.seen_once))
+        .transpose()?;
     let corrections = corrections()?;
     let mut analyzer = None;
     for name in names {
@@ -1677,13 +1700,15 @@ fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
         dictionary.drop_words(|reading, surface| {
             corrections.drops(surface) || !listed && !is_word(reading, surface)
         });
-        if [PERSON, PLACE, STATION].contains(&name.as_str()) {
-            let start = seen_once_cost(base_outputs.seen_once)?;
-            dictionary.start_costs_at(start, |line, kind| base.keeps(line, kind));
-        }
         let dictionary_path = format!("{out_dir}/{name}.tsv");
         let report_path = format!("{out_dir}/{name}-report.tsv");
-        let text = dictionary.to_text_where(label.trim(), |line, kind| base.keeps(line, kind));
+        let keep = |line: &kanaemi_engine::ItemLine<'_>, kind| base.keeps(line, kind);
+        let text = if LISTS.contains(&name.as_str()) {
+            let start = seen_once.expect("read up front whenever a list dictionary is built");
+            dictionary.to_text_where_starting_at(label.trim(), start, keep)
+        } else {
+            dictionary.to_text_where(label.trim(), keep)
+        };
         let (_, invalid) = TextDictionary::parse(&text);
         if !invalid.is_empty() {
             return Err(Error::Rejected {
