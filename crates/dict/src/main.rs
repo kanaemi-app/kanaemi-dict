@@ -12,10 +12,10 @@ use std::sync::Arc;
 use kanaemi_dict::{
     Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Class, Corrections,
     CorrectionsError, CutError, Dictionary, DistError, DocumentsError, Established, EvalDocument,
-    EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError,
-    RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
-    Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement,
-    as_typed, check_words, clans, common_words, compound_parts, correction_uses,
+    EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, LEARNED_MIN_COUNT, Readings,
+    ReadingsError, RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings,
+    UnidicWord, Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError,
+    agreement, as_typed, check_words, clans, common_words, compound_parts, correction_uses,
     correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
     cut_documents, dictionary_lines, document_ids, document_sources, document_texts,
     each_document_with_units, engine, engine_with, eval_documents, evaluate_documents,
@@ -939,12 +939,15 @@ fn train_ranking() -> Result<(), Error> {
         )?;
     }
     println!("examples: {}", examples.len());
-    let weights = train(&examples, MODEL_BITS, EPOCHS, RATE).map_err(|source| Error::Examples {
-        path: examples_path.clone().into(),
-        source,
-    })?;
+    let trained =
+        train(&examples, MODEL_BITS, EPOCHS, RATE, LEARNED_MIN_COUNT).map_err(|source| {
+            Error::Examples {
+                path: examples_path.clone().into(),
+                source,
+            }
+        })?;
     drop(examples);
-    let model_bytes = model_file(MODEL_BITS, &weights);
+    let model_bytes = model_file(MODEL_BITS, &trained);
     write_atomically(MODEL, |w| {
         w.write_all(&model_bytes).map_err(write_error(MODEL))
     })?;

@@ -357,7 +357,7 @@ pub fn take(from: &Path, to: &Path, notices: &Path) -> Result<Vec<String>, DistE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_file;
+    use crate::{Trained, model_file};
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
@@ -405,7 +405,13 @@ mod tests {
     }
 
     fn model() -> Vec<u8> {
-        model_file(10, &vec![0.5; 1 << 10])
+        model_file(
+            10,
+            &Trained {
+                weights: vec![0.5; 1 << 10],
+                tags: vec![0; 1 << 10],
+            },
+        )
     }
 
     fn names(files: &[DistFile]) -> Vec<String> {
@@ -556,7 +562,7 @@ mod tests {
                             "size": BASE.len(),
                             "sha256": sha256_hex(BASE.as_bytes()),
                         },
-                        "model": { "format": 3, "sha256": sha256_hex(&model) },
+                        "model": { "format": kanaemi_engine::MODEL_FORMAT_VERSION, "sha256": sha256_hex(&model) },
                     },
                     {
                         "name": "railway",

@@ -9,6 +9,6 @@ license = "MIT"
 repository = "https://github.com/kanaemi-app/kanaemi-dict"
 
 [workspace.dependencies]
-kanaemi-core = { git = "https://github.com/kanaemi-app/kanaemi", branch = "main" }
-kanaemi-engine = { git = "https://github.com/kanaemi-app/kanaemi", branch = "main" }
-kanaemi-functions = { git = "https://github.com/kanaemi-app/kanaemi", branch = "main" }
+kanaemi-core = { git = "https://github.com/kanaemi-app/kanaemi", branch = "rank-cost-steps-and-unknown-features" }
+kanaemi-engine = { git = "https://github.com/kanaemi-app/kanaemi", branch = "rank-cost-steps-and-unknown-features" }
+kanaemi-functions = { git = "https://github.com/kanaemi-app/kanaemi", branch = "rank-cost-steps-and-unknown-features" }

@@ -8,24 +8,50 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use kanaemi_engine::{
-    CONTEXT_CHARS, CandidateFacts, Engine, HISTORY_LEN, RankingInput, feature_indices,
+    CONTEXT_CHARS, CandidateFacts, Engine, FEATURE_NAMES, FeatureKey, HISTORY_LEN,
+    MODEL_FORMAT_VERSION, RankingInput, feature_keys, key_index, key_tag, unknown_key,
 };
 
+use crate::dictionary::MIN_COUNT;
 use crate::kana::is_hiragana;
 use crate::{Established, Query, Spans, Unit, as_typed, query_of, span_of};
 
-/// The widest hash a model file allows.
-pub const MAX_BITS: u8 = 28;
+/// The tag of a place no feature was learned at.
+const EMPTY_TAG: u8 = 0;
+
+/// How often a feature must occur in the examples to be learned as itself,
+/// rather than as its name's unknown feature: as often as a word must occur
+/// to enter the base, each unit being an example in its field and in an
+/// empty field.
+pub const LEARNED_MIN_COUNT: u32 = 2 * MIN_COUNT as u32;
 
 /// Training examples, flat: each is a unit's candidates, each candidate the
-/// indices of its features at [`MAX_BITS`], and which candidate is the unit's
-/// surface.
+/// keys of its features and the names they have, and which candidate is the
+/// unit's surface.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Examples {
-    features: Vec<u32>,
+    keys: Vec<u32>,
+    names: Vec<u8>,
     candidate_ends: Vec<u32>,
     example_ends: Vec<u32>,
     correct: Vec<u32>,
+}
+
+/// The features of one candidate of an example: the key of each, and its
+/// name's place in Kanaemi's feature names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Candidate<'a> {
+    pub keys: &'a [u32],
+    pub names: &'a [u8],
+}
+
+impl Candidate<'_> {
+    fn features(&self) -> impl Iterator<Item = FeatureKey> + '_ {
+        self.keys
+            .iter()
+            .zip(self.names)
+            .map(|(&key, &name)| FeatureKey { key, name })
+    }
 }
 
 impl Examples {
@@ -40,15 +66,15 @@ impl Examples {
     /// Adds an example. A feature every candidate has, as many times, adds
     /// the same to every score and so neither ranks nor learns; it is not
     /// kept, which leaves out most of the history features.
-    pub fn push(&mut self, candidates: impl IntoIterator<Item = Vec<u32>>, correct: usize) {
-        let candidates: Vec<Vec<u32>> = candidates.into_iter().collect();
-        let mut shared: HashMap<u32, usize> = HashMap::new();
+    pub fn push(&mut self, candidates: impl IntoIterator<Item = Vec<FeatureKey>>, correct: usize) {
+        let candidates: Vec<Vec<FeatureKey>> = candidates.into_iter().collect();
+        let mut shared: HashMap<FeatureKey, usize> = HashMap::new();
         if let Some((first, rest)) = candidates.split_first() {
             for &f in first {
                 *shared.entry(f).or_default() += 1;
             }
             for features in rest {
-                let mut counts: HashMap<u32, usize> = HashMap::new();
+                let mut counts: HashMap<FeatureKey, usize> = HashMap::new();
                 for &f in features {
                     *counts.entry(f).or_default() += 1;
                 }
@@ -60,24 +86,26 @@ impl Examples {
         }
         for features in candidates {
             let mut left = shared.clone();
-            self.features
-                .extend(features.into_iter().filter(|f| match left.get_mut(f) {
-                    Some(n) if *n > 0 => {
-                        *n -= 1;
-                        false
+            for f in features {
+                match left.get_mut(&f) {
+                    Some(n) if *n > 0 => *n -= 1,
+                    _ => {
+                        self.keys.push(f.key);
+                        self.names.push(f.name);
                     }
-                    _ => true,
-                }));
-            self.candidate_ends.push(self.features.len() as u32);
+                }
+            }
+            self.candidate_ends.push(self.keys.len() as u32);
         }
         self.example_ends.push(self.candidate_ends.len() as u32);
         self.correct.push(correct as u32);
     }
 
     pub fn append(&mut self, other: Examples) {
-        let features = self.features.len() as u32;
+        let features = self.keys.len() as u32;
         let candidates = self.candidate_ends.len() as u32;
-        self.features.extend(other.features);
+        self.keys.extend(other.keys);
+        self.names.extend(other.names);
         self.candidate_ends
             .extend(other.candidate_ends.into_iter().map(|e| e + features));
         self.example_ends
@@ -85,8 +113,8 @@ impl Examples {
         self.correct.extend(other.correct);
     }
 
-    /// The candidates of the `i`th example, each the indices of its features.
-    pub fn candidates(&self, i: usize) -> impl Iterator<Item = &[u32]> {
+    /// The candidates of the `i`th example.
+    pub fn candidates(&self, i: usize) -> impl Iterator<Item = Candidate<'_>> {
         let first = if i == 0 {
             0
         } else {
@@ -98,7 +126,11 @@ impl Examples {
             } else {
                 self.candidate_ends[c - 1] as usize
             };
-            &self.features[from..self.candidate_ends[c] as usize]
+            let to = self.candidate_ends[c] as usize;
+            Candidate {
+                keys: &self.keys[from..to],
+                names: &self.names[from..to],
+            }
         })
     }
 
@@ -188,15 +220,7 @@ fn push_typing(
                 history,
                 context,
             };
-            examples.push(
-                candidates.iter().map(|c| {
-                    feature_indices(&input, c, MAX_BITS)
-                        .into_iter()
-                        .map(|f| f as u32)
-                        .collect()
-                }),
-                correct,
-            );
+            examples.push(candidates.iter().map(|c| feature_keys(&input, c)), correct);
         }
     }
     correct
@@ -289,8 +313,10 @@ impl ExampleFile {
     /// Appends `examples` as a block.
     pub fn push(&mut self, examples: &Examples) -> io::Result<()> {
         let mut bytes = Vec::new();
+        bytes.extend((examples.names.len() as u64).to_le_bytes());
+        bytes.extend(&examples.names);
         for array in [
-            &examples.features,
+            &examples.keys,
             &examples.candidate_ends,
             &examples.example_ends,
             &examples.correct,
@@ -339,9 +365,12 @@ impl Blocks for ExampleFile {
         file.seek(SeekFrom::Start(start))?;
         let mut bytes = vec![0u8; size as usize];
         file.read_exact(&mut bytes)?;
-        let mut at = 0;
+        let malformed = || io::Error::new(io::ErrorKind::InvalidData, "a malformed block");
+        let head = bytes.get(..8).ok_or_else(malformed)?;
+        let n = u64::from_le_bytes(head.try_into().expect("8 bytes")) as usize;
+        let names = bytes.get(8..8 + n).ok_or_else(malformed)?.to_vec();
+        let mut at = 8 + n;
         let mut array = || -> io::Result<Vec<u32>> {
-            let malformed = || io::Error::new(io::ErrorKind::InvalidData, "a malformed block");
             let head = bytes.get(at..at + 8).ok_or_else(malformed)?;
             let n = u64::from_le_bytes(head.try_into().expect("8 bytes")) as usize;
             let body = bytes.get(at + 8..at + 8 + n * 4).ok_or_else(malformed)?;
@@ -353,8 +382,13 @@ impl Blocks for ExampleFile {
                 .map(|b| u32::from_le_bytes(*b))
                 .collect())
         };
+        let keys = array()?;
+        if keys.len() != names.len() {
+            return Err(malformed());
+        }
         Ok(Examples {
-            features: array()?,
+            keys,
+            names,
             candidate_ends: array()?,
             example_ends: array()?,
             correct: array()?,
@@ -374,12 +408,79 @@ fn shuffled(n: usize) -> Vec<usize> {
     order
 }
 
+/// What training learned: a weight and the tag of the feature learned at
+/// each of `2^bits` places.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trained {
+    pub weights: Vec<f32>,
+    pub tags: Vec<u8>,
+}
+
+/// The tag of the feature learned at each of `2^bits` places: at each place,
+/// the tag most of its features have, when they have it at least
+/// `min_count` times; the place of each name's unknown feature holds its
+/// tag whatever else falls there. A feature of another tag, or of too few,
+/// is learned as its name's unknown feature, as Kanaemi reads it.
+pub fn owners(blocks: &impl Blocks, bits: u8, min_count: u32) -> io::Result<Vec<u8>> {
+    // A majority vote in one pass, and a count of the winner in another: a
+    // tag that most features of a place have wins it.
+    let mut votes: Vec<(u8, u32)> = vec![(EMPTY_TAG, 0); 1 << bits];
+    for b in 0..blocks.count() {
+        for &key in &blocks.load(b)?.keys {
+            let (tag, n) = &mut votes[key_index(key, bits)];
+            if *n == 0 {
+                *tag = key_tag(key);
+                *n = 1;
+            } else if *tag == key_tag(key) {
+                *n += 1;
+            } else {
+                *n -= 1;
+            }
+        }
+    }
+    let mut counts = vec![0u32; 1 << bits];
+    for b in 0..blocks.count() {
+        for &key in &blocks.load(b)?.keys {
+            let at = key_index(key, bits);
+            if votes[at].0 == key_tag(key) {
+                counts[at] += 1;
+            }
+        }
+    }
+    let mut tags: Vec<u8> = votes
+        .iter()
+        .zip(&counts)
+        .map(|(&(tag, _), &n)| if n >= min_count { tag } else { EMPTY_TAG })
+        .collect();
+    for name in 0..FEATURE_NAMES.len() as u8 {
+        let key = unknown_key(name);
+        tags[key_index(key, bits)] = key_tag(key);
+    }
+    Ok(tags)
+}
+
 /// Weights at `bits` that rank each example's surface first, by `epochs` of
-/// AdaGrad on the softmax loss over its candidates. Each epoch takes the
-/// blocks in a fixed shuffled order and the examples of each block likewise,
-/// loading one block at a time.
-pub fn train(blocks: &impl Blocks, bits: u8, epochs: usize, rate: f32) -> io::Result<Vec<f32>> {
-    let mask = (1u32 << bits) - 1;
+/// AdaGrad on the softmax loss over its candidates, each feature learned at
+/// its place when its tag owns it ([`owners`] with `min_count`) and as its
+/// name's unknown feature otherwise. Each epoch takes the blocks in a fixed
+/// shuffled order and the examples of each block likewise, loading one block
+/// at a time.
+pub fn train(
+    blocks: &impl Blocks,
+    bits: u8,
+    epochs: usize,
+    rate: f32,
+    min_count: u32,
+) -> io::Result<Trained> {
+    let tags = owners(blocks, bits, min_count)?;
+    let place = |f: FeatureKey| {
+        let at = key_index(f.key, bits);
+        if tags[at] == key_tag(f.key) {
+            at
+        } else {
+            key_index(unknown_key(f.name), bits)
+        }
+    };
     let mut weights = vec![0f32; 1 << bits];
     let mut squares = vec![0f32; 1 << bits];
     for _ in 0..epochs {
@@ -389,7 +490,7 @@ pub fn train(blocks: &impl Blocks, bits: u8, epochs: usize, rate: f32) -> io::Re
                 let correct = examples.correct(i);
                 let scores: Vec<f32> = examples
                     .candidates(i)
-                    .map(|fs| fs.iter().map(|&f| weights[(f & mask) as usize]).sum())
+                    .map(|c| c.features().map(|f| weights[place(f)]).sum())
                     .collect();
                 let top = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 let exps: Vec<f32> = scores.iter().map(|s| (s - top).exp()).collect();
@@ -398,9 +499,9 @@ pub fn train(blocks: &impl Blocks, bits: u8, epochs: usize, rate: f32) -> io::Re
                 // gradients, so one every candidate shares cancels out
                 // instead of drifting.
                 let mut gradients: Vec<(usize, f32)> = Vec::new();
-                for (c, fs) in examples.candidates(i).enumerate() {
+                for (c, candidate) in examples.candidates(i).enumerate() {
                     let gradient = exps[c] / total - if c == correct { 1.0 } else { 0.0 };
-                    gradients.extend(fs.iter().map(|&f| ((f & mask) as usize, gradient)));
+                    gradients.extend(candidate.features().map(|f| (place(f), gradient)));
                 }
                 gradients.sort_unstable_by_key(|&(at, _)| at);
                 for run in gradients.chunk_by(|a, b| a.0 == b.0) {
@@ -415,26 +516,28 @@ pub fn train(blocks: &impl Blocks, bits: u8, epochs: usize, rate: f32) -> io::Re
             }
         }
     }
-    Ok(weights)
+    Ok(Trained { weights, tags })
 }
 
 const MODEL_MAGIC: &[u8; 8] = b"KANAEMIM";
-const MODEL_VERSION: u32 = 3;
 /// The weight type of a model file whose weights are bytes times a scale.
 const MODEL_I8: u8 = 1;
 
-/// A model file of Kanaemi's format with `weights`, `2^bits` of them, as
-/// bytes times a scale that maps the largest in magnitude to 127.
-pub fn model_file(bits: u8, weights: &[f32]) -> Vec<u8> {
+/// A model file of Kanaemi's format with what was `trained`, `2^bits`
+/// weights and tags, the weights as bytes times a scale that maps the
+/// largest in magnitude to 127.
+pub fn model_file(bits: u8, trained: &Trained) -> Vec<u8> {
+    let Trained { weights, tags } = trained;
     let largest = weights.iter().fold(0f32, |m, w| m.max(w.abs()));
     let scale = if largest > 0.0 { largest / 127.0 } else { 1.0 };
-    let body: Vec<u8> = weights
+    let mut body: Vec<u8> = weights
         .iter()
         .map(|w| (w / scale).round() as i8 as u8)
         .collect();
+    body.extend_from_slice(tags);
     let mut out = Vec::with_capacity(32 + body.len());
     out.extend_from_slice(MODEL_MAGIC);
-    out.extend_from_slice(&MODEL_VERSION.to_le_bytes());
+    out.extend_from_slice(&MODEL_FORMAT_VERSION.to_le_bytes());
     out.push(bits);
     out.push(MODEL_I8);
     out.extend_from_slice(&[0, 0]);
@@ -471,10 +574,17 @@ mod tests {
         }
     }
 
-    /// Where Kanaemi puts the weight of `feature`, its name and values joined
-    /// by U+001F, at [`MAX_BITS`].
-    fn index(feature: &str) -> u32 {
-        (xxhash_rust::xxh3::xxh3_64(feature.as_bytes()) & ((1 << MAX_BITS) - 1)) as u32
+    /// The key Kanaemi gives `feature`, its name and values joined by
+    /// U+001F.
+    fn key(feature: &str) -> u32 {
+        xxhash_rust::xxh3::xxh3_64(feature.as_bytes()) as u32
+    }
+
+    /// Features of the keys, all of the first name.
+    fn fs(keys: &[u32]) -> Vec<FeatureKey> {
+        keys.iter()
+            .map(|&key| FeatureKey { key, name: 0 })
+            .collect()
     }
 
     fn engine_of(text: &str) -> Engine {
@@ -495,19 +605,25 @@ mod tests {
         let examples = examples_of_document(&engine, &units, "この漢と手紙と漢");
 
         assert_eq!(examples.len(), 4, "手紙 has no rival");
-        let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
+        let correct_of = |i: usize| {
+            examples
+                .candidates(i)
+                .nth(examples.correct(i))
+                .unwrap()
+                .keys
+        };
         let in_field = correct_of(2);
-        assert!(in_field.contains(&index("s\u{1f}漢")));
+        assert!(in_field.contains(&key("s\u{1f}漢")));
         assert!(
-            in_field.contains(&index("hl\u{1f}1")),
+            in_field.contains(&key("hl\u{1f}1")),
             "漢 was committed for かん before"
         );
-        assert!(in_field.contains(&index("p\u{1f}手紙\u{1f}漢")));
-        assert!(in_field.contains(&index("a\u{1f}と\u{1f}漢")));
-        assert!(!correct_of(0).contains(&index("hl\u{1f}1")));
+        assert!(in_field.contains(&key("p\u{1f}手紙\u{1f}漢")));
+        assert!(in_field.contains(&key("a\u{1f}と\u{1f}漢")));
+        assert!(!correct_of(0).contains(&key("hl\u{1f}1")));
         let in_empty_field = correct_of(3);
-        assert!(!in_empty_field.contains(&index("hl\u{1f}1")));
-        assert!(!in_empty_field.contains(&index("a\u{1f}と\u{1f}漢")));
+        assert!(!in_empty_field.contains(&key("hl\u{1f}1")));
+        assert!(!in_empty_field.contains(&key("a\u{1f}と\u{1f}漢")));
     }
 
     fn conjugated(position: usize, reading: &str, surface: &str, stem: (&str, &str)) -> Unit {
@@ -557,11 +673,17 @@ mod tests {
         let examples = examples_of_document(&engine, &units, "書いた漢");
 
         assert_eq!(examples.len(), 6, "2 typings of 書いた and 漢, each twice");
-        let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
-        assert!(correct_of(0).contains(&index("rs\u{1f}かいた\u{1f}書いた")));
-        assert!(correct_of(2).contains(&index("rs\u{1f}かい\u{1f}書い")));
+        let correct_of = |i: usize| {
+            examples
+                .candidates(i)
+                .nth(examples.correct(i))
+                .unwrap()
+                .keys
+        };
+        assert!(correct_of(0).contains(&key("rs\u{1f}かいた\u{1f}書いた")));
+        assert!(correct_of(2).contains(&key("rs\u{1f}かい\u{1f}書い")));
         assert!(
-            correct_of(4).contains(&index("hc\u{1f}1\u{1f}漢")),
+            correct_of(4).contains(&key("hc\u{1f}1\u{1f}漢")),
             "one commit before 漢"
         );
     }
@@ -650,8 +772,14 @@ mod tests {
 
         let examples = examples_of_document(&engine, &units, "二本");
 
-        let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
-        assert!(correct_of(0).contains(&index("rs\u{1f}にほん\u{1f}二本")));
+        let correct_of = |i: usize| {
+            examples
+                .candidates(i)
+                .nth(examples.correct(i))
+                .unwrap()
+                .keys
+        };
+        assert!(correct_of(0).contains(&key("rs\u{1f}にほん\u{1f}二本")));
     }
 
     #[test]
@@ -676,9 +804,13 @@ mod tests {
 
         let examples = examples_of_document(&engine, &units, "3本と3本");
 
-        let second = examples.candidates(2).nth(examples.correct(2)).unwrap();
+        let second = examples
+            .candidates(2)
+            .nth(examples.correct(2))
+            .unwrap()
+            .keys;
         assert!(
-            second.contains(&index("p\u{1f}\u{fdd0}\u{fdd1}本\u{1f}\u{fdd0}\u{fdd1}本")),
+            second.contains(&key("p\u{1f}\u{fdd0}\u{fdd1}本\u{1f}\u{fdd0}\u{fdd1}本")),
             "the history and the candidate both go by 本's item, as Kanaemi records it"
         );
     }
@@ -686,10 +818,10 @@ mod tests {
     #[test]
     fn features_every_candidate_has_as_often_are_not_kept() {
         let mut examples = Examples::default();
-        examples.push([vec![7, 1, 9, 9], vec![9, 2, 7], vec![3, 7, 9]], 2);
+        examples.push([fs(&[7, 1, 9, 9]), fs(&[9, 2, 7]), fs(&[3, 7, 9])], 2);
 
         assert_eq!(
-            examples.candidates(0).collect::<Vec<_>>(),
+            examples.candidates(0).map(|c| c.keys).collect::<Vec<_>>(),
             [&[1, 9][..], &[2][..], &[3][..]]
         );
     }
@@ -697,14 +829,17 @@ mod tests {
     #[test]
     fn appended_examples_keep_their_candidates() {
         let mut a = Examples::default();
-        a.push([vec![1], vec![2, 3]], 1);
+        a.push([fs(&[1]), fs(&[2, 3])], 1);
         let mut b = Examples::default();
-        b.push([vec![4, 5], vec![6]], 0);
+        b.push([fs(&[4, 5]), fs(&[6])], 0);
 
         a.append(b);
 
         assert_eq!(a.len(), 2);
-        assert_eq!(a.candidates(1).collect::<Vec<_>>(), [&[4, 5][..], &[6][..]]);
+        assert_eq!(
+            a.candidates(1).map(|c| c.keys).collect::<Vec<_>>(),
+            [&[4, 5][..], &[6][..]]
+        );
         assert_eq!(a.correct(1), 0);
     }
 
@@ -719,10 +854,10 @@ mod tests {
     fn an_example_file_gives_back_each_block_and_goes_with_it() {
         let path = scratch_file("blocks");
         let mut first = Examples::default();
-        first.push([vec![1], vec![2, 3]], 1);
+        first.push([fs(&[1]), fs(&[2, 3])], 1);
         let mut second = Examples::default();
-        second.push([vec![4, 5], vec![6]], 0);
-        second.push([vec![7], vec![8]], 1);
+        second.push([fs(&[4, 5]), fs(&[6])], 0);
+        second.push([fs(&[7]), fs(&[8])], 1);
 
         let mut file = ExampleFile::create(&path).unwrap();
         file.push(&first).unwrap();
@@ -740,24 +875,24 @@ mod tests {
     fn training_from_a_file_learns_as_from_memory() {
         let path = scratch_file("train");
         let mut examples = Examples::default();
-        examples.push([vec![1, 9], vec![2, 8]], 0);
-        examples.push([vec![2, 8], vec![1, 7]], 1);
+        examples.push([fs(&[1, 9]), fs(&[2, 8])], 0);
+        examples.push([fs(&[2, 8]), fs(&[1, 7])], 1);
         let mut file = ExampleFile::create(&path).unwrap();
         file.push(&examples).unwrap();
 
         assert_eq!(
-            train(&file, 10, 3, 0.5).unwrap(),
-            train(&examples, 10, 3, 0.5).unwrap()
+            train(&file, 10, 3, 0.5, 1).unwrap(),
+            train(&examples, 10, 3, 0.5, 1).unwrap()
         );
     }
 
     #[test]
     fn training_puts_each_surface_first() {
         let mut examples = Examples::default();
-        examples.push([vec![1, 9], vec![2, 9]], 0);
-        examples.push([vec![2, 8], vec![1, 8]], 1);
+        examples.push([fs(&[1, 9]), fs(&[2, 9])], 0);
+        examples.push([fs(&[2, 8]), fs(&[1, 8])], 1);
 
-        let weights = train(&examples, 10, 5, 0.5).unwrap();
+        let weights = train(&examples, 10, 5, 0.5, 1).unwrap().weights;
 
         assert!(weights[1] > weights[2]);
     }
@@ -765,35 +900,88 @@ mod tests {
     #[test]
     fn a_feature_every_candidate_shares_learns_nothing() {
         let mut examples = Examples::default();
-        examples.push([vec![1, 7], vec![2, 7]], 0);
+        examples.push([fs(&[1, 7]), fs(&[2, 7])], 0);
 
-        let weights = train(&examples, 10, 3, 0.5).unwrap();
+        let weights = train(&examples, 10, 3, 0.5, 1).unwrap().weights;
 
         assert_eq!(weights[7], 0.0);
     }
 
     #[test]
-    fn the_model_file_holds_the_weights_as_bytes_scaled_to_the_largest() {
+    fn a_place_goes_to_the_tag_most_of_its_features_have_often_enough() {
+        // Another feature at place 1 at 10 bits, with tag 2 where 1 has 1.
+        let other = (2 << 24) | 1;
+        let mut examples = Examples::default();
+        examples.push([fs(&[1, 5]), fs(&[other, 6])], 0);
+        examples.push([fs(&[1, 6]), fs(&[5])], 0);
+        examples.push([fs(&[1]), fs(&[6])], 0);
+
+        let tags = owners(&examples, 10, 2).unwrap();
+
+        assert_eq!(tags[1], key_tag(1), "1 thrice against the other once");
+        assert_eq!(tags[5], key_tag(5));
+        assert_eq!(tags[6], key_tag(6));
+        assert_eq!(tags[7], EMPTY_TAG);
+        let tags = owners(&examples, 10, 4).unwrap();
+        assert_eq!(tags[1], EMPTY_TAG, "too few to learn");
+    }
+
+    #[test]
+    fn the_place_of_every_unknown_feature_is_its_own() {
+        let tags = owners(&Examples::default(), 10, 1).unwrap();
+        for name in 0..FEATURE_NAMES.len() as u8 {
+            let key = unknown_key(name);
+            assert_eq!(tags[key_index(key, 10)], key_tag(key));
+        }
+    }
+
+    #[test]
+    fn a_feature_too_rare_to_learn_is_learned_as_its_name_s_unknown_feature() {
+        let rare = |key: u32| FeatureKey { key, name: 0 };
+        let common = FeatureKey { key: 9, name: 1 };
+        let mut examples = Examples::default();
+        for key in [3, 4, 5] {
+            examples.push([vec![rare(key)], vec![common]], 0);
+        }
+
+        let trained = train(&examples, 10, 3, 0.5, 2).unwrap();
+
+        assert_eq!(trained.tags[3], EMPTY_TAG);
+        assert_eq!(trained.weights[3], 0.0);
+        assert!(trained.weights[key_index(unknown_key(0), 10)] > 0.0);
+        assert!(trained.weights[9] < 0.0);
+    }
+
+    fn trained(weights: Vec<f32>) -> Trained {
+        let tags = vec![EMPTY_TAG; weights.len()];
+        Trained { weights, tags }
+    }
+
+    #[test]
+    fn the_model_file_holds_the_weights_as_bytes_scaled_to_the_largest_and_their_tags() {
         let mut weights = vec![0.0f32; 1 << 10];
         weights[..3].copy_from_slice(&[0.5, -2.0, 1.0]);
+        let mut model = trained(weights);
+        model.tags[2] = 7;
 
-        let bytes = model_file(10, &weights);
+        let bytes = model_file(10, &model);
 
         assert_eq!(&bytes[..8], b"KANAEMIM");
-        assert_eq!(&bytes[8..12], &3u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &MODEL_FORMAT_VERSION.to_le_bytes());
         assert_eq!(bytes[12..14], [10, 1]);
         assert_eq!(
             f32::from_le_bytes(bytes[16..20].try_into().unwrap()),
             2.0 / 127.0
         );
         assert_eq!(bytes[32..35], [32, (-127i8) as u8, 64]);
-        assert_eq!(bytes.len(), 32 + (1 << 10));
+        assert_eq!(bytes[32 + (1 << 10) + 2], 7);
+        assert_eq!(bytes.len(), 32 + (2 << 10));
     }
 
     #[test]
     fn kanaemi_reads_the_model_file() {
         let path = scratch_file("model");
-        std::fs::write(&path, model_file(10, &vec![0.25; 1 << 10])).unwrap();
+        std::fs::write(&path, model_file(10, &trained(vec![0.25; 1 << 10]))).unwrap();
 
         let opened = RankingModel::open(&path);
 

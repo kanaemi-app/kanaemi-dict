@@ -1004,7 +1004,7 @@ mod model_tests {
     use kanaemi_engine::RankingModel;
 
     use super::*;
-    use crate::model_file;
+    use crate::{Trained, model_file};
 
     #[test]
     fn with_a_model_the_candidates_go_by_its_scores() {
@@ -1034,11 +1034,13 @@ mod model_tests {
         let model = {
             let bits = 10;
             let mut weights = vec![0.0f32; 1 << bits];
-            let at = xxhash_rust::xxh3::xxh3_64("s\u{1f}手神".as_bytes()) & ((1 << bits) - 1);
-            weights[at as usize] = 1.0;
+            let mut tags = vec![0u8; 1 << bits];
+            let key = xxhash_rust::xxh3::xxh3_64("s\u{1f}手神".as_bytes()) as u32;
+            weights[kanaemi_engine::key_index(key, bits)] = 1.0;
+            tags[kanaemi_engine::key_index(key, bits)] = kanaemi_engine::key_tag(key);
             let path = std::env::temp_dir()
                 .join(format!("kanaemi-dict-eval-model-{}", std::process::id()));
-            std::fs::write(&path, model_file(bits, &weights)).unwrap();
+            std::fs::write(&path, model_file(bits, &Trained { weights, tags })).unwrap();
             let model = RankingModel::open(&path).unwrap();
             std::fs::remove_file(&path).unwrap();
             Arc::new(model)
