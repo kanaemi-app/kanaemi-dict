@@ -59,6 +59,11 @@ pub struct Dictionary {
     /// units the dictionary counts, or comes from UniDic alone; `None` for a
     /// dictionary not counted from units.
     pub rare_cost: Option<u32>,
+    /// The cost of a word met once in the units the dictionary counts, at
+    /// which a dictionary made from a list starts: its words are not in the
+    /// base, so the base's text has them once at most. `None` for a
+    /// dictionary not counted from units.
+    pub seen_once_cost: Option<u32>,
     /// The cost of the line of each word written whole that conjugated forms
     /// also count (書く under かく), in place of its entry's. The
     /// documents type a conjugated form with its okurigana marked (か*く), so
@@ -332,6 +337,7 @@ impl Dictionary {
         }
 
         let rare_cost = (total > 0).then(|| cost_of(MIN_COUNT, total));
+        let seen_once_cost = (total > 0).then(|| cost_of(1, total));
         // UniDic and the lexicon read a conjugated form as a word too (無い as
         // ない), so their costs, which can come ahead of rare counted words,
         // are not taken for these lines.
@@ -399,6 +405,7 @@ impl Dictionary {
                 .collect(),
             entries,
             rare_cost,
+            seen_once_cost,
             whole_forms,
             report: Report {
                 unknown_conjugations: unknown.into_iter().collect(),
@@ -503,40 +510,72 @@ impl Dictionary {
         label: impl AsRef<str>,
         keep: impl Fn(&ItemLine, LineKind) -> bool,
     ) -> String {
-        let numeric: Vec<Entry> = self
-            .numeric
-            .iter()
-            .filter_map(|e| {
-                Some(Entry {
-                    reading: mark_placeholders(&e.reading)?,
-                    surface: mark_placeholders(&e.surface)?,
-                    ..e.clone()
+        let mut out = format!("# Kanaemi 公式辞書・{}（kanaemi-dict）\n", label.as_ref());
+        for (entry, kind) in self.lines() {
+            let line = item_line(&entry, kind);
+            if !keep(&line, kind) {
+                continue;
+            }
+            out.push_str(&line.to_string());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Moves every cost by the same amount, so that the cheapest of the lines
+    /// `keep` keeps costs `start`, as a dictionary made from a list starts at
+    /// the cost of a word met once in the base's text. The differences
+    /// between costs stay.
+    pub fn start_costs_at(&mut self, start: u32, keep: impl Fn(&ItemLine, LineKind) -> bool) {
+        let Some(cheapest) = self
+            .lines()
+            .into_iter()
+            .filter(|(entry, kind)| keep(&item_line(entry, *kind), *kind))
+            .map(|(entry, _)| entry.cost)
+            .min()
+        else {
+            return;
+        };
+        let moved = |cost: &mut u32| {
+            *cost = (i64::from(*cost) + i64::from(start) - i64::from(cheapest))
+                .clamp(0, i64::from(u32::MAX)) as u32;
+        };
+        self.entries
+            .iter_mut()
+            .chain(&mut self.okuri)
+            .chain(&mut self.numeric)
+            .for_each(|e| moved(&mut e.cost));
+        self.whole_forms.values_mut().for_each(moved);
+    }
+
+    /// Every line as written, with its cost: by reading, and within a reading
+    /// from the largest cost to the smallest.
+    fn lines(&self) -> Vec<(Entry, LineKind)> {
+        let numeric = self.numeric.iter().filter_map(|e| {
+            Some(Entry {
+                reading: mark_placeholders(&e.reading)?,
+                surface: mark_placeholders(&e.surface)?,
+                ..e.clone()
+            })
+        });
+        let words = self.entries.iter().map(|e| {
+            let whole = e
+                .conjugation
+                .is_none()
+                .then(|| {
+                    self.whole_forms
+                        .get(&(e.reading.clone(), e.surface.clone()))
                 })
-            })
-            .collect();
-        let words: Vec<Entry> = self
-            .entries
-            .iter()
-            .map(|e| {
-                let whole = e
-                    .conjugation
-                    .is_none()
-                    .then(|| {
-                        self.whole_forms
-                            .get(&(e.reading.clone(), e.surface.clone()))
-                    })
-                    .flatten();
-                Entry {
-                    cost: whole.copied().unwrap_or(e.cost),
-                    ..e.clone()
-                }
-            })
-            .collect();
-        let mut lines: Vec<(&Entry, LineKind)> = words
-            .iter()
+                .flatten();
+            Entry {
+                cost: whole.copied().unwrap_or(e.cost),
+                ..e.clone()
+            }
+        });
+        let mut lines: Vec<(Entry, LineKind)> = words
             .map(|e| (e, LineKind::Word))
-            .chain(numeric.iter().map(|e| (e, LineKind::Numeric)))
-            .chain(self.okuri.iter().map(|e| (e, LineKind::Okurigana)))
+            .chain(numeric.map(|e| (e, LineKind::Numeric)))
+            .chain(self.okuri.iter().map(|e| (e.clone(), LineKind::Okurigana)))
             .collect();
         lines.sort_by(|(a, _), (b, _)| {
             a.reading
@@ -546,26 +585,7 @@ impl Dictionary {
                 .then(a.surface.as_bytes().cmp(b.surface.as_bytes()))
                 .then_with(|| compare_conjugations(&a.conjugation, &b.conjugation))
         });
-        let mut out = format!("# Kanaemi 公式辞書・{}（kanaemi-dict）\n", label.as_ref());
-        for (entry, kind) in lines {
-            let (reading, okurigana) = match entry.reading.rsplit_once('*') {
-                Some((stem, kana)) if kind == LineKind::Okurigana => (stem, Some(kana)),
-                _ => (entry.reading.as_str(), None),
-            };
-            let line = ItemLine {
-                reading,
-                okurigana,
-                surface: &entry.surface,
-                conjugation: entry.conjugation.as_deref(),
-                cost: Some(entry.cost),
-            };
-            if !keep(&line, kind) {
-                continue;
-            }
-            out.push_str(&line.to_string());
-            out.push('\n');
-        }
-        out
+        lines
     }
 
     /// [`Dictionary::to_text`], unless Kanaemi would not read some line of it.
@@ -577,6 +597,21 @@ impl Dictionary {
         } else {
             Err(RejectedLines(invalid))
         }
+    }
+}
+
+/// The line `entry` of `kind` is written as.
+fn item_line(entry: &Entry, kind: LineKind) -> ItemLine<'_> {
+    let (reading, okurigana) = match entry.reading.rsplit_once('*') {
+        Some((stem, kana)) if kind == LineKind::Okurigana => (stem, Some(kana)),
+        _ => (entry.reading.as_str(), None),
+    };
+    ItemLine {
+        reading,
+        okurigana,
+        surface: &entry.surface,
+        conjugation: entry.conjugation.as_deref(),
+        cost: Some(entry.cost),
     }
 }
 
@@ -1669,6 +1704,7 @@ mod tests {
             cost(3, 13)
         );
         assert_eq!(dict.rare_cost, Some(cost(2, 13)));
+        assert_eq!(dict.seen_once_cost, Some(cost(1, 13)));
     }
 
     /// The cost of the line `reading surface` with no conjugation type in
@@ -1796,6 +1832,56 @@ mod tests {
              か\t書\t五段-カ行\t300\n\
              か*く\t書く\t\t10\n"
         );
+    }
+
+    #[test]
+    fn costs_start_at_the_given_cost_and_keep_their_differences() {
+        let mut dict = Dictionary {
+            entries: vec![
+                entry("かんじ", "侃士", None, 1183),
+                entry("けんじ", "健志", None, 1012),
+            ],
+            okuri: vec![entry("か*く", "書く", None, 1100)],
+            ..Default::default()
+        };
+        dict.start_costs_at(1699, |_, _| true);
+        assert_eq!(
+            dict.to_text("t"),
+            "# Kanaemi 公式辞書・t（kanaemi-dict）\n\
+             か*く\t書く\t\t1787\n\
+             かんじ\t侃士\t\t1870\n\
+             けんじ\t健志\t\t1699\n"
+        );
+    }
+
+    #[test]
+    fn costs_start_at_the_cheapest_line_that_is_kept() {
+        let mut dict = Dictionary {
+            entries: vec![
+                entry("さとう", "佐藤", None, 500),
+                entry("かんじ", "侃士", None, 1183),
+                entry("けんじ", "健志", None, 1012),
+            ],
+            ..Default::default()
+        };
+        let kept = |line: &ItemLine, _: LineKind| line.surface != "佐藤";
+        dict.start_costs_at(1699, kept);
+        assert_eq!(
+            dict.to_text_where("t", kept),
+            "# Kanaemi 公式辞書・t（kanaemi-dict）\n\
+             かんじ\t侃士\t\t1870\n\
+             けんじ\t健志\t\t1699\n"
+        );
+    }
+
+    #[test]
+    fn a_dictionary_with_no_line_kept_keeps_its_costs() {
+        let mut dict = Dictionary {
+            entries: vec![entry("さとう", "佐藤", None, 500)],
+            ..Default::default()
+        };
+        dict.start_costs_at(1699, |_, _| false);
+        assert_eq!(dict.entries[0].cost, 500);
     }
 
     #[test]

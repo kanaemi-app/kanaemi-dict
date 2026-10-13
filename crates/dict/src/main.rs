@@ -207,15 +207,20 @@ const MECAB_PATHS: usize = 5;
 struct Outputs {
     dictionary: &'static str,
     report: &'static str,
+    /// The cost of a word met once in the units the dictionary counts, which
+    /// the dictionaries made from lists built against it start at.
+    seen_once: &'static str,
 }
 
 const BASE: Outputs = Outputs {
     dictionary: "build/dictionaries/base.tsv",
     report: "build/dictionaries/base-report.tsv",
+    seen_once: "build/dictionaries/base-seen-once.txt",
 };
 const BASE_TRAIN: Outputs = Outputs {
     dictionary: "build/dictionaries/base-train.tsv",
     report: "build/dictionaries/base-train-report.tsv",
+    seen_once: "build/dictionaries/base-train-seen-once.txt",
 };
 
 const USAGE: &str = "\
@@ -232,9 +237,11 @@ usage: kanaemi-dict units
          build/sudachi/{core,notcore}_lex.csv give the surfaces of the
          units, with the words of one
          to ten with each counter read by the analyzer, reporting to
-         build/dictionaries/base-report.tsv; with --train-only, from the
-         units of the train documents alone into
-         build/dictionaries/base-train.tsv and base-train-report.tsv
+         build/dictionaries/base-report.tsv, and the cost of a word met
+         once to build/dictionaries/base-seen-once.txt; with --train-only,
+         from the units of the train documents alone into
+         build/dictionaries/base-train.tsv, base-train-report.tsv and
+         base-train-seen-once.txt
        kanaemi-dict evaluate
          convert the units of the eval documents with
          build/dictionaries/base-train.tsv, and write the units not offered
@@ -253,8 +260,10 @@ usage: kanaemi-dict units
          build the additional dictionaries NAME, or every one under
          additional/, from build/additional/NAME/ into
          build/dictionaries/NAME.tsv and NAME-report.tsv, without what
-         build/dictionaries/base.tsv already gives; with --train-only,
-         without what build/dictionaries/base-train.tsv gives into
+         build/dictionaries/base.tsv already gives, the costs of person,
+         place and station starting at build/dictionaries/base-seen-once.txt;
+         with --train-only, without what build/dictionaries/base-train.tsv
+         gives and from base-train-seen-once.txt into
          build/dictionaries/train/, for evaluate --with
        kanaemi-dict ranking
          train the ranking model on the candidates of
@@ -331,6 +340,8 @@ enum Error {
     Titles { path: PathBuf, source: TitlesError },
     #[error("{}: not a page ID", path.display())]
     Since { path: PathBuf },
+    #[error("{}: not a cost", path.display())]
+    SeenOnce { path: PathBuf },
     #[error("{}: {source}", path.display())]
     Examples { path: PathBuf, source: io::Error },
     #[error(transparent)]
@@ -638,6 +649,11 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         w.write_all(dictionary.report.to_tsv().as_bytes())
             .map_err(write_error(outputs.report))
     })?;
+    if let Some(cost) = dictionary.seen_once_cost {
+        write_atomically(outputs.seen_once, |w| {
+            writeln!(w, "{cost}").map_err(write_error(outputs.seen_once))
+        })?;
+    }
     if !train_only {
         let mut sources =
             document_sources(open(DOCS)?, |_| true).map_err(|source| Error::Documents {
@@ -1528,12 +1544,13 @@ fn write_error(path: &str) -> impl FnOnce(io::Error) -> Error {
 /// `train_only`, against the dictionary of the train documents into
 /// [`TRAIN_ADDITIONAL`], for the evaluation, with no sources record.
 fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
-    let (base_path, out_dir) = if train_only {
+    let (base_outputs, out_dir) = if train_only {
         std::fs::create_dir_all(TRAIN_ADDITIONAL).map_err(write_error(TRAIN_ADDITIONAL))?;
-        (BASE_TRAIN.dictionary, TRAIN_ADDITIONAL)
+        (BASE_TRAIN, TRAIN_ADDITIONAL)
     } else {
-        (BASE.dictionary, DICTIONARIES)
+        (BASE, DICTIONARIES)
     };
+    let base_path = base_outputs.dictionary;
     let names: Vec<String> = if names.is_empty() {
         let mut found = Vec::new();
         for entry in std::fs::read_dir(ADDITIONAL).map_err(read_error(ADDITIONAL))? {
@@ -1660,6 +1677,10 @@ fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
         dictionary.drop_words(|reading, surface| {
             corrections.drops(surface) || !listed && !is_word(reading, surface)
         });
+        if [PERSON, PLACE, STATION].contains(&name.as_str()) {
+            let start = seen_once_cost(base_outputs.seen_once)?;
+            dictionary.start_costs_at(start, |line, kind| base.keeps(line, kind));
+        }
         let dictionary_path = format!("{out_dir}/{name}.tsv");
         let report_path = format!("{out_dir}/{name}-report.tsv");
         let text = dictionary.to_text_where(label.trim(), |line, kind| base.keeps(line, kind));
@@ -1687,6 +1708,15 @@ fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
         );
     }
     Ok(())
+}
+
+/// The cost of a word met once in the base's units, as its build wrote it to
+/// `path`.
+fn seen_once_cost(path: &str) -> Result<u32, Error> {
+    read_to_string(path)?
+        .trim()
+        .parse()
+        .map_err(|_| Error::SeenOnce { path: path.into() })
 }
 
 /// The place name dictionary from the postal code data's CSV.
