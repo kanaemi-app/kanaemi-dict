@@ -1,6 +1,6 @@
 # 駅名は Wikidata の読み仮名から取り、駅名の追加辞書にする
 
-状態：採用
+状態：採用（コストは `20261013-start-list-dictionary-costs-at-a-word-seen-once-in-the-base-text.md` で、基本辞書の文章に 1 回出た語のコストから始める）
 
 ## 背景
 
