@@ -358,6 +358,7 @@ pub fn take(from: &Path, to: &Path, notices: &Path) -> Result<Vec<String>, DistE
 mod tests {
     use super::*;
     use crate::model_file;
+    use kanaemi_engine::MODEL_FORMAT_VERSION;
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
@@ -556,7 +557,7 @@ mod tests {
                             "size": BASE.len(),
                             "sha256": sha256_hex(BASE.as_bytes()),
                         },
-                        "model": { "format": 3, "sha256": sha256_hex(&model) },
+                        "model": { "format": MODEL_FORMAT_VERSION, "sha256": sha256_hex(&model) },
                     },
                     {
                         "name": "railway",

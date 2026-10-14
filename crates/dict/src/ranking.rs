@@ -8,7 +8,8 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use kanaemi_engine::{
-    CONTEXT_CHARS, CandidateFacts, Engine, HISTORY_LEN, RankingInput, feature_indices,
+    CONTEXT_CHARS, CandidateFacts, Engine, HISTORY_LEN, MODEL_FORMAT_VERSION, RankingInput,
+    feature_indices,
 };
 
 use crate::kana::is_hiragana;
@@ -419,7 +420,6 @@ pub fn train(blocks: &impl Blocks, bits: u8, epochs: usize, rate: f32) -> io::Re
 }
 
 const MODEL_MAGIC: &[u8; 8] = b"KANAEMIM";
-const MODEL_VERSION: u32 = 3;
 /// The weight type of a model file whose weights are bytes times a scale.
 const MODEL_I8: u8 = 1;
 
@@ -434,7 +434,7 @@ pub fn model_file(bits: u8, weights: &[f32]) -> Vec<u8> {
         .collect();
     let mut out = Vec::with_capacity(32 + body.len());
     out.extend_from_slice(MODEL_MAGIC);
-    out.extend_from_slice(&MODEL_VERSION.to_le_bytes());
+    out.extend_from_slice(&MODEL_FORMAT_VERSION.to_le_bytes());
     out.push(bits);
     out.push(MODEL_I8);
     out.extend_from_slice(&[0, 0]);
@@ -780,7 +780,7 @@ mod tests {
         let bytes = model_file(10, &weights);
 
         assert_eq!(&bytes[..8], b"KANAEMIM");
-        assert_eq!(&bytes[8..12], &3u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &MODEL_FORMAT_VERSION.to_le_bytes());
         assert_eq!(bytes[12..14], [10, 1]);
         assert_eq!(
             f32::from_le_bytes(bytes[16..20].try_into().unwrap()),
