@@ -55,8 +55,9 @@ base-titles:
 units:
     cargo run --release -p kanaemi-dict -- units
 
-# Build build/dictionaries/base.tsv from build/units.jsonl and the UniDic lexicon;
-# `--train-only` builds build/dictionaries/base-train.tsv from the train documents alone.
+# Build build/dictionaries/base.tsv from build/units.jsonl and the UniDic lexicon, writing the cost of a word met once
+# to build/dictionaries/base-seen-once.txt; `--train-only` builds build/dictionaries/base-train.tsv and
+# base-train-seen-once.txt from the train documents alone.
 dictionary *flags:
     cargo run --release -p kanaemi-dict -- dictionary {{flags}}
 
@@ -81,8 +82,10 @@ additional-docs:
     deno run --allow-read --allow-write --allow-run=lbzip2 scripts/additional.ts docs
 
 # Build the additional dictionaries NAME (or every one) into build/dictionaries/NAME.tsv,
-# without what build/dictionaries/base.tsv already gives; `--train-only` (first) builds them without what
-# build/dictionaries/base-train.tsv gives into build/dictionaries/train/, for `just evaluate --with`.
+# without what build/dictionaries/base.tsv already gives, the costs of person, place and station starting at
+# build/dictionaries/base-seen-once.txt; `--train-only` (first) builds them without what
+# build/dictionaries/base-train.tsv gives, from base-train-seen-once.txt, into build/dictionaries/train/, for
+# `just evaluate --with`.
 additional *names:
     cargo run --release -p kanaemi-dict -- additional {{names}}
 

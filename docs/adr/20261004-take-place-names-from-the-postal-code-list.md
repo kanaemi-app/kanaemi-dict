@@ -1,6 +1,6 @@
 # 地名は郵便番号データの一覧から取る
 
-状態：一部置き換え（「例外は、公的機関が配る地名の一覧に限る」の行は `20261007-take-other-lists-only-for-words-text-cannot-make.md` で置き換えた）
+状態：一部置き換え（「例外は、公的機関が配る地名の一覧に限る」の行は `20261007-take-other-lists-only-for-words-text-cannot-make.md` で置き換えた。コストは `20261013-start-list-dictionary-costs-at-a-word-seen-once-in-the-base-text.md` で、基本辞書の文章に 1 回出た語のコストから始める）
 
 ## 背景
 

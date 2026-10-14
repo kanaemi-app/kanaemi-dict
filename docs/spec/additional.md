@@ -11,6 +11,15 @@
 - 地名の辞書は、郵便番号データの地名から作る（[地名は郵便番号データの一覧から取る](../adr/20261004-take-place-names-from-the-postal-code-list.md)）。
 - 送り仮名の揺れの辞書（`okurigana`）は、基本辞書の文書の単位のうち、送り仮名の揺れ（[辞書の項目](dictionary.md#送り仮名の揺れ)）だけから作る。足切りとコストは、その単位の中で基本辞書と同じに決める。ほかの辞書はどれも送り仮名の揺れを持たない。
 
+## 一覧から作る辞書のコスト
+
+人名・地名・駅名の辞書は、一覧の中の割合から決めたコストを、辞書の中で最も安い項目が、基本辞書の文章に 1 回出た語のコストになるように、すべての項目で同じだけずらす。辞書の中のコストの差は変えない。どう決めるかは [一覧から作る追加辞書のコストは、基本辞書の文章に 1 回出た語のコストから始める](../adr/20261013-start-list-dictionary-costs-at-a-word-seen-once-in-the-base-text.md) による。
+
+- 基本辞書の文章に 1 回出た語のコストは、`cost_of(1, 基本辞書が数えた単位の数)`。
+- `just dictionary` は、このコストを `build/dictionaries/base-seen-once.txt` に、`just dictionary --train-only` は `build/dictionaries/base-train-seen-once.txt` に書く。中身は 10 進の数 1 つと改行。
+- `just additional` は前者を、`just additional --train-only` は後者を読む。読めなければ、人名・地名・駅名の辞書を作らずに失敗させる。
+- 分野の辞書、その年の新語の辞書、送り仮名の揺れの辞書、記号・絵文字・顔文字の辞書のコストはずらさない。
+
 ## 設定
 
 追加辞書ごとに `additional/<名前>/` を置く。
