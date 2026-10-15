@@ -169,7 +169,7 @@ const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
 /// Where the training examples wait, in a file of each run's own, while the
 /// model trains.
 const RANKING_WORK: &str = "build/ranking";
-const MODEL_BITS: u8 = 20;
+const MODEL_BITS: u8 = 22;
 const EPOCHS: usize = 3;
 const RATE: f32 = 0.05;
 /// Documents become examples a block at a time; a block closes once its units
