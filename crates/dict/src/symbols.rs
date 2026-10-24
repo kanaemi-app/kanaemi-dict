@@ -6,8 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::kana::is_hiragana;
 use crate::{Dictionary, Entry, katakana_to_hiragana};
 
-/// The cost of the first symbol of a reading: band 13 of the ranking model,
-/// behind every word of the base dictionary.
+/// The cost of the first symbol of a reading, the rest following in the
+/// table's order. Without the ranking model Kanaemi lists them after the
+/// words of the dictionaries before them whatever their cost; the model
+/// learns what the cost weighs from the symbols themselves, as it is trained
+/// with these dictionaries behind the base.
 const FIRST_COST: u32 = 8192;
 const LAST_COST: u32 = 16383;
 

@@ -18,7 +18,7 @@ use kanaemi_dict::{
     as_typed, check_words, clans, common_words, compound_parts, correction_uses,
     correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
     cut_documents, dictionary_lines, document_ids, document_sources, document_texts,
-    each_document_with_units, engine, engine_with, eval_documents, evaluate_documents,
+    each_document_with_units, engine_with, eval_documents, evaluate_documents,
     examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
     kanji_entries, keys_diff_tsv, listed_dictionary, loss_reasons_tsv, mismatches_tsv,
     miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols,
@@ -26,11 +26,12 @@ use kanaemi_dict::{
     parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
     read_names, read_title_entries, read_titles, read_titles_of, read_units, reading_form,
     sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take, text_units,
-    title_entries, train, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv,
-    unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
-    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    title_entries, train, turn_of, turned, typed_by_analyzer, typed_units, unihan_readings,
+    unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings,
+    wikidata_stations, with_people_read_by_leads, word_misses_tsv, word_scores_tsv,
+    write_atomically, year_dictionary,
 };
-use kanaemi_engine::{RankingModel, TextDictionary};
+use kanaemi_engine::{Engine, RankingModel, TextDictionary};
 use rayon::prelude::*;
 
 const SYSTEM_DICTIONARY: &str = "build/sudachi/system_full.dic";
@@ -154,9 +155,9 @@ const NOTICES: &str = "notices";
 const DIST: &str = "build/dist";
 /// The ranking model, paired with the base dictionary.
 const MODEL: &str = "build/dictionaries/base.model";
-/// [`EVALUATION`] with the model.
 /// The rows of [`EVALUATION`]'s sample of units not offered their surface.
 const MISSING_SAMPLE: usize = 200;
+/// [`EVALUATION`] with the model.
 const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
     scores: "build/ranking-evaluation.tsv",
     misses: "build/ranking-misses.tsv",
@@ -164,6 +165,16 @@ const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
     keys: "build/ranking-keys.tsv",
     previous_keys: "build/ranking-keys.previous.tsv",
     diff: "build/ranking-diff.tsv",
+    missing_sample: None,
+};
+/// [`RANKING_EVALUATION`] with every additional dictionary after the base.
+const RANKING_WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
+    scores: "build/ranking-with.tsv",
+    misses: "build/ranking-with-misses.tsv",
+    losses: "build/ranking-with-losses.tsv",
+    keys: "build/ranking-with-keys.tsv",
+    previous_keys: "build/ranking-with-keys.previous.tsv",
+    diff: "build/ranking-with-diff.tsv",
     missing_sample: None,
 };
 /// Where the training examples wait, in a file of each run's own, while the
@@ -275,7 +286,9 @@ usage: kanaemi-dict units
          build/dictionaries/base.model paired with
          build/dictionaries/base.tsv, and measure the eval documents
          without and with it, writing the tables of evaluate with it as
-         build/ranking-*.tsv
+         build/ranking-*.tsv, and again with every additional dictionary of
+         build/dictionaries/train/ after the base, writing
+         build/ranking-with*.tsv
        kanaemi-dict take
          put the dictionaries and the model of build/dictionaries/ that have
          a sources record into dictionaries/ in place of those there, once
@@ -911,6 +924,10 @@ fn print_scores(label: &str, evaluation: &Evaluation) {
 /// with it.
 fn train_ranking() -> Result<(), Error> {
     let dictionary = train_dictionary()?;
+    let names = additional_names()?;
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let listed = with_additional_in(TRAIN_ADDITIONAL, dictionary.clone(), &names)?;
+    let additional = &listed[1..];
     let examples_path = format!("{RANKING_WORK}/examples-{}.bin", std::process::id());
     std::fs::create_dir_all(RANKING_WORK).map_err(read_error(RANKING_WORK))?;
     let mut examples = ExampleFile::create(&examples_path).map_err(|source| Error::Examples {
@@ -952,6 +969,7 @@ fn train_ranking() -> Result<(), Error> {
             &taken,
             &Teaching {
                 dictionary: &dictionary,
+                additional,
                 fragments: &fragments,
                 established: &established,
             },
@@ -989,20 +1007,46 @@ fn train_ranking() -> Result<(), Error> {
     let docs = typed_eval_documents(&established)?;
     let agreed = agreed_readings(&docs)?;
     let agreed = |unit: &Unit| agrees(&agreed, unit);
-    print_scores(
-        "without the model: ",
-        &evaluate_documents(&docs, std::slice::from_ref(&dictionary), None, &agreed),
+    let model = Arc::new(model);
+    let runs = [
+        ("", std::slice::from_ref(&dictionary), &RANKING_EVALUATION),
+        (
+            "with the additional dictionaries, ",
+            &listed[..],
+            &RANKING_WITH_ADDITIONAL,
+        ),
+    ];
+    for (label, dictionaries, outputs) in runs {
+        print_scores(
+            &format!("{label}without the model: "),
+            &evaluate_documents(&docs, dictionaries, None, &agreed),
+        );
+        let with = evaluate_documents(&docs, dictionaries, Some(&model), &agreed);
+        print_scores(&format!("{label}with the model: "), &with);
+        write_evaluation(outputs, &with)?;
+    }
+    println!(
+        "out: {MODEL}, evaluation: {} (with the additional dictionaries {})",
+        RANKING_EVALUATION.scores, RANKING_WITH_ADDITIONAL.scores
     );
-    let with = evaluate_documents(
-        &docs,
-        std::slice::from_ref(&dictionary),
-        Some(&Arc::new(model)),
-        &agreed,
-    );
-    print_scores("with the model: ", &with);
-    write_evaluation(&RANKING_EVALUATION, &with)?;
-    println!("out: {MODEL}, evaluation: {}", RANKING_EVALUATION.scores);
     Ok(())
+}
+
+/// Every additional dictionary set up under additional/, in the order of
+/// their names.
+fn additional_names() -> Result<Vec<String>, Error> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(ADDITIONAL).map_err(read_error(ADDITIONAL))? {
+        let entry = entry.map_err(read_error(ADDITIONAL))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // A dot directory is a year's setup left half-written, as
+        // scripts/additional.ts skips it too.
+        if entry.path().is_dir() && !name.starts_with('.') {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// The additional dictionaries built from a field's documents, whose writing
@@ -1028,9 +1072,11 @@ fn field_names() -> Result<Vec<String>, Error> {
 }
 
 /// What examples are made with: the dictionary that gives the candidates,
-/// and the fragments typed only as their compounds (see [`typed_units`]).
+/// the additional dictionaries listed after it, and the fragments typed only
+/// as their compounds (see [`typed_units`]).
 struct Teaching<'a> {
     dictionary: &'a Arc<TextDictionary>,
+    additional: &'a [Arc<TextDictionary>],
     fragments: &'a HashSet<String>,
     established: &'a Established,
 }
@@ -1054,18 +1100,19 @@ fn add_examples(
     let flush = |batch: &mut Vec<EvalDocument>, examples: &mut ExampleFile| {
         let parts: Vec<Examples> = batch
             .par_iter()
-            .map_init(
-                || engine(teaching.dictionary.clone()),
-                |engine, doc| {
-                    let units = typed_units(
-                        &doc.units,
-                        &doc.compounds,
-                        teaching.fragments,
-                        teaching.established,
-                    );
-                    examples_of_document(engine, &units, &doc.text)
-                },
-            )
+            .map_init(HashMap::new, |engines: &mut HashMap<usize, Engine>, doc| {
+                let turn = turn_of(&doc.doc_id, teaching.additional.len());
+                let engine = engines.entry(turn).or_insert_with(|| {
+                    engine_with(&turned(teaching.dictionary, teaching.additional, turn))
+                });
+                let units = typed_units(
+                    &doc.units,
+                    &doc.compounds,
+                    teaching.fragments,
+                    teaching.established,
+                );
+                examples_of_document(engine, &units, &doc.text)
+            })
             .collect();
         let mut block = Examples::default();
         for part in parts {
@@ -1569,18 +1616,7 @@ fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
     };
     let base_path = base_outputs.dictionary;
     let names: Vec<String> = if names.is_empty() {
-        let mut found = Vec::new();
-        for entry in std::fs::read_dir(ADDITIONAL).map_err(read_error(ADDITIONAL))? {
-            let entry = entry.map_err(read_error(ADDITIONAL))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // A dot directory is a year's setup left half-written, as
-            // scripts/additional.ts skips it too.
-            if entry.path().is_dir() && !name.starts_with('.') {
-                found.push(name);
-            }
-        }
-        found.sort();
-        found
+        additional_names()?
     } else {
         names.iter().map(|&n| n.to_owned()).collect()
     };
