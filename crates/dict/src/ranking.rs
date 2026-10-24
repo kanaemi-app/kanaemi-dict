@@ -171,6 +171,33 @@ pub fn typed_units(
         .collect()
 }
 
+/// The dictionaries a document is typed with in training: `base` first, as
+/// a typist lists it, and the `additional` ones after it, turned `turn`
+/// places. A typist lists the additional dictionaries in any order and
+/// Kanaemi sees the place of each, so documents turn them by
+/// [`turn_of`] and each stands at each place about as often.
+pub fn turned<T: Clone>(base: &T, additional: &[T], turn: usize) -> Vec<T> {
+    let turn = if additional.is_empty() {
+        0
+    } else {
+        turn % additional.len()
+    };
+    std::iter::once(base.clone())
+        .chain(additional[turn..].iter().cloned())
+        .chain(additional[..turn].iter().cloned())
+        .collect()
+}
+
+/// How many places the document `doc_id` turns `count` additional
+/// dictionaries in [`turned`]: by a hash of its ID, so a run teaches the
+/// same examples as the one before.
+pub fn turn_of(doc_id: &str, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (xxhash_rust::xxh3::xxh3_64(doc_id.as_bytes()) % count as u64) as usize
+}
+
 /// Adds the examples of `query` typed into the field with `history` and
 /// `context`, and into an empty field, when its `candidates` teach anything;
 /// gives where its expected surface is among them.
@@ -466,7 +493,7 @@ mod tests {
     use kanaemi_engine::{RankingModel, TextDictionary};
 
     use super::*;
-    use crate::{Numeric, engine};
+    use crate::{Numeric, engine, engine_with};
 
     fn unit(position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
@@ -835,5 +862,64 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert!(opened.is_ok(), "{:?}", opened.err());
+    }
+    #[test]
+    fn a_document_lists_the_base_first_and_every_additional_dictionary_once_after_it() {
+        let additional = ["emoji", "person", "symbol"];
+
+        for turn in 0..additional.len() {
+            let listed = turned(&"base", &additional, turn);
+
+            assert_eq!(listed[0], "base");
+            let mut behind = listed[1..].to_vec();
+            behind.sort();
+            assert_eq!(behind, additional, "turn {turn}");
+        }
+        assert_eq!(
+            turned(&"base", &additional, 1),
+            ["base", "person", "symbol", "emoji"]
+        );
+    }
+
+    #[test]
+    fn each_additional_dictionary_stands_at_each_place_behind_the_base_in_some_document() {
+        let additional = ["emoji", "person", "symbol"];
+        let ids: Vec<String> = (0..300).map(|i| format!("wikipedia:{i}")).collect();
+
+        let turns: HashSet<usize> = ids.iter().map(|id| turn_of(id, additional.len())).collect();
+
+        assert_eq!(turns, HashSet::from([0, 1, 2]));
+        assert_eq!(
+            turn_of("wikipedia:7", additional.len()),
+            turn_of("wikipedia:7", additional.len()),
+            "a document keeps its turn from run to run"
+        );
+        assert_eq!(
+            turn_of("wikipedia:7", 0),
+            0,
+            "no additional dictionary to turn"
+        );
+    }
+
+    #[test]
+    fn a_candidate_of_an_additional_dictionary_is_taught_as_one_that_lost() {
+        let parsed = |text: &str| Arc::new(TextDictionary::parse(text).0);
+        let base = parsed("はこ\t箱\t\t1000\nはこ\t函\t\t3000\n");
+        let emoji = parsed("はこ\t📦\t\t8192\n");
+        let engine = engine_with(&turned(&base, &[emoji], 0));
+
+        let examples = examples_of_document(&engine, &[unit(0, "はこ", "箱")], "箱");
+
+        let lost: Vec<&[u32]> = examples
+            .candidates(0)
+            .enumerate()
+            .filter(|&(i, _)| i != examples.correct(0))
+            .map(|(_, features)| features)
+            .collect();
+        assert!(
+            lost.iter()
+                .any(|features| features.contains(&index("dc\u{1f}2\u{1f}40"))),
+            "📦 comes from the dictionary after the base, at cost 8192"
+        );
     }
 }
