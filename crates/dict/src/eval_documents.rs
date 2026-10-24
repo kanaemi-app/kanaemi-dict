@@ -462,6 +462,8 @@ mod tests {
     fn unit(doc_id: &str, position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
             particle: None,
+            suru: None,
+            copula: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
@@ -1016,6 +1018,8 @@ mod model_tests {
             source_id: "aozora-text".into(),
             units: vec![Unit {
                 particle: None,
+                suru: None,
+                copula: None,
                 compound: false,
                 okurigana_variant: false,
                 parts: Vec::new(),

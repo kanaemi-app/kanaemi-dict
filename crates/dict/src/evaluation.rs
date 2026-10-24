@@ -660,6 +660,8 @@ mod tests {
     fn unit(reading: &str, surface: &str, stem: Option<(&str, &str)>) -> Unit {
         Unit {
             particle: None,
+            suru: None,
+            copula: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
