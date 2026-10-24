@@ -91,7 +91,8 @@ additional *names:
 
 # Train the ranking model into build/dictionaries/base.model on the candidates of build/dictionaries/base-train.tsv,
 # paired with build/dictionaries/base.tsv (build it first), and measure the eval documents without and with it,
-# writing the tables of `just evaluate` with it as build/ranking-*.tsv.
+# writing the tables of `just evaluate` with it as build/ranking-*.tsv, and again with every additional dictionary of
+# build/dictionaries/train/ after the base (`just additional --train-only` first), writing build/ranking-with*.tsv.
 ranking:
     cargo run --release -p kanaemi-dict -- ranking
 

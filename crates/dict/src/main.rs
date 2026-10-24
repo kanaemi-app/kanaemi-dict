@@ -154,9 +154,9 @@ const NOTICES: &str = "notices";
 const DIST: &str = "build/dist";
 /// The ranking model, paired with the base dictionary.
 const MODEL: &str = "build/dictionaries/base.model";
-/// [`EVALUATION`] with the model.
 /// The rows of [`EVALUATION`]'s sample of units not offered their surface.
 const MISSING_SAMPLE: usize = 200;
+/// [`EVALUATION`] with the model.
 const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
     scores: "build/ranking-evaluation.tsv",
     misses: "build/ranking-misses.tsv",
@@ -164,6 +164,16 @@ const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
     keys: "build/ranking-keys.tsv",
     previous_keys: "build/ranking-keys.previous.tsv",
     diff: "build/ranking-diff.tsv",
+    missing_sample: None,
+};
+/// [`RANKING_EVALUATION`] with every additional dictionary after the base.
+const RANKING_WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
+    scores: "build/ranking-with.tsv",
+    misses: "build/ranking-with-misses.tsv",
+    losses: "build/ranking-with-losses.tsv",
+    keys: "build/ranking-with-keys.tsv",
+    previous_keys: "build/ranking-with-keys.previous.tsv",
+    diff: "build/ranking-with-diff.tsv",
     missing_sample: None,
 };
 /// Where the training examples wait, in a file of each run's own, while the
@@ -275,7 +285,9 @@ usage: kanaemi-dict units
          build/dictionaries/base.model paired with
          build/dictionaries/base.tsv, and measure the eval documents
          without and with it, writing the tables of evaluate with it as
-         build/ranking-*.tsv
+         build/ranking-*.tsv, and again with every additional dictionary of
+         build/dictionaries/train/ after the base, writing
+         build/ranking-with*.tsv
        kanaemi-dict take
          put the dictionaries and the model of build/dictionaries/ that have
          a sources record into dictionaries/ in place of those there, once
@@ -989,20 +1001,48 @@ fn train_ranking() -> Result<(), Error> {
     let docs = typed_eval_documents(&established)?;
     let agreed = agreed_readings(&docs)?;
     let agreed = |unit: &Unit| agrees(&agreed, unit);
-    print_scores(
-        "without the model: ",
-        &evaluate_documents(&docs, std::slice::from_ref(&dictionary), None, &agreed),
+    let model = Arc::new(model);
+    let names = additional_names()?;
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let runs = [
+        ("", vec![dictionary.clone()], &RANKING_EVALUATION),
+        (
+            "with the additional dictionaries, ",
+            with_additional_in(TRAIN_ADDITIONAL, dictionary, &names)?,
+            &RANKING_WITH_ADDITIONAL,
+        ),
+    ];
+    for (label, dictionaries, outputs) in runs {
+        print_scores(
+            &format!("{label}without the model: "),
+            &evaluate_documents(&docs, &dictionaries, None, &agreed),
+        );
+        let with = evaluate_documents(&docs, &dictionaries, Some(&model), &agreed);
+        print_scores(&format!("{label}with the model: "), &with);
+        write_evaluation(outputs, &with)?;
+    }
+    println!(
+        "out: {MODEL}, evaluation: {} (with the additional dictionaries {})",
+        RANKING_EVALUATION.scores, RANKING_WITH_ADDITIONAL.scores
     );
-    let with = evaluate_documents(
-        &docs,
-        std::slice::from_ref(&dictionary),
-        Some(&Arc::new(model)),
-        &agreed,
-    );
-    print_scores("with the model: ", &with);
-    write_evaluation(&RANKING_EVALUATION, &with)?;
-    println!("out: {MODEL}, evaluation: {}", RANKING_EVALUATION.scores);
     Ok(())
+}
+
+/// Every additional dictionary set up under additional/, in the order of
+/// their names.
+fn additional_names() -> Result<Vec<String>, Error> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(ADDITIONAL).map_err(read_error(ADDITIONAL))? {
+        let entry = entry.map_err(read_error(ADDITIONAL))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // A dot directory is a year's setup left half-written, as
+        // scripts/additional.ts skips it too.
+        if entry.path().is_dir() && !name.starts_with('.') {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// The additional dictionaries built from a field's documents, whose writing
@@ -1569,18 +1609,7 @@ fn build_additional(names: &[&str], train_only: bool) -> Result<(), Error> {
     };
     let base_path = base_outputs.dictionary;
     let names: Vec<String> = if names.is_empty() {
-        let mut found = Vec::new();
-        for entry in std::fs::read_dir(ADDITIONAL).map_err(read_error(ADDITIONAL))? {
-            let entry = entry.map_err(read_error(ADDITIONAL))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // A dot directory is a year's setup left half-written, as
-            // scripts/additional.ts skips it too.
-            if entry.path().is_dir() && !name.starts_with('.') {
-                found.push(name);
-            }
-        }
-        found.sort();
-        found
+        additional_names()?
     } else {
         names.iter().map(|&n| n.to_owned()).collect()
     };
