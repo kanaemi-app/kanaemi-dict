@@ -1,4 +1,4 @@
-# sha256 6ede951fdac143b3ad7f4c530aae61bfe73ea6a81e69f706b88f7a0bb61d4bc9
+# sha256 f08b00525343ef4bd584c1126774c68c95b8160afbf5eba1973c4a8772ae65bd
 sudachidict-core-lex
 sudachidict-full
 sudachidict-notcore-lex

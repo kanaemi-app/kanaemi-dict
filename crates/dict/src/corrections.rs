@@ -353,6 +353,7 @@ mod tests {
 
     fn unit(position: usize, surface: &str, reading: &str) -> Unit {
         Unit {
+            particle: None,
             doc_id: String::new(),
             position,
             reading: reading.into(),

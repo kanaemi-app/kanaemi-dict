@@ -435,6 +435,7 @@ mod tests {
 
     fn unit(doc_id: &str, position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
+            particle: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),

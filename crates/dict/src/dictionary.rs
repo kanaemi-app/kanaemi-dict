@@ -47,8 +47,12 @@ pub struct Report {
 pub struct Dictionary {
     pub entries: Vec<Entry>,
     /// Lines for typing with okurigana, such as 書く under `か*く`, whose
-    /// reading marks the okurigana with its last `*`.
+    /// reading marks the okurigana with its last `*`, the particle lines
+    /// among them.
     pub okuri: Vec<Entry>,
+    /// Lines of words typed with the particle after them as okurigana, such
+    /// as 気に under `き*に`, which [`Dictionary::okuri`] holds too.
+    pub particles: Vec<Entry>,
     /// Numeric items, whose reading and surface hold the number as a
     /// placeholder (`{}ほん` for `{}本`).
     pub numeric: Vec<Entry>,
@@ -96,6 +100,15 @@ pub(crate) const MIN_COUNT: usize = 2;
 const UNIDIC_EXTRA: u32 = 1000;
 /// The cost of a UniDic word whose surface no unit shows.
 pub(crate) const UNIDIC_UNSEEN: u32 = 3000;
+/// Added to the cost of a line of a word with the particle after it, so that
+/// under one reading it comes behind the forms of conjugating words met about
+/// as often (愛で ahead of 目で under `め*で`), which the reading is mostly
+/// typed for.
+pub(crate) const PARTICLE_EXTRA: u32 = 400;
+/// A word with the particle after it needs this many occurrences to enter.
+/// A rarer one is typed as the word and the particle apart, and the lines
+/// of every pair met twice would make the base dictionary half as big again.
+const PARTICLE_MIN_COUNT: usize = 10;
 
 /// A surface of words written whole with at least this share (numerator,
 /// denominator) of its places, in any reading, inside compound units is a
@@ -248,6 +261,7 @@ impl Dictionary {
         let mut form_counts: HashMap<(String, String), usize> = HashMap::new();
         let mut numeric_counts: HashMap<(String, String), usize> = HashMap::new();
         let mut numeric_written: HashMap<String, usize> = HashMap::new();
+        let mut particle_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
         let mut surfaces: HashMap<String, usize> = HashMap::new();
         let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
         let mut disallowed: BTreeMap<(String, String), (usize, String)> = BTreeMap::new();
@@ -287,6 +301,13 @@ impl Dictionary {
                 *counts
                     .entry((unit.reading.clone(), unit.surface.clone(), None))
                     .or_default() += 1;
+                if let Some(line) = unit
+                    .particle
+                    .as_ref()
+                    .and_then(|p| particle_line(&unit.reading, &unit.surface, p))
+                {
+                    *particle_counts.entry(line).or_default() += 1;
+                }
                 continue;
             };
             let stem = (
@@ -395,8 +416,13 @@ impl Dictionary {
             })
             .collect();
 
+        let particles = particle_lines(particle_counts, total);
         Self {
-            okuri: okuri_lines(&entries, rare_cost, typed_marked(&whole_forms)),
+            okuri: with_particles(
+                okuri_lines(&entries, rare_cost, typed_marked(&whole_forms)),
+                &particles,
+            ),
+            particles,
             numeric: numeric_entries(numeric_counts, total),
             numeric_written: numeric_written
                 .into_iter()
@@ -480,10 +506,13 @@ impl Dictionary {
                 }
             }
         }
-        self.okuri = okuri_lines(
-            &self.entries,
-            self.rare_cost,
-            typed_marked(&self.whole_forms),
+        self.okuri = with_particles(
+            okuri_lines(
+                &self.entries,
+                self.rare_cost,
+                typed_marked(&self.whole_forms),
+            ),
+            &self.particles,
         );
     }
 
@@ -492,6 +521,7 @@ impl Dictionary {
     pub fn drop_words(&mut self, drops: impl Fn(&str, &str) -> bool) {
         self.entries.retain(|e| !drops(&e.reading, &e.surface));
         self.okuri.retain(|e| !drops(&e.reading, &e.surface));
+        self.particles.retain(|e| !drops(&e.reading, &e.surface));
         self.whole_forms
             .retain(|(reading, surface), _| !drops(reading, surface));
     }
@@ -765,6 +795,49 @@ pub(crate) fn okuri_lines(
         .collect()
 }
 
+/// The line of a word written whole, `reading` and `surface`, typed with the
+/// first kana of the `particle` after it as okurigana: `(き*に, 気に)` for 気
+/// before に. A word ending in kana has none; its okurigana are its own.
+pub(crate) fn particle_line(
+    reading: &str,
+    surface: &str,
+    particle: &str,
+) -> Option<(String, String)> {
+    let first = particle.chars().next().filter(|c| is_hiragana(*c))?;
+    surface.chars().last().filter(|c| is_kanji(*c))?;
+    Some((format!("{reading}*{first}"), format!("{surface}{first}")))
+}
+
+/// The particle lines met at least [`PARTICLE_MIN_COUNT`] times, costing
+/// [`PARTICLE_EXTRA`] more than their count says.
+fn particle_lines(counts: BTreeMap<(String, String), usize>, total: usize) -> Vec<Entry> {
+    counts
+        .into_iter()
+        .filter(|&(_, count)| count >= PARTICLE_MIN_COUNT)
+        .map(|((reading, surface), count)| Entry {
+            reading,
+            surface,
+            cost: cost_of(count, total) + PARTICLE_EXTRA,
+            conjugation: None,
+        })
+        .collect()
+}
+
+/// `okuri` with `particles`; a line in both keeps the smaller cost.
+fn with_particles(okuri: Vec<Entry>, particles: &[Entry]) -> Vec<Entry> {
+    let mut lines: BTreeMap<(String, String), Entry> = okuri
+        .into_iter()
+        .map(|e| ((e.reading.clone(), e.surface.clone()), e))
+        .collect();
+    for p in particles {
+        lines
+            .entry((p.reading.clone(), p.surface.clone()))
+            .and_modify(|e| e.cost = e.cost.min(p.cost))
+            .or_insert_with(|| p.clone());
+    }
+    lines.into_values().collect()
+}
+
 /// Numeric entries from their counts. A counter of the は row also takes the
 /// readings whose first kana after the number is another of its plain, voiced
 /// and semi-voiced forms (`{}ほん` and `{}ぼん` from `{}ぽん`), as it changes
@@ -917,6 +990,7 @@ mod tests {
 
     fn word(reading: &str, surface: &str) -> Unit {
         Unit {
+            particle: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
@@ -1787,6 +1861,75 @@ mod tests {
             cost(5, 8) + cost(2, 8),
             "長さ is typed ながさ, not with its okurigana marked"
         );
+    }
+
+    fn before(particle: &str, unit: Unit) -> Unit {
+        Unit {
+            particle: Some(particle.into()),
+            ..unit
+        }
+    }
+
+    #[test]
+    fn a_word_before_a_particle_gets_a_line_with_the_particle_as_okurigana_behind_the_forms() {
+        let units: Vec<Unit> = [
+            repeat(before("に", word("き", "気")), 10),
+            repeat(before("から", word("き", "気")), 9),
+            repeat(before("を", word("てがみ", "手紙")), 10),
+            repeat(
+                conj("きにくい", "来にくい", ("きにく", "来にく"), "形容詞"),
+                3,
+            ),
+            repeat(
+                before("が", conj("かく", "書く", ("か", "書"), "五段-カ行")),
+                3,
+            ),
+            repeat(before("に", word("みなさん", "皆さん")), 10),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(
+            find(&dict.okuri, "き*に", "気に").map(|e| e.cost),
+            Some(cost(10, 45) + PARTICLE_EXTRA)
+        );
+        assert_eq!(
+            find(&dict.okuri, "き*に", "来に").map(|e| e.cost),
+            Some(cost(3, 45))
+        );
+        assert_eq!(
+            find(&dict.okuri, "てがみ*を", "手紙を").map(|e| e.cost),
+            Some(cost(10, 45) + PARTICLE_EXTRA)
+        );
+        assert_eq!(
+            find(&dict.okuri, "き*か", "気か"),
+            None,
+            "met too few times"
+        );
+        assert_eq!(
+            find(&dict.okuri, "かく*が", "書くが"),
+            None,
+            "a conjugating word"
+        );
+        assert_eq!(
+            find(&dict.okuri, "みなさん*に", "皆さんに"),
+            None,
+            "ends in kana"
+        );
+    }
+
+    #[test]
+    fn particle_lines_stay_when_words_are_added_and_leave_when_dropped() {
+        let units = repeat(before("に", word("き", "気")), PARTICLE_MIN_COUNT);
+        let mut dict = Dictionary::build(&units, &[]);
+
+        dict.add_words([entry("きにくい", "来にくい", None, 50)]);
+        assert!(find(&dict.okuri, "き*に", "気に").is_some());
+        assert!(find(&dict.okuri, "き*に", "来に").is_some());
+
+        dict.drop_words(|_, surface| surface == "気に");
+        assert!(find(&dict.okuri, "き*に", "気に").is_none());
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::analyzer::is_break;
 use crate::conjugation::{KanaemiType, kanaemi_type};
 use crate::counted::reading_counted_after;
 use crate::dictionary::MIN_COUNT;
-use crate::kana::{has_kanji, is_kanji, is_katakana, is_reading_kana, is_voicing_of};
+use crate::kana::{has_kanji, is_hiragana, is_kanji, is_katakana, is_reading_kana, is_voicing_of};
 use crate::numeral::{Notation, Number, read_number};
 use crate::{Token, UnidicReadings, Words, is_word, katakana_to_hiragana};
 
@@ -47,6 +47,10 @@ pub struct Unit {
     /// lexicon has (大相撲).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<Part>,
+    /// The particle the analyzer reads right after the unit (に of 気に),
+    /// written in hiragana.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub particle: Option<String>,
 }
 
 /// A word inside a unit, `offset` characters from the unit's start.
@@ -137,6 +141,7 @@ pub fn as_typed(unit: &Unit, established: &Established) -> Vec<Unit> {
     unit.parts
         .iter()
         .map(|p| Unit {
+            particle: None,
             doc_id: unit.doc_id.clone(),
             position: unit.position + p.offset,
             reading: p.reading.clone(),
@@ -253,6 +258,7 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
             .collect();
         line_units.sort_by_key(|(u, _)| u.begin);
         for (u, compound) in line_units {
+            let particle = particle_after(&words.tokens, u.begin + u.surface.chars().count());
             let stem = u.stem;
             emit(Unit {
                 doc_id: doc_id.to_owned(),
@@ -267,11 +273,22 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
                 numeric: u.numeric,
                 compound,
                 parts: u.parts,
+                particle,
             });
         }
         line_start += line.chars().count() + 1;
     }
     Ok(())
+}
+
+/// The particle among `tokens` that starts at `end`, when it is written in
+/// hiragana.
+fn particle_after(tokens: &[Token], end: usize) -> Option<String> {
+    let token = &tokens[tokens.partition_point(|t| t.begin < end)..]
+        .first()
+        .filter(|t| t.begin == end)?;
+    (token.pos[0] == "助詞" && token.surface.chars().all(is_hiragana))
+        .then(|| token.surface.clone())
 }
 
 /// The units of `text` read with `tokenize`, cut as a document is.
@@ -1017,6 +1034,7 @@ mod tests {
     #[test]
     fn units_are_read_one_per_line_and_a_bad_line_is_an_error_with_its_number() {
         let unit = Unit {
+            particle: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
@@ -1432,6 +1450,7 @@ mod tests {
 
     fn joined_unit(position: usize, reading: &str, surface: &str, head: (&str, &str)) -> Unit {
         Unit {
+            particle: None,
             doc_id: "d".into(),
             position,
             reading: reading.into(),
@@ -2485,6 +2504,41 @@ mod tests {
     }
 
     #[test]
+    fn a_unit_keeps_the_particle_right_after_it() {
+        let words = Words {
+            tokens: line(&[
+                &format!("気/き/{NOUN}/気"),
+                &format!("に/に/{PARTICLE}/に"),
+                "なる/なる/動詞,非自立可能,*,*,五段-ラ行,終止形-一般/なる",
+                &format!("手紙/てがみ/{NOUN}/手紙"),
+                "だ/だ/助動詞,*,*,*,助動詞-ダ,終止形-一般/だ",
+                &format!("露天/ろてん/{NOUN}/露天"),
+                &format!("風呂/ふろ/{NOUN}/風呂"),
+                "から/から/助詞,格助詞,*,*,*,*/から",
+            ]),
+            compounds: Vec::new(),
+        };
+
+        let units = cut_document("気になる手紙だ露天風呂から", |_| {
+            Ok::<_, ()>(words.clone())
+        })
+        .unwrap();
+
+        assert_eq!(
+            units
+                .iter()
+                .map(|u| (u.surface.as_str(), u.particle.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("気", Some("に")),
+                ("手紙", None),
+                ("露天", None),
+                ("風呂", Some("から")),
+            ]
+        );
+    }
+
+    #[test]
     fn a_noun_compound_is_a_unit_of_its_own_beside_its_parts_in_position_order() {
         let units = cut_with_compounds(
             "露天風呂に入る",
@@ -2589,6 +2643,7 @@ mod tests {
     #[test]
     fn a_compound_unit_keeps_its_mark_through_a_units_line_and_others_write_none() {
         let mut unit = Unit {
+            particle: None,
             compound: true,
             okurigana_variant: false,
             parts: Vec::new(),
