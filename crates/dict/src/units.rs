@@ -51,6 +51,15 @@ pub struct Unit {
     /// written in hiragana.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub particle: Option<String>,
+    /// The form of する the analyzer reads right after the unit (し of
+    /// 関係した), which makes a verb of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suru: Option<String>,
+    /// The form of the copula だ the analyzer reads right after the unit, when
+    /// the unit is an adjectival word (な of 繊細な): with it, the word is an
+    /// adjective. After another noun (学生だ) だ only links it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copula: Option<String>,
 }
 
 /// A word inside a unit, `offset` characters from the unit's start.
@@ -142,6 +151,8 @@ pub fn as_typed(unit: &Unit, established: &Established) -> Vec<Unit> {
         .iter()
         .map(|p| Unit {
             particle: None,
+            suru: None,
+            copula: None,
             doc_id: unit.doc_id.clone(),
             position: unit.position + p.offset,
             reading: p.reading.clone(),
@@ -258,7 +269,9 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
             .collect();
         line_units.sort_by_key(|(u, _)| u.begin);
         for (u, compound) in line_units {
-            let particle = particle_after(&words.tokens, u.begin + u.surface.chars().count());
+            let end = u.begin + u.surface.chars().count();
+            let particle = particle_after(&words.tokens, end);
+            let (suru, copula) = suru_or_copula_after(&words.tokens, end);
             let stem = u.stem;
             emit(Unit {
                 doc_id: doc_id.to_owned(),
@@ -274,6 +287,8 @@ pub(crate) fn each_unit<W: Into<Words>, E>(
                 compound,
                 parts: u.parts,
                 particle,
+                suru,
+                copula,
             });
         }
         line_start += line.chars().count() + 1;
@@ -289,6 +304,31 @@ fn particle_after(tokens: &[Token], end: usize) -> Option<String> {
         .filter(|t| t.begin == end)?;
     (token.pos[0] == "助詞" && token.surface.chars().all(is_hiragana))
         .then(|| token.surface.clone())
+}
+
+/// The form of する among `tokens` that starts at `end`, or of the copula だ
+/// when the token that ends there is an adjectival word (形状詞, or a noun
+/// that can be one), each written in hiragana.
+fn suru_or_copula_after(tokens: &[Token], end: usize) -> (Option<String>, Option<String>) {
+    let at = tokens.partition_point(|t| t.begin < end);
+    let Some(next) = tokens
+        .get(at)
+        .filter(|t| t.begin == end && t.surface.chars().all(is_hiragana))
+    else {
+        return (None, None);
+    };
+    let is_suru =
+        next.pos[0] == "動詞" && next.pos[4] == "サ行変格" && next.dictionary_form == "する";
+    let is_copula = next.pos[0] == "助動詞"
+        && next.pos[4] == "助動詞-ダ"
+        && at.checked_sub(1).map(|i| &tokens[i]).is_some_and(|t| {
+            t.begin + t.surface.chars().count() == end
+                && (t.pos[0] == "形状詞" || t.pos[2].ends_with("形状詞可能"))
+        });
+    (
+        is_suru.then(|| next.surface.clone()),
+        is_copula.then(|| next.surface.clone()),
+    )
 }
 
 /// The units of `text` read with `tokenize`, cut as a document is.
@@ -1035,6 +1075,8 @@ mod tests {
     fn units_are_read_one_per_line_and_a_bad_line_is_an_error_with_its_number() {
         let unit = Unit {
             particle: None,
+            suru: None,
+            copula: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
@@ -1451,6 +1493,8 @@ mod tests {
     fn joined_unit(position: usize, reading: &str, surface: &str, head: (&str, &str)) -> Unit {
         Unit {
             particle: None,
+            suru: None,
+            copula: None,
             doc_id: "d".into(),
             position,
             reading: reading.into(),
@@ -2539,6 +2583,45 @@ mod tests {
     }
 
     #[test]
+    fn a_unit_keeps_the_suru_or_the_copula_that_makes_it_conjugate() {
+        const SURU: &str = "動詞,非自立可能,*,*,サ行変格";
+        const DA: &str = "助動詞,*,*,*,助動詞-ダ";
+        let words = Words {
+            tokens: line(&[
+                "関係/かんけい/名詞,普通名詞,サ変可能,*,*,*/関係",
+                &format!("し/し/{SURU},連用形-一般/する"),
+                "た/た/助動詞,*,*,*,助動詞-タ,終止形-一般/た",
+                "繊細/せんさい/名詞,普通名詞,形状詞可能,*,*,*/繊細",
+                &format!("な/な/{DA},連体形-一般/だ"),
+                "有利/ゆうり/形状詞,一般,*,*,*,*/有利",
+                &format!("に/に/{DA},連用形-ニ/だ"),
+                &format!("学生/がくせい/{NOUN}/学生"),
+                &format!("だ/だ/{DA},終止形-一般/だ"),
+            ]),
+            compounds: Vec::new(),
+        };
+
+        let units = cut_document("関係した繊細な有利に学生だ", |_| {
+            Ok::<_, ()>(words.clone())
+        })
+        .unwrap();
+
+        assert_eq!(
+            units
+                .iter()
+                .map(|u| (u.surface.as_str(), u.suru.as_deref(), u.copula.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("関係", Some("し"), None),
+                ("繊細", None, Some("な")),
+                ("有利", None, Some("に")),
+                ("学生", None, None),
+            ],
+            "だ after a noun that is no adjectival word only links it"
+        );
+    }
+
+    #[test]
     fn a_noun_compound_is_a_unit_of_its_own_beside_its_parts_in_position_order() {
         let units = cut_with_compounds(
             "露天風呂に入る",
@@ -2644,6 +2727,8 @@ mod tests {
     fn a_compound_unit_keeps_its_mark_through_a_units_line_and_others_write_none() {
         let mut unit = Unit {
             particle: None,
+            suru: None,
+            copula: None,
             compound: true,
             okurigana_variant: false,
             parts: Vec::new(),

@@ -236,9 +236,11 @@ fn push_typing(
 /// (かいた), which a typist types for a word written whole (各 for かく). A
 /// numeric unit with its number in kanji, typed with the number as digits,
 /// also with the number in kana (にほん for 二本). A word written whole before
-/// a particle, also with the particle's first kana as okurigana (き*に for 気
-/// before に). Without them the model sees such a form only as a wrong
-/// candidate of another word typed so, and learns to put it last.
+/// a particle, する or the copula, also with the first kana of that as
+/// okurigana (き*に for 気 before に, かんけい*し for 関係 before した,
+/// せんさい*な for 繊細 before な). Without them the model sees such a form
+/// only as a wrong candidate of another word typed so, and learns to put it
+/// last.
 fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
     if let Some(numeric) = &unit.numeric {
         if !numeric.surface.contains("{kanji}") || numeric.kana.is_empty() {
@@ -254,6 +256,8 @@ fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
         return unit
             .particle
             .as_ref()
+            .or(unit.suru.as_ref())
+            .or(unit.copula.as_ref())
             .and_then(|p| particle_line(&unit.reading, &unit.surface, p))
             .and_then(|(reading, expected)| {
                 let (before, first) = reading.rsplit_once('*')?;
@@ -498,6 +502,8 @@ mod tests {
     fn unit(position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
             particle: None,
+            suru: None,
+            copula: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
@@ -604,6 +610,26 @@ mod tests {
             other_typings(&form, &query_of(&form)),
             [typing("かいた", Some("いた"), "書いた")],
             "a conjugating word's okurigana are its own"
+        );
+    }
+
+    #[test]
+    fn a_word_before_suru_or_the_copula_is_also_typed_with_its_first_kana_as_okurigana() {
+        let verb = Unit {
+            suru: Some("し".into()),
+            ..unit(0, "かんけい", "関係")
+        };
+        assert_eq!(
+            other_typings(&verb, &query_of(&verb)),
+            [typing("かんけいし", Some("し"), "関係し")]
+        );
+        let adjective = Unit {
+            copula: Some("な".into()),
+            ..unit(0, "せんさい", "繊細")
+        };
+        assert_eq!(
+            other_typings(&adjective, &query_of(&adjective)),
+            [typing("せんさいな", Some("な"), "繊細な")]
         );
     }
 

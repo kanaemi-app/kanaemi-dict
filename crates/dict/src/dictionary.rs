@@ -47,11 +47,12 @@ pub struct Report {
 pub struct Dictionary {
     pub entries: Vec<Entry>,
     /// Lines for typing with okurigana, such as 書く under `か*く`, whose
-    /// reading marks the okurigana with its last `*`, the particle lines
-    /// among them.
+    /// reading marks the okurigana with its last `*`, the particle and
+    /// copula lines among them.
     pub okuri: Vec<Entry>,
-    /// Lines of words typed with the particle after them as okurigana, such
-    /// as 気に under `き*に`, which [`Dictionary::okuri`] holds too.
+    /// Lines of words typed with the particle or the copula after them as
+    /// okurigana, such as 気に under `き*に` and 繊細な under `せんさい*な`,
+    /// which [`Dictionary::okuri`] holds too.
     pub particles: Vec<Entry>,
     /// Numeric items, whose reading and surface hold the number as a
     /// placeholder (`{}ほん` for `{}本`).
@@ -109,6 +110,12 @@ pub(crate) const PARTICLE_EXTRA: u32 = 400;
 /// A rarer one is typed as the word and the particle apart, and the lines
 /// of every pair met twice would make the base dictionary half as big again.
 const PARTICLE_MIN_COUNT: usize = 10;
+/// An adjectival word with the copula after it needs this many occurrences
+/// to enter, as a stem does: the copula is all of its okurigana, so typing
+/// the word and the copula apart, as a rarer particle is, would be no help.
+const COPULA_MIN_COUNT: usize = MIN_COUNT;
+/// The conjugation type of a noun with する after it, whose stem the noun is.
+const SURU: &str = "サ行変格";
 
 /// A surface of words written whole with at least this share (numerator,
 /// denominator) of its places, in any reading, inside compound units is a
@@ -262,6 +269,7 @@ impl Dictionary {
         let mut numeric_counts: HashMap<(String, String), usize> = HashMap::new();
         let mut numeric_written: HashMap<String, usize> = HashMap::new();
         let mut particle_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut copula_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
         let mut surfaces: HashMap<String, usize> = HashMap::new();
         let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
         let mut disallowed: BTreeMap<(String, String), (usize, String)> = BTreeMap::new();
@@ -307,6 +315,24 @@ impl Dictionary {
                     .and_then(|p| particle_line(&unit.reading, &unit.surface, p))
                 {
                     *particle_counts.entry(line).or_default() += 1;
+                }
+                if let Some(line) = unit
+                    .copula
+                    .as_ref()
+                    .and_then(|c| particle_line(&unit.reading, &unit.surface, c))
+                {
+                    *copula_counts.entry(line).or_default() += 1;
+                }
+                // Kanaemi conjugates する after the stem, typed with its
+                // okurigana marked (かんけい*す) or whole (かんけいする).
+                if unit.suru.is_some() && unit.surface.chars().last().is_some_and(is_kanji) {
+                    *counts
+                        .entry((
+                            unit.reading.clone(),
+                            unit.surface.clone(),
+                            Some(SURU.to_owned()),
+                        ))
+                        .or_default() += 1;
                 }
                 continue;
             };
@@ -416,7 +442,10 @@ impl Dictionary {
             })
             .collect();
 
-        let particles = particle_lines(particle_counts, total);
+        let particles = with_particles(
+            pair_lines(particle_counts, PARTICLE_MIN_COUNT, total),
+            &pair_lines(copula_counts, COPULA_MIN_COUNT, total),
+        );
         Self {
             okuri: with_particles(
                 okuri_lines(&entries, rare_cost, typed_marked(&whole_forms)),
@@ -796,8 +825,9 @@ pub(crate) fn okuri_lines(
 }
 
 /// The line of a word written whole, `reading` and `surface`, typed with the
-/// first kana of the `particle` after it as okurigana: `(き*に, 気に)` for 気
-/// before に. A word ending in kana has none; its okurigana are its own.
+/// first kana of the `particle` or the copula after it as okurigana:
+/// `(き*に, 気に)` for 気 before に, `(せんさい*な, 繊細な)` for 繊細 before
+/// な. A word ending in kana has none; its okurigana are its own.
 pub(crate) fn particle_line(
     reading: &str,
     surface: &str,
@@ -808,12 +838,16 @@ pub(crate) fn particle_line(
     Some((format!("{reading}*{first}"), format!("{surface}{first}")))
 }
 
-/// The particle lines met at least [`PARTICLE_MIN_COUNT`] times, costing
+/// The particle or copula lines met at least `min_count` times, costing
 /// [`PARTICLE_EXTRA`] more than their count says.
-fn particle_lines(counts: BTreeMap<(String, String), usize>, total: usize) -> Vec<Entry> {
+fn pair_lines(
+    counts: BTreeMap<(String, String), usize>,
+    min_count: usize,
+    total: usize,
+) -> Vec<Entry> {
     counts
         .into_iter()
-        .filter(|&(_, count)| count >= PARTICLE_MIN_COUNT)
+        .filter(|&(_, count)| count >= min_count)
         .map(|((reading, surface), count)| Entry {
             reading,
             surface,
@@ -991,6 +1025,8 @@ mod tests {
     fn word(reading: &str, surface: &str) -> Unit {
         Unit {
             particle: None,
+            suru: None,
+            copula: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
@@ -1914,6 +1950,79 @@ mod tests {
         );
         assert_eq!(
             find(&dict.okuri, "みなさん*に", "皆さんに"),
+            None,
+            "ends in kana"
+        );
+    }
+
+    #[test]
+    fn a_word_before_suru_gets_a_suru_stem_counted_by_its_pairs() {
+        let suru = |form: &str, unit: Unit| Unit {
+            suru: Some(form.into()),
+            ..unit
+        };
+        let units: Vec<Unit> = [
+            vec![
+                suru("し", word("かんけい", "関係")),
+                suru("する", word("かんけい", "関係")),
+            ],
+            repeat(word("かんけい", "関係"), 3),
+            vec![suru("さ", word("とうろく", "登録"))],
+            repeat(suru("する", word("どきどき", "ドキドキ")), 2),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        let stem = |reading: &str, surface: &str| {
+            dict.entries
+                .iter()
+                .find(|e| {
+                    e.reading == reading
+                        && e.surface == surface
+                        && e.conjugation.as_deref() == Some("サ行変格")
+                })
+                .map(|e| e.cost)
+        };
+        assert_eq!(stem("かんけい", "関係"), Some(cost(2, 8)));
+        assert_eq!(
+            dict.entries
+                .iter()
+                .find(|e| e.surface == "関係" && e.conjugation.is_none())
+                .map(|e| e.cost),
+            Some(cost(5, 8)),
+            "the word keeps every count"
+        );
+        assert_eq!(stem("とうろく", "登録"), None, "met too few times");
+        assert_eq!(stem("どきどき", "ドキドキ"), None, "ends in kana");
+    }
+
+    #[test]
+    fn an_adjectival_word_before_the_copula_gets_a_line_with_the_copula_as_okurigana() {
+        let copula = |form: &str, unit: Unit| Unit {
+            copula: Some(form.into()),
+            ..unit
+        };
+        let units: Vec<Unit> = [
+            repeat(copula("な", word("せんさい", "繊細")), MIN_COUNT),
+            vec![copula("だっ", word("せんさい", "繊細"))],
+            repeat(copula("な", word("しずか", "静か")), MIN_COUNT),
+        ]
+        .concat();
+
+        let dict = Dictionary::build(&units, &[]);
+
+        assert_eq!(
+            find(&dict.okuri, "せんさい*な", "繊細な").map(|e| e.cost),
+            Some(cost(2, 5) + PARTICLE_EXTRA)
+        );
+        assert_eq!(
+            find(&dict.okuri, "せんさい*だ", "繊細だ"),
+            None,
+            "met too few times"
+        );
+        assert_eq!(
+            find(&dict.okuri, "しずか*な", "静かな"),
             None,
             "ends in kana"
         );
