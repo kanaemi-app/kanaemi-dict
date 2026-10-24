@@ -1,4 +1,4 @@
-# sha256 d96711cd222d366d2fae132a06ccbd4c7cf9819c402fd1bd0cf2d2ae20c84a7c
+# sha256 e22d1185b5502339c2b1f2be33ce9746fa44eceaefbdcd08a0208b7ae3cca83b
 aozora-text
 egov-all-xml
 fineweb2-jpn
