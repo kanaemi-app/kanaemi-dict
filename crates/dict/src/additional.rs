@@ -536,6 +536,7 @@ mod tests {
         parts
             .iter()
             .map(|&(position, reading, surface)| Unit {
+                particle: None,
                 compound: false,
                 okurigana_variant: false,
                 parts: Vec::new(),
@@ -800,6 +801,7 @@ mod build_tests {
 
     fn word(reading: &str, surface: &str) -> Unit {
         Unit {
+            particle: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),

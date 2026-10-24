@@ -13,7 +13,7 @@ use kanaemi_engine::{
 };
 
 use crate::kana::is_hiragana;
-use crate::{Established, Query, Spans, Unit, as_typed, query_of, span_of};
+use crate::{Established, Query, Spans, Unit, as_typed, particle_line, query_of, span_of};
 
 /// The widest hash a model file allows.
 pub const MAX_BITS: u8 = 28;
@@ -112,7 +112,7 @@ impl Examples {
 /// The examples of a document read as one input field: each unit is typed as
 /// the evaluation types it, with the document's earlier units as the field's
 /// commits and the text before it as the field's committed text, and once
-/// more into an empty field. A conjugating unit is also typed in the
+/// more into an empty field. A unit is also typed in the
 /// [other ways](other_typings) it may be. Typings with a single candidate or
 /// without the unit's surface among the candidates teach nothing and are left
 /// out.
@@ -208,9 +208,10 @@ fn push_typing(
 /// (か*いた for 書いた) when that is more than the first kana; not whole
 /// (かいた), which a typist types for a word written whole (各 for かく). A
 /// numeric unit with its number in kanji, typed with the number as digits,
-/// also with the number in kana (にほん for 二本). Without them the model sees
-/// such a form only as a wrong candidate of another word typed whole, and
-/// learns to put it last.
+/// also with the number in kana (にほん for 二本). A word written whole before
+/// a particle, also with the particle's first kana as okurigana (き*に for 気
+/// before に). Without them the model sees such a form only as a wrong
+/// candidate of another word typed so, and learns to put it last.
 fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
     if let Some(numeric) = &unit.numeric {
         if !numeric.surface.contains("{kanji}") || numeric.kana.is_empty() {
@@ -223,7 +224,20 @@ fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
         }];
     }
     if query.okurigana.is_none() {
-        return Vec::new();
+        return unit
+            .particle
+            .as_ref()
+            .and_then(|p| particle_line(&unit.reading, &unit.surface, p))
+            .and_then(|(reading, expected)| {
+                let (before, first) = reading.rsplit_once('*')?;
+                Some(Query {
+                    reading: format!("{before}{first}"),
+                    okurigana: Some(first.to_owned()),
+                    expected,
+                })
+            })
+            .into_iter()
+            .collect();
     }
     let okurigana: String = {
         let mut kana: Vec<char> = unit
@@ -456,6 +470,7 @@ mod tests {
 
     fn unit(position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
+            particle: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
@@ -542,6 +557,27 @@ mod tests {
         );
         let word = unit(0, "てがみ", "手紙");
         assert_eq!(other_typings(&word, &query_of(&word)), []);
+    }
+
+    #[test]
+    fn a_word_before_a_particle_is_also_typed_with_the_particle_as_okurigana() {
+        let word = Unit {
+            particle: Some("には".into()),
+            ..unit(0, "き", "気")
+        };
+        assert_eq!(
+            other_typings(&word, &query_of(&word)),
+            [typing("きに", Some("に"), "気に")]
+        );
+        let form = Unit {
+            particle: Some("が".into()),
+            ..conjugated(0, "かいた", "書いた", ("か", "書"))
+        };
+        assert_eq!(
+            other_typings(&form, &query_of(&form)),
+            [typing("かいた", Some("いた"), "書いた")],
+            "a conjugating word's okurigana are its own"
+        );
     }
 
     #[test]

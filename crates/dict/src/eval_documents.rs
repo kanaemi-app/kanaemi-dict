@@ -461,6 +461,7 @@ mod tests {
     // aozora:000013 dev, and aozora:000004 and aozora:000015 eval.
     fn unit(doc_id: &str, position: usize, reading: &str, surface: &str) -> Unit {
         Unit {
+            particle: None,
             compound: false,
             okurigana_variant: false,
             parts: Vec::new(),
@@ -1014,6 +1015,7 @@ mod model_tests {
             doc_id: "aozora:1".into(),
             source_id: "aozora-text".into(),
             units: vec![Unit {
+                particle: None,
                 compound: false,
                 okurigana_variant: false,
                 parts: Vec::new(),

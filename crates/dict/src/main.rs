@@ -687,9 +687,10 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         write_sources(outputs.dictionary, text.as_bytes(), None, &sources)?;
     }
     println!(
-        "entries: {}, okurigana lines: {}, numeric lines: {}, unknown types: {}, disallowed okurigana: {}, out: {}, report: {}",
+        "entries: {}, okurigana lines: {} (particle lines: {}), numeric lines: {}, unknown types: {}, disallowed okurigana: {}, out: {}, report: {}",
         dictionary.entries.len(),
         dictionary.okuri.len(),
+        dictionary.particles.len(),
         dictionary.numeric.len(),
         dictionary.report.unknown_conjugations.len(),
         dictionary.report.disallowed_okurigana.len(),
