@@ -16,7 +16,7 @@ use kanaemi_dict::{
     ExampleFile, Examples, KanjiError, Readings, ReadingsError, RejectedLines, Split,
     TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
     WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement, as_typed, check_words,
-    clans, common_words, compound_parts, correction_uses, correction_uses_tsv, counted_reading,
+    clans, common_words, compound_parts, conjugating_words, correction_uses, correction_uses_tsv, counted_reading,
     counted_voicings, counted_words, counter_words, cut_documents, dictionary_lines, document_ids,
     document_sources, document_texts, each_document_with_units, engine_with, eval_documents,
     evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
@@ -567,12 +567,25 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
     let unidic = unidic_words()?;
     // A correction says how its surface reads; the lexicon reading it away
     // would bring back the misreading it corrects (一回 as いちかい).
-    let lexicon: Vec<UnidicWord> = {
+    let (lexicon, conjugating) = {
         let corrections = corrections()?;
-        lexicon_words(common_words)?
+        let lexicon: Vec<UnidicWord> = lexicon_words(common_words)?
             .into_iter()
             .filter(|w| !corrections.contradicts(&w.reading, &w.surface))
-            .collect()
+            .collect();
+        let mut conjugating = Vec::new();
+        for path in [LEXICON].into_iter().chain(FULL_LEXICONS) {
+            conjugating.extend(
+                conjugating_words(open(path)?)
+                    .map_err(|source| Error::Unidic {
+                        path: path.into(),
+                        source,
+                    })?
+                    .into_iter()
+                    .filter(|w| !corrections.contradicts(&w.reading, &w.surface)),
+            );
+        }
+        (lexicon, conjugating)
     };
     let names = read_names(open(BASE_NAMES)?).map_err(read_error(BASE_NAMES))?;
     let titles = read_titles(open(BASE_TITLES)?).map_err(|source| Error::Titles {
@@ -608,6 +621,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 .inspect(|_| total += 1),
             &unidic,
             &lexicon,
+            &conjugating,
             &added_readings()?,
         );
         if let Some(e) = failure {
