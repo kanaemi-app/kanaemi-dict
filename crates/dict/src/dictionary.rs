@@ -122,7 +122,7 @@ const PARTICLE_MIN_COUNT: usize = 10;
 /// the word and the copula apart, as a rarer particle is, would be no help.
 const COPULA_MIN_COUNT: usize = MIN_COUNT;
 /// The conjugation type of a noun with する after it, whose stem the noun is.
-const SURU: &str = "サ行変格";
+pub(crate) const SURU: &str = "サ行変格";
 
 /// A surface of words written whole with at least this share (numerator,
 /// denominator) of its places, in any reading, inside compound units is a

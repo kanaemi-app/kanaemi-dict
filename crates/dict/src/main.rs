@@ -28,9 +28,9 @@ use kanaemi_dict::{
     read_chain_words, read_names, read_title_entries, read_titles, read_titles_of, read_units,
     reading_form, sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take,
     text_units, title_entries, train, turn_of, turned, typed_by_analyzer, typed_units,
-    unihan_readings, unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people,
-    wikidata_readings, wikidata_stations, with_people_read_by_leads, word_misses_tsv,
-    word_scores_tsv, write_atomically, year_dictionary,
+    unihan_readings, unmet_checks_tsv, unnamed_entries, unnamed_tsv, unnamed_words,
+    wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
+    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{Engine, RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -247,17 +247,22 @@ struct Outputs {
     /// The cost of a word met once in the units the dictionary counts, which
     /// the dictionaries made from lists built against it start at.
     seen_once: &'static str,
+    /// The chains of units no name holds, with what decides whether they
+    /// enter, for people to judge.
+    chains: &'static str,
 }
 
 const BASE: Outputs = Outputs {
     dictionary: "build/dictionaries/base.tsv",
     report: "build/dictionaries/base-report.tsv",
     seen_once: "build/dictionaries/base-seen-once.txt",
+    chains: "build/dictionaries/base-chains.tsv",
 };
 const BASE_TRAIN: Outputs = Outputs {
     dictionary: "build/dictionaries/base-train.tsv",
     report: "build/dictionaries/base-train-report.tsv",
     seen_once: "build/dictionaries/base-train-seen-once.txt",
+    chains: "build/dictionaries/base-train-chains.tsv",
 };
 
 const USAGE: &str = "\
@@ -614,8 +619,8 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         source,
     })?;
     let established = established_words(|doc_id| !train_only || split_of(doc_id) == Split::Train)?;
-    let (dictionary, took_titles, took_unihan) = {
-        let mut chains = ChainCounter::new(&names);
+    let (dictionary, took_titles, took_unihan, unnamed) = {
+        let mut chains = ChainCounter::new(&names, &established);
         let mut reads = TitleReadings::new(&titles);
         let mut failure = None;
         let units = read_units(open(UNITS)?)
@@ -663,20 +668,35 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         );
         let mut took_titles = !titles.is_empty();
         dictionary.add_words(titles);
+        let chains = chains.finish();
         let chained = {
             let known: HashSet<&str> = dictionary
                 .entries
                 .iter()
                 .map(|e| e.surface.as_str())
                 .collect();
-            let chains = chains
-                .finish()
-                .titles(|s| known.contains(s), texts.iter().map(String::as_str));
+            let chains = chains.titles(|s| known.contains(s), texts.iter().map(String::as_str));
             title_entries(&chains, texts.iter().map(String::as_str), total)
         };
         println!("chains: {}", chained.len());
         took_titles |= !chained.is_empty();
         dictionary.add_words(chained);
+        let unnamed = {
+            let known: HashSet<&str> = dictionary
+                .entries
+                .iter()
+                .map(|e| e.surface.as_str())
+                .collect();
+            chains.unnamed(|s| known.contains(s), texts.iter().map(String::as_str))
+        };
+        let entries = unnamed_entries(&unnamed, texts.iter().map(String::as_str), total);
+        println!(
+            "chains no name holds: {} taken of {}, lines {}",
+            unnamed.iter().filter(|c| c.taken).count(),
+            unnamed.len(),
+            entries.len()
+        );
+        dictionary.add_words(entries);
         let counted = {
             let counters =
                 UnidicReadings::new(counter_words(open(LEXICON)?).map_err(|source| {
@@ -733,7 +753,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         dictionary.drop_words(|reading, surface| {
             corrections.drops(surface) || !is_word(reading, surface)
         });
-        (dictionary, took_titles, took_unihan)
+        (dictionary, took_titles, took_unihan, unnamed)
     };
     let needless = needless_readings(&dictionary.added_readings, &corrections()?);
     println!(
@@ -768,6 +788,10 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
     write_atomically(outputs.dictionary, |w| {
         w.write_all(text.as_bytes())
             .map_err(write_error(outputs.dictionary))
+    })?;
+    write_atomically(outputs.chains, |w| {
+        w.write_all(unnamed_tsv(&unnamed).as_bytes())
+            .map_err(write_error(outputs.chains))
     })?;
     write_atomically(outputs.report, |w| {
         w.write_all(dictionary.report.to_tsv().as_bytes())
