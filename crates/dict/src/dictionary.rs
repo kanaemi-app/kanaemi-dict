@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use kanaemi_engine::{InvalidLine, ItemLine, TextDictionary, mark_placeholders, may_follow_stem};
 
 use crate::kana::{HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji, unvoiced};
-use crate::{UnidicWord, Unit};
+use crate::{AddedReading, AddedReadingUse, UnidicWord, Unit};
 
 /// The label of the base dictionary in its description line.
 pub const BASE_LABEL: &str = "基本";
@@ -76,6 +76,8 @@ pub struct Dictionary {
     /// too few to enter, behind every word met at least [`MIN_COUNT`] times.
     /// The entry keeps the cost of both, which its okurigana line takes.
     pub whole_forms: HashMap<(String, String), u32>,
+    /// Each added reading with what it did, in the order given.
+    pub added_readings: Vec<(AddedReading, AddedReadingUse)>,
     pub report: Report,
 }
 
@@ -261,6 +263,18 @@ impl Dictionary {
         unidic: &[UnidicWord],
         lexicon: &[UnidicWord],
     ) -> Self {
+        Self::build_with_readings(units, unidic, lexicon, &[])
+    }
+
+    /// [`Dictionary::build_with_lexicon`] with the readings people added,
+    /// which enter as the lexicon's words do, beside the analyzer's reading
+    /// and whatever reading a correction gives the surface.
+    pub fn build_with_readings<U: Borrow<Unit>>(
+        units: impl IntoIterator<Item = U>,
+        unidic: &[UnidicWord],
+        lexicon: &[UnidicWord],
+        added: &[AddedReading],
+    ) -> Self {
         let mut total = 0usize;
         // A whole form and a plain word with the same reading and surface are
         // one item, so they share one count.
@@ -427,6 +441,23 @@ impl Dictionary {
             let kept = costs.entry(key).or_insert(u32::MAX);
             *kept = (*kept).min(cost_of(n, total) + UNIDIC_EXTRA);
         }
+        let added_readings = added
+            .iter()
+            .map(|word| {
+                let Some(&n) = outside
+                    .get(word.surface.as_str())
+                    .filter(|&&n| n >= MIN_COUNT)
+                else {
+                    return (word.clone(), AddedReadingUse::Rare);
+                };
+                let key = (word.reading.clone(), word.surface.clone(), None);
+                if costs.contains_key(&key) {
+                    return (word.clone(), AddedReadingUse::Given);
+                }
+                costs.insert(key, cost_of(n, total) + UNIDIC_EXTRA);
+                (word.clone(), AddedReadingUse::Added)
+            })
+            .collect();
         drop(surfaces);
         drop(outside);
         let entries: Vec<Entry> = costs
@@ -462,6 +493,7 @@ impl Dictionary {
             rare_cost,
             seen_once_cost,
             whole_forms,
+            added_readings,
             report: Report {
                 unknown_conjugations: unknown.into_iter().collect(),
                 disallowed_okurigana: disallowed
@@ -521,6 +553,16 @@ impl Dictionary {
                     .get_mut(&(word.reading.clone(), word.surface.clone()))
             {
                 *whole = (*whole).min(word.cost);
+            }
+            if word.conjugation.is_none() {
+                for (added, used) in &mut self.added_readings {
+                    if *used == AddedReadingUse::Added
+                        && added.reading == word.reading
+                        && added.surface == word.surface
+                    {
+                        *used = AddedReadingUse::Given;
+                    }
+                }
             }
             let key = (
                 word.reading.clone(),
@@ -1700,6 +1742,100 @@ mod tests {
         );
         assert!(find(&dict.entries, "おおそうじ", "大掃除").is_none());
         assert!(find(&dict.entries, "しょかん", "手紙").is_none());
+    }
+
+    fn added(reading: &str, surface: &str) -> AddedReading {
+        AddedReading {
+            reading: reading.into(),
+            surface: surface.into(),
+        }
+    }
+
+    #[test]
+    fn added_readings_enter_as_lexicon_words_beside_the_analyzer_s_reading() {
+        let units: Vec<Unit> = [
+            repeat(word("くうぎょう", "空行"), 3),
+            repeat(word("みはらい", "未払い"), 2),
+            repeat(word("てがみ", "手紙"), 1),
+        ]
+        .concat();
+
+        let dict = Dictionary::build_with_readings(
+            &units,
+            &[],
+            &[],
+            &[added("からぎょう", "空行"), added("みばらい", "未払い")],
+        );
+
+        assert_eq!(
+            find(&dict.entries, "からぎょう", "空行").unwrap().cost,
+            cost(3, 6) + 1000
+        );
+        assert_eq!(
+            find(&dict.entries, "くうぎょう", "空行").unwrap().cost,
+            cost(3, 6)
+        );
+        assert_eq!(
+            find(&dict.okuri, "みばら*い", "未払い").unwrap().cost,
+            cost(2, 6) + 1000 + cost(2, 6),
+            "behind the forms typed marked, as the line of any word typed whole"
+        );
+        assert_eq!(
+            dict.added_readings,
+            [
+                (added("からぎょう", "空行"), AddedReadingUse::Added),
+                (added("みばらい", "未払い"), AddedReadingUse::Added),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_added_reading_of_a_surface_too_rare_outside_compounds_stays_out() {
+        let units: Vec<Unit> = [
+            repeat(word("てがみ", "手紙"), 2),
+            vec![word("のうじゅう", "脳汁")],
+        ]
+        .concat();
+
+        let dict = Dictionary::build_with_readings(&units, &[], &[], &[added("のうじる", "脳汁")]);
+
+        assert!(find(&dict.entries, "のうじる", "脳汁").is_none());
+        assert_eq!(
+            dict.added_readings,
+            [(added("のうじる", "脳汁"), AddedReadingUse::Rare)]
+        );
+    }
+
+    #[test]
+    fn an_added_reading_the_dictionary_has_without_it_is_given() {
+        let units: Vec<Unit> = [
+            repeat(word("だいもんじ", "大文字"), 2),
+            repeat(word("かくまる", "角丸"), 2),
+            repeat(word("ちょうかい", "朝会"), 2),
+        ]
+        .concat();
+
+        let mut dict = Dictionary::build_with_readings(
+            &units,
+            &[],
+            &[unidic("おおもじ", "大文字")],
+            &[
+                added("おおもじ", "大文字"),
+                added("かくまる", "角丸"),
+                added("あさかい", "朝会"),
+            ],
+        );
+        dict.add_words([entry("あさかい", "朝会", None, 900)]);
+
+        assert_eq!(
+            dict.added_readings,
+            [
+                (added("おおもじ", "大文字"), AddedReadingUse::Given),
+                (added("かくまる", "角丸"), AddedReadingUse::Given),
+                (added("あさかい", "朝会"), AddedReadingUse::Given),
+            ]
+        );
+        assert_eq!(find(&dict.entries, "あさかい", "朝会").unwrap().cost, 900);
     }
 
     #[test]

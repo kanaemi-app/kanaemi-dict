@@ -10,26 +10,26 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kanaemi_dict::{
-    Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Class, Corrections,
-    CorrectionsError, CutError, Dictionary, DistError, DocumentsError, Established, EvalDocument,
-    EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError,
-    RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
-    Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement,
-    as_typed, check_words, clans, common_words, compound_parts, correction_uses,
-    correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
-    cut_documents, dictionary_lines, document_ids, document_sources, document_texts,
-    each_document_with_units, engine_with, eval_documents, evaluate_documents,
-    examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
-    kanji_entries, keys_diff_tsv, listed_dictionary, loss_reasons_tsv, mismatches_tsv,
-    miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols,
-    name_readings, nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections,
-    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
-    read_names, read_title_entries, read_titles, read_titles_of, read_units, reading_form,
-    sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take, text_units,
-    title_entries, train, turn_of, turned, typed_by_analyzer, typed_units, unihan_readings,
-    unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings,
-    wikidata_stations, with_people_read_by_leads, word_misses_tsv, word_scores_tsv,
-    write_atomically, year_dictionary,
+    AddedReading, AddedReadingUse, AddedReadingsError, Agreement, Analyzer, AnalyzerError,
+    BASE_LABEL, Base, ChainCounter, Class, Corrections, CorrectionsError, CutError, Dictionary,
+    DistError, DocumentsError, Established, EvalDocument, EvalDocumentsError, Evaluation,
+    ExampleFile, Examples, KanjiError, Readings, ReadingsError, RejectedLines, Split,
+    TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
+    WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement, as_typed, check_words,
+    clans, common_words, compound_parts, correction_uses, correction_uses_tsv, counted_reading,
+    counted_voicings, counted_words, counter_words, cut_documents, dictionary_lines, document_ids,
+    document_sources, document_texts, each_document_with_units, engine_with, eval_documents,
+    evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
+    fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv, listed_dictionary,
+    loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons,
+    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
+    parse_added_readings, parse_check_cases, parse_corrections, parse_word_cases, paths_of,
+    person_dictionary, place_dictionary, place_names, plain_words, read_names, read_title_entries,
+    read_titles, read_titles_of, read_units, reading_form, sample_tsv, shared_readings,
+    sources_file, split_of, station_dictionary, take, text_units, title_entries, train, turn_of,
+    turned, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv, unnamed_words,
+    wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
+    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{Engine, RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -45,6 +45,8 @@ const FULL_LEXICONS: [&str; 2] = [
 ];
 /// The words the analyzer reads wrong, applied to what it reads.
 const CORRECTIONS: &str = "analyzer/corrections.tsv";
+/// The readings people confirmed for surfaces beside the analyzer's.
+const ADDED_READINGS: &str = "analyzer/added-readings.tsv";
 const DOCS: &str = "build/docs.jsonl";
 /// The titles of the Wikipedia articles, which `scripts/base-titles.ts` writes.
 const BASE_TITLES: &str = "build/base-titles.tsv";
@@ -248,9 +250,10 @@ usage: kanaemi-dict units
        kanaemi-dict dictionary [--train-only]
          build build/dictionaries/base.tsv from build/units.jsonl, the
          UniDic lexicon build/sudachi/small_lex.csv and the readings
-         build/sudachi/{core,notcore}_lex.csv give the surfaces of the
-         units, with the words of one
-         to ten with each counter read by the analyzer, reporting to
+         build/sudachi/{core,notcore}_lex.csv and analyzer/added-readings.tsv
+         give the surfaces of the units, with the words of one
+         to ten with each counter read by the analyzer, failing on an added
+         reading the base needs not unless --train-only, reporting to
          build/dictionaries/base-report.tsv, and the cost of a word met
          once to build/dictionaries/base-seen-once.txt; with --train-only,
          from the units of the train documents alone into
@@ -342,6 +345,20 @@ enum Error {
     Corrections {
         path: PathBuf,
         source: CorrectionsError,
+    },
+    #[error("{}: {source}", path.display())]
+    AddedReadings {
+        path: PathBuf,
+        source: AddedReadingsError,
+    },
+    #[error(
+        "{} left as it was: added readings the base needs not: {}",
+        path.display(),
+        rows.iter().map(|(r, used)| format!("{} {} ({used})", r.surface, r.reading)).collect::<Vec<_>>().join(", ")
+    )]
+    NeedlessReadings {
+        path: PathBuf,
+        rows: Vec<(AddedReading, &'static str)>,
     },
     #[error("{}: {source}", path.display())]
     Kanji { path: PathBuf, source: KanjiError },
@@ -460,6 +477,35 @@ fn corrections() -> Result<Corrections, Error> {
         })
 }
 
+fn added_readings() -> Result<Vec<AddedReading>, Error> {
+    parse_added_readings(read_to_string(ADDED_READINGS)?).map_err(|source| Error::AddedReadings {
+        path: ADDED_READINGS.into(),
+        source,
+    })
+}
+
+/// The added readings the base would have without them, or cannot take,
+/// with why.
+fn needless_readings(
+    used: &[(AddedReading, AddedReadingUse)],
+    corrections: &Corrections,
+) -> Vec<(AddedReading, &'static str)> {
+    used.iter()
+        .filter_map(|(row, used)| {
+            let why = if corrections.drops(&row.surface) {
+                "dropped"
+            } else {
+                match used {
+                    AddedReadingUse::Added => return None,
+                    AddedReadingUse::Rare => "rare",
+                    AddedReadingUse::Given => "given",
+                }
+            };
+            Some((row.clone(), why))
+        })
+        .collect()
+}
+
 fn unidic_words() -> Result<Vec<UnidicWord>, Error> {
     plain_words(open(LEXICON)?).map_err(|source| Error::Unidic {
         path: LEXICON.into(),
@@ -550,7 +596,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             })
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
         let mut total = 0usize;
-        let mut dictionary = Dictionary::build_with_lexicon(
+        let mut dictionary = Dictionary::build_with_readings(
             units
                 .inspect(|unit| {
                     chains.observe(unit);
@@ -562,6 +608,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 .inspect(|_| total += 1),
             &unidic,
             &lexicon,
+            &added_readings()?,
         );
         if let Some(e) = failure {
             return Err(e);
@@ -653,6 +700,19 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         });
         (dictionary, took_titles, took_unihan)
     };
+    let needless = needless_readings(&dictionary.added_readings, &corrections()?);
+    println!(
+        "added readings: {}, needless: {}",
+        dictionary.added_readings.len(),
+        needless.len()
+    );
+    // The train documents alone may show a surface too rarely to enter.
+    if !train_only && !needless.is_empty() {
+        return Err(Error::NeedlessReadings {
+            path: outputs.dictionary.into(),
+            rows: needless,
+        });
+    }
     let text = dictionary
         .to_checked_text(BASE_LABEL)
         .map_err(|source| Error::Rejected {

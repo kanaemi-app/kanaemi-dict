@@ -57,7 +57,8 @@ units:
 
 # Build build/dictionaries/base.tsv from build/units.jsonl and the UniDic lexicon, writing the cost of a word met once
 # to build/dictionaries/base-seen-once.txt; `--train-only` builds build/dictionaries/base-train.tsv and
-# base-train-seen-once.txt from the train documents alone.
+# base-train-seen-once.txt from the train documents alone. It fails, unless `--train-only`, on a line of
+# analyzer/added-readings.tsv the base would have without it or does not take.
 dictionary *flags:
     cargo run --release -p kanaemi-dict -- dictionary {{flags}}
 
