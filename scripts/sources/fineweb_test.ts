@@ -52,6 +52,67 @@ Deno.test("with a budget, rows are taken in file order until their characters re
   ]);
 });
 
+Deno.test("past the budget, rows holding three of the workplace words are workplace documents", async () => {
+  const rows = [
+    { id: "r0", text: "弊社のチームのタスク" },
+    { id: "r1", text: "弊社と御社の案件" },
+    { id: "r2", text: "社内の会議" },
+    { id: "r3", text: "エンジニアのミーティング\nチームで" },
+  ];
+  const path = await parquetFile(rows, 1);
+
+  assertEquals(
+    (await fineweb2("fineweb2-jpn-train", path, 5, Infinity)).map((d) => [d.doc_id, d.source_id]),
+    [
+      ["fineweb2:r0", "fineweb2-jpn-train"],
+      ["fineweb2-business:r1", "fineweb2-jpn-train"],
+      ["fineweb2-business:r3", "fineweb2-jpn-train"],
+    ],
+  );
+});
+
+Deno.test("a workplace word met again counts once", async () => {
+  const rows = [
+    { id: "r0", text: "一" },
+    { id: "r1", text: "弊社、弊社、弊社の御社" },
+  ];
+  const path = await parquetFile(rows, 1);
+
+  assertEquals((await fineweb2("fineweb2-jpn-train", path, 1, Infinity)).map((d) => d.doc_id), [
+    "fineweb2:r0",
+  ]);
+});
+
+Deno.test("a workplace row holding two of the job advertisement words is left out", async () => {
+  const rows = [
+    { id: "r0", text: "一" },
+    { id: "r1", text: "弊社のチームのタスク。求人に応募" },
+    { id: "r2", text: "弊社のチームのタスク。採用情報" },
+  ];
+  const path = await parquetFile(rows, 1);
+
+  assertEquals((await fineweb2("fineweb2-jpn-train", path, 1, Infinity)).map((d) => d.doc_id), [
+    "fineweb2:r0",
+    "fineweb2-business:r2",
+  ]);
+});
+
+Deno.test("workplace documents are taken in file order until their characters reach their budget", async () => {
+  const rows = [
+    { id: "r0", text: "一" },
+    { id: "r1", text: "弊社御社案件" },
+    { id: "r2", text: "社内チームタスク" },
+    { id: "r3", text: "弊社チームタスク" },
+  ];
+  const path = await parquetFile(rows, 1);
+
+  assertEquals((await fineweb2("fineweb2-jpn-train", path, 1, 10)).map((d) => d.doc_id), [
+    "fineweb2:r0",
+    "fineweb2-business:r1",
+    "fineweb2-business:r2",
+  ]);
+});
+
 Deno.test("fetching takes the pinned test and train files as large downloads", async () => {
   const { ctx, fetched } = recordingFetch();
 
