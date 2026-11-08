@@ -11,25 +11,26 @@ use std::sync::Arc;
 
 use kanaemi_dict::{
     AddedReading, AddedReadingUse, AddedReadingsError, Agreement, Analyzer, AnalyzerError,
-    BASE_LABEL, Base, ChainCounter, Class, Corrections, CorrectionsError, CutError, Dictionary,
-    DistError, DocumentsError, Established, EvalDocument, EvalDocumentsError, Evaluation,
-    ExampleFile, Examples, KanjiError, Readings, ReadingsError, RejectedLines, Split,
+    BASE_LABEL, Base, ChainCounter, ChainWords, Class, Corrections, CorrectionsError, CutError,
+    Dictionary, DistError, DocumentsError, Established, EvalDocument, EvalDocumentsError,
+    Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError, RejectedLines, Split,
     TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
     WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement, as_typed, check_words,
-    clans, common_words, compound_parts, conjugating_words, correction_uses, correction_uses_tsv, counted_reading,
-    counted_voicings, counted_words, counter_words, cut_documents, dictionary_lines, document_ids,
-    document_sources, document_texts, each_document_with_units, engine_with, eval_documents,
-    evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
-    fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv, listed_dictionary,
-    loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons,
-    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
-    parse_added_readings, parse_check_cases, parse_corrections, parse_word_cases, paths_of,
-    person_dictionary, place_dictionary, place_names, plain_words, read_names, read_title_entries,
-    read_titles, read_titles_of, read_units, reading_form, sample_tsv, shared_readings,
-    sources_file, split_of, station_dictionary, take, text_units, title_entries, train, turn_of,
-    turned, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv, unnamed_words,
-    wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
-    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    clans, common_words, compound_parts, conjugating_words, correction_uses, correction_uses_tsv,
+    counted_reading, counted_voicings, counted_words, counter_words, cut_documents,
+    dictionary_lines, document_ids, document_sources, document_texts, each_document_with_units,
+    engine_with, eval_documents, evaluate_documents, examples_of_document, excluded_readings,
+    field_dictionary, fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv,
+    listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji,
+    mozc_emoticons, mozc_readings, mozc_symbols, name_readings, nihon_readings,
+    okurigana_dictionary, parse_added_readings, parse_check_cases, parse_corrections,
+    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
+    read_chain_words, read_names, read_title_entries, read_titles, read_titles_of, read_units,
+    reading_form, sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take,
+    text_units, title_entries, train, turn_of, turned, typed_by_analyzer, typed_units,
+    unihan_readings, unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people,
+    wikidata_readings, wikidata_stations, with_people_read_by_leads, word_misses_tsv,
+    word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{Engine, RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -62,6 +63,20 @@ const KANJI_EXCLUDED: &str = "kanji/excluded.tsv";
 const KANJI_SOURCE: &str = "mozc-single-kanji";
 const UNIHAN_SOURCE: &str = "unicode-unihan";
 const UNITS: &str = "build/units.jsonl";
+/// Mozc's word list, which says which runs of units the evaluation also types
+/// as one word.
+const CHAIN_WORDS: [&str; 10] = [
+    "build/kanji/mozc_dictionary00.txt",
+    "build/kanji/mozc_dictionary01.txt",
+    "build/kanji/mozc_dictionary02.txt",
+    "build/kanji/mozc_dictionary03.txt",
+    "build/kanji/mozc_dictionary04.txt",
+    "build/kanji/mozc_dictionary05.txt",
+    "build/kanji/mozc_dictionary06.txt",
+    "build/kanji/mozc_dictionary07.txt",
+    "build/kanji/mozc_dictionary08.txt",
+    "build/kanji/mozc_dictionary09.txt",
+];
 /// Where an evaluation of the documents writes: its scores, the units not
 /// offered their surface, the keys whose first candidates lost to the best
 /// order, every key, the keys of the run before, and what changed since.
@@ -75,6 +90,8 @@ struct EvaluationOutputs {
     /// A sample of the units not offered their surface for people to judge,
     /// written once, without the model.
     missing_sample: Option<&'static str>,
+    /// The runs another IME converts whole that were not offered.
+    chains: &'static str,
 }
 
 const EVALUATION: EvaluationOutputs = EvaluationOutputs {
@@ -85,6 +102,7 @@ const EVALUATION: EvaluationOutputs = EvaluationOutputs {
     previous_keys: "build/evaluation-keys.previous.tsv",
     diff: "build/evaluation-diff.tsv",
     missing_sample: Some("build/evaluation-missing-sample.tsv"),
+    chains: "build/evaluation-chains.tsv",
 };
 /// Why [`EVALUATION`]'s units were not offered their surface, as Kanaemi
 /// explains each conversion.
@@ -100,6 +118,7 @@ const WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
     previous_keys: "build/evaluation-with-keys.previous.tsv",
     diff: "build/evaluation-with-diff.tsv",
     missing_sample: None,
+    chains: "build/evaluation-with-chains.tsv",
 };
 /// [`MISSING_REASONS`] and [`LOSS_REASONS`] of [`WITH_ADDITIONAL`].
 const WITH_ADDITIONAL_REASONS: (&str, &str) = (
@@ -168,6 +187,7 @@ const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
     previous_keys: "build/ranking-keys.previous.tsv",
     diff: "build/ranking-diff.tsv",
     missing_sample: None,
+    chains: "build/ranking-chains.tsv",
 };
 /// [`RANKING_EVALUATION`] with every additional dictionary after the base.
 const RANKING_WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
@@ -178,6 +198,7 @@ const RANKING_WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
     previous_keys: "build/ranking-with-keys.previous.tsv",
     diff: "build/ranking-with-diff.tsv",
     missing_sample: None,
+    chains: "build/ranking-with-chains.tsv",
 };
 /// Where the training examples wait, in a file of each run's own, while the
 /// model trains.
@@ -265,7 +286,7 @@ usage: kanaemi-dict units
          their surface and the loss against the best order without context
          to build/evaluation.tsv, with the units not offered, the readings
          that lost, every reading and what changed since the run before in
-         build/evaluation-{misses,losses,keys,diff}.tsv, and why units were
+         build/evaluation-{misses,losses,keys,diff,chains}.tsv, and why units were
          not offered and readings lost in
          build/evaluation-{missing,loss}-reasons.tsv
        kanaemi-dict evaluate --with NAME...
@@ -853,6 +874,7 @@ fn write_evaluation(out: &EvaluationOutputs, evaluation: &Evaluation) -> Result<
         (out.misses, all.misses_tsv()),
         (out.losses, all.losses_tsv()),
         (out.keys, keys.clone()),
+        (out.chains, evaluation.chains.misses_tsv()),
     ] {
         write_atomically(path, |w| {
             w.write_all(tsv.as_bytes()).map_err(write_error(path))
@@ -911,10 +933,18 @@ fn train_established() -> Result<Established, Error> {
 /// [`typed_by_analyzer`]).
 fn typed_eval_documents(established: &Established) -> Result<Vec<EvalDocument>, Error> {
     let mut docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
+    let words = {
+        let mut words = ChainWords::default();
+        for path in CHAIN_WORDS {
+            read_chain_words(open(path)?, &mut words).map_err(read_error(path))?;
+        }
+        words
+    };
     for doc in &mut docs {
         let typed = typed_by_analyzer(&doc.units, &doc.compounds, established);
         doc.parts = compound_parts(&doc.units, &typed, established);
         doc.units = typed;
+        doc.chains = words.spans(&doc.units);
     }
     Ok(docs)
 }
@@ -990,6 +1020,17 @@ fn print_scores(label: &str, evaluation: &Evaluation) {
     println!(
         "{label}compounds not offered, typed as their parts: {}",
         evaluation.split
+    );
+    let chains = evaluation.chains.total();
+    println!(
+        "{label}runs another IME converts whole: units {}, missing {} ({:.2}%), extra conversions {}, first {} of best {} (loss {})",
+        chains.units,
+        chains.missing,
+        percent(chains.missing as usize, chains.units as usize),
+        evaluation.chain_extra,
+        chains.first,
+        chains.best_first,
+        chains.loss(),
     );
 }
 

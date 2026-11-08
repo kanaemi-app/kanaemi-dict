@@ -6,6 +6,7 @@
 mod added_readings;
 mod additional;
 mod analyzer;
+mod chain_words;
 mod chains;
 mod checks;
 mod conjugation;
@@ -34,6 +35,7 @@ mod wikidata;
 pub use added_readings::*;
 pub use additional::*;
 pub use analyzer::*;
+pub use chain_words::*;
 pub use chains::*;
 pub use checks::*;
 pub use corrections::*;

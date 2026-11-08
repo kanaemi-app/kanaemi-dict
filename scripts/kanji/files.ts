@@ -1,8 +1,10 @@
 /**
- * The files the base dictionary takes its single kanji readings from: Mozc's
- * table of single kanji and Unicode's Unihan readings, both at pinned
- * versions. They are lists of readings, not documents, so their records live
- * in a raw store of their own.
+ * The files the base dictionary takes its single kanji readings from, Mozc's
+ * table of single kanji and Unicode's Unihan readings, and the word list of
+ * Mozc's dictionary, which tells the evaluation which runs of units another
+ * IME converts whole and never enters a dictionary; all at pinned versions.
+ * They are lists, not documents, so their records live in a raw store of
+ * their own.
  */
 import { basename, dirname, join } from "@std/path";
 import type { FetchOptions } from "../raw/fetch.ts";
@@ -34,6 +36,16 @@ export const KANJI_FILES: KanjiFile[] = [
     name: "Unihan_Readings.txt",
     zipped: true,
   },
+  ...Array.from({ length: 10 }, (_, i): KanjiFile => {
+    const n = String(i).padStart(2, "0");
+    return {
+      sourceId: `mozc-dictionary-${n}`,
+      url:
+        `https://raw.githubusercontent.com/google/mozc/23366530244c9c85a7c0c0e0e766e04fde8e0d4d/src/data/dictionary_oss/dictionary${n}.txt`,
+      name: `mozc_dictionary${n}.txt`,
+      zipped: false,
+    };
+  }),
 ];
 
 /** Fetches `url` into the raw store as a record of `sourceId`, unless it is stored already. */

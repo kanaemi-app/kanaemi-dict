@@ -42,7 +42,8 @@ docs:
 sudachi:
     deno run --allow-read --allow-write --allow-net scripts/sudachi.ts
 
-# Fetch Mozc's single kanji table and the Unihan readings into build/kanji/raw and write them into build/kanji/.
+# Fetch Mozc's single kanji table, the Unihan readings, and the word list of Mozc's dictionary the evaluation reads
+# into build/kanji/raw and write them into build/kanji/.
 kanji:
     deno run --allow-read --allow-write --allow-net scripts/kanji.ts
 
@@ -65,7 +66,8 @@ dictionary *flags:
 # Convert the eval documents' units with build/dictionaries/base-train.tsv, counting the units not offered and the loss
 # against the best order without context into build/evaluation.tsv, with the units not offered, the readings that
 # lost and every reading in build/evaluation-{misses,losses,keys}.tsv, and what changed since the run before in
-# build/evaluation-diff.tsv (see docs/spec/evaluation.md); `--with NAME...` adds the additional dictionaries
+# build/evaluation-diff.tsv, and the runs of units Mozc converts whole not offered in build/evaluation-chains.tsv
+# (see docs/spec/evaluation.md); `--with NAME...` adds the additional dictionaries
 # build/dictionaries/train/NAME.tsv after it (`just additional --train-only` first), writing build/evaluation-with*.tsv
 # instead.
 evaluate *flags:
