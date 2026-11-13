@@ -6,7 +6,7 @@ import type { Source } from "../sources.ts";
 
 const ID = "pydocs-ja";
 /** The HTML archive of the Japanese Python documentation. */
-const SOURCE_URL = "https://docs.python.org/ja/3/archives/python-3.14-docs-html.zip";
+const SOURCE_URL = "https://docs.python.org/ja/3.14/archives/python-3.14-docs-html.zip";
 
 export const source: Source = {
   name: "pydocs",

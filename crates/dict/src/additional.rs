@@ -11,7 +11,7 @@ use kanaemi_engine::{Engine, ItemLine, TextDictionary};
 use crate::dictionary::{MIN_COUNT, cost_of, okuri_lines};
 use crate::evaluation::{Query, engine, rank_of};
 use crate::kana::{is_hiragana, is_kanji, is_katakana};
-use crate::{Dictionary, Entry, Established, LineKind, RejectedLines, Unit, as_typed};
+use crate::{Dictionary, Entry, Established, LineKind, RejectedLines, Unit, as_counted};
 
 /// A Wikipedia article's title, without its qualifier, with the reading its
 /// text gives.
@@ -424,14 +424,14 @@ pub fn read_titles_of(
 
 /// A field's dictionary: the stems and words of the units of its documents,
 /// and the `titles` its documents' `texts` use, costing against the units.
-/// The units are counted as typed, as the base dictionary counts its own
-/// (see [`as_typed`]), with the joined words its documents establish.
+/// The units are counted as the base dictionary counts its own (see
+/// [`as_counted`]), with the joined words its documents establish.
 /// UniDic's words are left out; the base dictionary has them.
 pub fn field_dictionary(units: &[Unit], titles: &[Title], texts: &[String]) -> Dictionary {
     let established = Established::of(units);
     let units: Vec<Unit> = units
         .iter()
-        .flat_map(|u| as_typed(u, &established))
+        .flat_map(|u| as_counted(u, &established))
         .collect();
     let mut dictionary = Dictionary::build(&units, &[]);
     let added: Vec<Entry> = {

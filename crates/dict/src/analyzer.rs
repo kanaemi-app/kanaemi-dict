@@ -406,6 +406,19 @@ mod tests {
         assert_eq!(tokens[0].pos[4], "五段-カ行");
     }
 
+    #[test]
+    #[ignore = "needs SudachiDict full"]
+    fn a_number_and_a_common_noun_after_it_are_two_words_the_noun_counting_nothing() {
+        let tokens = analyzer().tokens("3種類と三段階").unwrap();
+
+        let nouns: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.pos[1] == "普通名詞")
+            .map(|t| (t.surface.as_str(), t.pos[2].as_str()))
+            .collect();
+        assert_eq!(nouns, [("種類", "一般"), ("段階", "一般")]);
+    }
+
     fn readings_of<'a>(tokens: &'a [Token], surface: &str) -> Vec<&'a str> {
         tokens
             .iter()

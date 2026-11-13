@@ -2,7 +2,7 @@
 //! kana (いっぴき, さんぼん), which numeric items cannot give: Kanaemi takes a
 //! number in a reading only as digits.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::dictionary::voicings;
 use crate::kana::{
@@ -81,6 +81,26 @@ pub fn counted_reading(tokens: &[Token], surface: &str) -> Option<CountedReading
     } else {
         None
     }
+}
+
+/// The items of `numeric` whose counters make words of one to ten (see
+/// [`counted_words`]): every item but those a common noun counts
+/// (`counted_by_nouns`, as (reading, surface)) with other numbers than kanji.
+/// A noun the documents write after kanji numerals (三種類) is typed so in
+/// kana too; most nouns are written only after digits (3資格), and words of
+/// them (二資格) would crowd the readings of the words people type.
+pub fn items_counting_small_numbers(
+    numeric: &[Entry],
+    counted_by_nouns: &HashSet<(String, String)>,
+) -> Vec<Entry> {
+    numeric
+        .iter()
+        .filter(|e| {
+            e.surface.starts_with("{kanji}")
+                || !counted_by_nouns.contains(&(e.reading.clone(), e.surface.clone()))
+        })
+        .cloned()
+        .collect()
 }
 
 /// The words of one to ten with each counter of `numeric`, read with `read`
@@ -771,6 +791,29 @@ mod tests {
 
         let view: Vec<_> = words.iter().map(|w| (w.surface.as_str(), w.cost)).collect();
         assert_eq!(view, [("一発", 700), ("二発", 1230)]);
+    }
+
+    #[test]
+    fn a_noun_counts_small_numbers_only_where_the_documents_write_it_after_kanji_numerals() {
+        let numeric = [
+            numeric("{}ひき", "{half-num}匹", 900),
+            numeric("{}しゅるい", "{half-num}種類", 900),
+            numeric("{}しゅるい", "{kanji}種類", 1100),
+            numeric("{}しかく", "{half-num}資格", 1200),
+        ];
+        let counted_by_nouns = HashSet::from(
+            [
+                ("{}しゅるい", "{half-num}種類"),
+                ("{}しゅるい", "{kanji}種類"),
+                ("{}しかく", "{half-num}資格"),
+            ]
+            .map(|(r, s)| (r.to_owned(), s.to_owned())),
+        );
+
+        let items = items_counting_small_numbers(&numeric, &counted_by_nouns);
+
+        let view: Vec<_> = items.iter().map(|e| e.surface.as_str()).collect();
+        assert_eq!(view, ["{half-num}匹", "{kanji}種類"]);
     }
 
     #[test]
