@@ -3,8 +3,10 @@
 //! It reads collected text with an analyzer and keeps the words that text
 //! actually uses, so the dictionaries never copy another dictionary's list.
 
+mod added_readings;
 mod additional;
 mod analyzer;
+mod chain_words;
 mod chains;
 mod checks;
 mod conjugation;
@@ -30,8 +32,10 @@ mod unidic;
 mod units;
 mod wikidata;
 
+pub use added_readings::*;
 pub use additional::*;
 pub use analyzer::*;
+pub use chain_words::*;
 pub use chains::*;
 pub use checks::*;
 pub use corrections::*;

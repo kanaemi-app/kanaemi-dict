@@ -1,2 +1,2 @@
-# sha256 5f9cff0adcfe8bcc54da9a55a621d7cc6f0bf7ace72f041daed3f10e22ea1578
+# sha256 0e3a8134951d4d2cf1b4e913bc99d1d3ecf4b1a94dac69c0f60eb9bf3491b72b
 japanpost-ken-all

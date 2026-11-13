@@ -10,26 +10,27 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kanaemi_dict::{
-    Agreement, Analyzer, AnalyzerError, BASE_LABEL, Base, ChainCounter, Class, Corrections,
-    CorrectionsError, CutError, Dictionary, DistError, DocumentsError, Established, EvalDocument,
-    EvalDocumentsError, Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError,
-    RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord,
-    Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement,
-    as_typed, check_words, clans, common_words, compound_parts, correction_uses,
-    correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
-    cut_documents, dictionary_lines, document_ids, document_sources, document_texts,
-    each_document_with_units, engine_with, eval_documents, evaluate_documents,
-    examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
-    kanji_entries, keys_diff_tsv, listed_dictionary, loss_reasons_tsv, mismatches_tsv,
-    miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols,
-    name_readings, nihon_readings, okurigana_dictionary, parse_check_cases, parse_corrections,
+    AddedReading, AddedReadingUse, AddedReadingsError, Agreement, Analyzer, AnalyzerError,
+    BASE_LABEL, Base, ChainCounter, ChainWords, Class, Corrections, CorrectionsError, CutError,
+    Dictionary, DistError, DocumentsError, Established, EvalDocument, EvalDocumentsError,
+    Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError, RejectedLines, Split,
+    TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
+    WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement, as_typed, check_words,
+    clans, common_words, compound_parts, conjugating_words, correction_uses, correction_uses_tsv,
+    counted_reading, counted_voicings, counted_words, counter_words, cut_documents,
+    dictionary_lines, document_ids, document_sources, document_texts, each_document_with_units,
+    engine_with, eval_documents, evaluate_documents, examples_of_document, excluded_readings,
+    field_dictionary, fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv,
+    listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji,
+    mozc_emoticons, mozc_readings, mozc_symbols, name_readings, nihon_readings,
+    okurigana_dictionary, parse_added_readings, parse_check_cases, parse_corrections,
     parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
-    read_names, read_title_entries, read_titles, read_titles_of, read_units, reading_form,
-    sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take, text_units,
-    title_entries, train, turn_of, turned, typed_by_analyzer, typed_units, unihan_readings,
-    unmet_checks_tsv, unnamed_words, wikidata_mismatches, wikidata_people, wikidata_readings,
-    wikidata_stations, with_people_read_by_leads, word_misses_tsv, word_scores_tsv,
-    write_atomically, year_dictionary,
+    read_chain_words, read_names, read_title_entries, read_titles, read_titles_of, read_units,
+    reading_form, sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take,
+    text_units, title_entries, train, turn_of, turned, typed_by_analyzer, typed_units,
+    unihan_readings, unmet_checks_tsv, unnamed_entries, unnamed_tsv, unnamed_words,
+    wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
+    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{Engine, RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -45,6 +46,8 @@ const FULL_LEXICONS: [&str; 2] = [
 ];
 /// The words the analyzer reads wrong, applied to what it reads.
 const CORRECTIONS: &str = "analyzer/corrections.tsv";
+/// The readings people confirmed for surfaces beside the analyzer's.
+const ADDED_READINGS: &str = "analyzer/added-readings.tsv";
 const DOCS: &str = "build/docs.jsonl";
 /// The titles of the Wikipedia articles, which `scripts/base-titles.ts` writes.
 const BASE_TITLES: &str = "build/base-titles.tsv";
@@ -60,6 +63,20 @@ const KANJI_EXCLUDED: &str = "kanji/excluded.tsv";
 const KANJI_SOURCE: &str = "mozc-single-kanji";
 const UNIHAN_SOURCE: &str = "unicode-unihan";
 const UNITS: &str = "build/units.jsonl";
+/// Mozc's word list, which says which runs of units the evaluation also types
+/// as one word.
+const CHAIN_WORDS: [&str; 10] = [
+    "build/kanji/mozc_dictionary00.txt",
+    "build/kanji/mozc_dictionary01.txt",
+    "build/kanji/mozc_dictionary02.txt",
+    "build/kanji/mozc_dictionary03.txt",
+    "build/kanji/mozc_dictionary04.txt",
+    "build/kanji/mozc_dictionary05.txt",
+    "build/kanji/mozc_dictionary06.txt",
+    "build/kanji/mozc_dictionary07.txt",
+    "build/kanji/mozc_dictionary08.txt",
+    "build/kanji/mozc_dictionary09.txt",
+];
 /// Where an evaluation of the documents writes: its scores, the units not
 /// offered their surface, the keys whose first candidates lost to the best
 /// order, every key, the keys of the run before, and what changed since.
@@ -73,6 +90,8 @@ struct EvaluationOutputs {
     /// A sample of the units not offered their surface for people to judge,
     /// written once, without the model.
     missing_sample: Option<&'static str>,
+    /// The runs another IME converts whole that were not offered.
+    chains: &'static str,
 }
 
 const EVALUATION: EvaluationOutputs = EvaluationOutputs {
@@ -83,6 +102,7 @@ const EVALUATION: EvaluationOutputs = EvaluationOutputs {
     previous_keys: "build/evaluation-keys.previous.tsv",
     diff: "build/evaluation-diff.tsv",
     missing_sample: Some("build/evaluation-missing-sample.tsv"),
+    chains: "build/evaluation-chains.tsv",
 };
 /// Why [`EVALUATION`]'s units were not offered their surface, as Kanaemi
 /// explains each conversion.
@@ -98,6 +118,7 @@ const WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
     previous_keys: "build/evaluation-with-keys.previous.tsv",
     diff: "build/evaluation-with-diff.tsv",
     missing_sample: None,
+    chains: "build/evaluation-with-chains.tsv",
 };
 /// [`MISSING_REASONS`] and [`LOSS_REASONS`] of [`WITH_ADDITIONAL`].
 const WITH_ADDITIONAL_REASONS: (&str, &str) = (
@@ -166,6 +187,7 @@ const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
     previous_keys: "build/ranking-keys.previous.tsv",
     diff: "build/ranking-diff.tsv",
     missing_sample: None,
+    chains: "build/ranking-chains.tsv",
 };
 /// [`RANKING_EVALUATION`] with every additional dictionary after the base.
 const RANKING_WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
@@ -176,6 +198,7 @@ const RANKING_WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
     previous_keys: "build/ranking-with-keys.previous.tsv",
     diff: "build/ranking-with-diff.tsv",
     missing_sample: None,
+    chains: "build/ranking-with-chains.tsv",
 };
 /// Where the training examples wait, in a file of each run's own, while the
 /// model trains.
@@ -224,17 +247,22 @@ struct Outputs {
     /// The cost of a word met once in the units the dictionary counts, which
     /// the dictionaries made from lists built against it start at.
     seen_once: &'static str,
+    /// The chains of units no name holds, with what decides whether they
+    /// enter, for people to judge.
+    chains: &'static str,
 }
 
 const BASE: Outputs = Outputs {
     dictionary: "build/dictionaries/base.tsv",
     report: "build/dictionaries/base-report.tsv",
     seen_once: "build/dictionaries/base-seen-once.txt",
+    chains: "build/dictionaries/base-chains.tsv",
 };
 const BASE_TRAIN: Outputs = Outputs {
     dictionary: "build/dictionaries/base-train.tsv",
     report: "build/dictionaries/base-train-report.tsv",
     seen_once: "build/dictionaries/base-train-seen-once.txt",
+    chains: "build/dictionaries/base-train-chains.tsv",
 };
 
 const USAGE: &str = "\
@@ -248,9 +276,10 @@ usage: kanaemi-dict units
        kanaemi-dict dictionary [--train-only]
          build build/dictionaries/base.tsv from build/units.jsonl, the
          UniDic lexicon build/sudachi/small_lex.csv and the readings
-         build/sudachi/{core,notcore}_lex.csv give the surfaces of the
-         units, with the words of one
-         to ten with each counter read by the analyzer, reporting to
+         build/sudachi/{core,notcore}_lex.csv and analyzer/added-readings.tsv
+         give the surfaces of the units, with the words of one
+         to ten with each counter read by the analyzer, failing on an added
+         reading the base needs not unless --train-only, reporting to
          build/dictionaries/base-report.tsv, and the cost of a word met
          once to build/dictionaries/base-seen-once.txt; with --train-only,
          from the units of the train documents alone into
@@ -262,7 +291,7 @@ usage: kanaemi-dict units
          their surface and the loss against the best order without context
          to build/evaluation.tsv, with the units not offered, the readings
          that lost, every reading and what changed since the run before in
-         build/evaluation-{misses,losses,keys,diff}.tsv, and why units were
+         build/evaluation-{misses,losses,keys,diff,chains}.tsv, and why units were
          not offered and readings lost in
          build/evaluation-{missing,loss}-reasons.tsv
        kanaemi-dict evaluate --with NAME...
@@ -342,6 +371,20 @@ enum Error {
     Corrections {
         path: PathBuf,
         source: CorrectionsError,
+    },
+    #[error("{}: {source}", path.display())]
+    AddedReadings {
+        path: PathBuf,
+        source: AddedReadingsError,
+    },
+    #[error(
+        "{} left as it was: added readings the base needs not: {}",
+        path.display(),
+        rows.iter().map(|(r, used)| format!("{} {} ({used})", r.surface, r.reading)).collect::<Vec<_>>().join(", ")
+    )]
+    NeedlessReadings {
+        path: PathBuf,
+        rows: Vec<(AddedReading, &'static str)>,
     },
     #[error("{}: {source}", path.display())]
     Kanji { path: PathBuf, source: KanjiError },
@@ -460,6 +503,35 @@ fn corrections() -> Result<Corrections, Error> {
         })
 }
 
+fn added_readings() -> Result<Vec<AddedReading>, Error> {
+    parse_added_readings(read_to_string(ADDED_READINGS)?).map_err(|source| Error::AddedReadings {
+        path: ADDED_READINGS.into(),
+        source,
+    })
+}
+
+/// The added readings the base would have without them, or cannot take,
+/// with why.
+fn needless_readings(
+    used: &[(AddedReading, AddedReadingUse)],
+    corrections: &Corrections,
+) -> Vec<(AddedReading, &'static str)> {
+    used.iter()
+        .filter_map(|(row, used)| {
+            let why = if corrections.drops(&row.surface) {
+                "dropped"
+            } else {
+                match used {
+                    AddedReadingUse::Added => return None,
+                    AddedReadingUse::Rare => "rare",
+                    AddedReadingUse::Given => "given",
+                }
+            };
+            Some((row.clone(), why))
+        })
+        .collect()
+}
+
 fn unidic_words() -> Result<Vec<UnidicWord>, Error> {
     plain_words(open(LEXICON)?).map_err(|source| Error::Unidic {
         path: LEXICON.into(),
@@ -521,12 +593,25 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
     let unidic = unidic_words()?;
     // A correction says how its surface reads; the lexicon reading it away
     // would bring back the misreading it corrects (一回 as いちかい).
-    let lexicon: Vec<UnidicWord> = {
+    let (lexicon, conjugating) = {
         let corrections = corrections()?;
-        lexicon_words(common_words)?
+        let lexicon: Vec<UnidicWord> = lexicon_words(common_words)?
             .into_iter()
             .filter(|w| !corrections.contradicts(&w.reading, &w.surface))
-            .collect()
+            .collect();
+        let mut conjugating = Vec::new();
+        for path in [LEXICON].into_iter().chain(FULL_LEXICONS) {
+            conjugating.extend(
+                conjugating_words(open(path)?)
+                    .map_err(|source| Error::Unidic {
+                        path: path.into(),
+                        source,
+                    })?
+                    .into_iter()
+                    .filter(|w| !corrections.contradicts(&w.reading, &w.surface)),
+            );
+        }
+        (lexicon, conjugating)
     };
     let names = read_names(open(BASE_NAMES)?).map_err(read_error(BASE_NAMES))?;
     let titles = read_titles(open(BASE_TITLES)?).map_err(|source| Error::Titles {
@@ -534,8 +619,8 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         source,
     })?;
     let established = established_words(|doc_id| !train_only || split_of(doc_id) == Split::Train)?;
-    let (dictionary, took_titles, took_unihan) = {
-        let mut chains = ChainCounter::new(&names);
+    let (dictionary, took_titles, took_unihan, unnamed) = {
+        let mut chains = ChainCounter::new(&names, &established);
         let mut reads = TitleReadings::new(&titles);
         let mut failure = None;
         let units = read_units(open(UNITS)?)
@@ -550,7 +635,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             })
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
         let mut total = 0usize;
-        let mut dictionary = Dictionary::build_with_lexicon(
+        let mut dictionary = Dictionary::build_with_readings(
             units
                 .inspect(|unit| {
                     chains.observe(unit);
@@ -562,6 +647,8 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 .inspect(|_| total += 1),
             &unidic,
             &lexicon,
+            &conjugating,
+            &added_readings()?,
         );
         if let Some(e) = failure {
             return Err(e);
@@ -581,20 +668,35 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         );
         let mut took_titles = !titles.is_empty();
         dictionary.add_words(titles);
+        let chains = chains.finish();
         let chained = {
             let known: HashSet<&str> = dictionary
                 .entries
                 .iter()
                 .map(|e| e.surface.as_str())
                 .collect();
-            let chains = chains
-                .finish()
-                .titles(|s| known.contains(s), texts.iter().map(String::as_str));
+            let chains = chains.titles(|s| known.contains(s), texts.iter().map(String::as_str));
             title_entries(&chains, texts.iter().map(String::as_str), total)
         };
         println!("chains: {}", chained.len());
         took_titles |= !chained.is_empty();
         dictionary.add_words(chained);
+        let unnamed = {
+            let known: HashSet<&str> = dictionary
+                .entries
+                .iter()
+                .map(|e| e.surface.as_str())
+                .collect();
+            chains.unnamed(|s| known.contains(s), texts.iter().map(String::as_str))
+        };
+        let entries = unnamed_entries(&unnamed, texts.iter().map(String::as_str), total);
+        println!(
+            "chains no name holds: {} taken of {}, lines {}",
+            unnamed.iter().filter(|c| c.taken).count(),
+            unnamed.len(),
+            entries.len()
+        );
+        dictionary.add_words(entries);
         let counted = {
             let counters =
                 UnidicReadings::new(counter_words(open(LEXICON)?).map_err(|source| {
@@ -651,8 +753,21 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         dictionary.drop_words(|reading, surface| {
             corrections.drops(surface) || !is_word(reading, surface)
         });
-        (dictionary, took_titles, took_unihan)
+        (dictionary, took_titles, took_unihan, unnamed)
     };
+    let needless = needless_readings(&dictionary.added_readings, &corrections()?);
+    println!(
+        "added readings: {}, needless: {}",
+        dictionary.added_readings.len(),
+        needless.len()
+    );
+    // The train documents alone may show a surface too rarely to enter.
+    if !train_only && !needless.is_empty() {
+        return Err(Error::NeedlessReadings {
+            path: outputs.dictionary.into(),
+            rows: needless,
+        });
+    }
     let text = dictionary
         .to_checked_text(BASE_LABEL)
         .map_err(|source| Error::Rejected {
@@ -673,6 +788,10 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
     write_atomically(outputs.dictionary, |w| {
         w.write_all(text.as_bytes())
             .map_err(write_error(outputs.dictionary))
+    })?;
+    write_atomically(outputs.chains, |w| {
+        w.write_all(unnamed_tsv(&unnamed).as_bytes())
+            .map_err(write_error(outputs.chains))
     })?;
     write_atomically(outputs.report, |w| {
         w.write_all(dictionary.report.to_tsv().as_bytes())
@@ -779,6 +898,7 @@ fn write_evaluation(out: &EvaluationOutputs, evaluation: &Evaluation) -> Result<
         (out.misses, all.misses_tsv()),
         (out.losses, all.losses_tsv()),
         (out.keys, keys.clone()),
+        (out.chains, evaluation.chains.misses_tsv()),
     ] {
         write_atomically(path, |w| {
             w.write_all(tsv.as_bytes()).map_err(write_error(path))
@@ -837,10 +957,18 @@ fn train_established() -> Result<Established, Error> {
 /// [`typed_by_analyzer`]).
 fn typed_eval_documents(established: &Established) -> Result<Vec<EvalDocument>, Error> {
     let mut docs = eval_documents(open(UNITS)?, open(DOCS)?)?;
+    let words = {
+        let mut words = ChainWords::default();
+        for path in CHAIN_WORDS {
+            read_chain_words(open(path)?, &mut words).map_err(read_error(path))?;
+        }
+        words
+    };
     for doc in &mut docs {
         let typed = typed_by_analyzer(&doc.units, &doc.compounds, established);
         doc.parts = compound_parts(&doc.units, &typed, established);
         doc.units = typed;
+        doc.chains = words.spans(&doc.units);
     }
     Ok(docs)
 }
@@ -916,6 +1044,17 @@ fn print_scores(label: &str, evaluation: &Evaluation) {
     println!(
         "{label}compounds not offered, typed as their parts: {}",
         evaluation.split
+    );
+    let chains = evaluation.chains.total();
+    println!(
+        "{label}runs another IME converts whole: units {}, missing {} ({:.2}%), extra conversions {}, first {} of best {} (loss {})",
+        chains.units,
+        chains.missing,
+        percent(chains.missing as usize, chains.units as usize),
+        evaluation.chain_extra,
+        chains.first,
+        chains.best_first,
+        chains.loss(),
     );
 }
 

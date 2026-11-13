@@ -1,6 +1,6 @@
 //! UniDic words from SudachiDict small's lexicon file.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 
 use crate::kana::has_kanji;
@@ -115,6 +115,122 @@ fn words_where(
     Ok(words
         .into_iter()
         .map(|(reading, surface)| UnidicWord { reading, surface })
+        .collect())
+}
+
+/// A conjugating word with kanji of the lexicon, in its dictionary form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConjugatingWord {
+    pub reading: String,
+    pub surface: String,
+    /// The conjugation type as Sudachi names it.
+    pub conjugation: String,
+    /// Every form the lexicon lists of the word, its dictionary form among
+    /// them, in reading and surface order.
+    pub forms: Vec<UnidicWord>,
+}
+
+/// The conjugating words with kanji in the lexicon that are not proper nouns,
+/// in reading, surface and type order. A spelling the lexicon normalizes to
+/// another (行なう for 行う) is left out, as the units leave it out of the
+/// base.
+pub fn conjugating_words(lexicon: impl Read) -> Result<Vec<ConjugatingWord>, UnidicError> {
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(lexicon);
+    let headers = reader.headers()?.clone();
+    let column = |name: &'static str| {
+        headers
+            .iter()
+            .position(|h| h == name)
+            .ok_or(UnidicError::MissingColumn(name))
+    };
+    let (index, head, reading, normalized, dictionary) = (
+        column("IndexForm")?,
+        column("Headword")?,
+        column("ReadingForm")?,
+        column("NormalizedForm")?,
+        column("DictionaryForm")?,
+    );
+    let pos = [
+        column("POS1")?,
+        column("POS2")?,
+        column("POS3")?,
+        column("POS4")?,
+        column("POS5")?,
+        column("POS6")?,
+    ];
+    // Forms by the dictionary form they refer to, as the lexicon writes it:
+    // surface, part of speech, type, form and reading.
+    let mut forms: HashMap<String, BTreeSet<(String, String)>> = HashMap::new();
+    let mut words: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+    for record in reader.records() {
+        let record = record?;
+        let field = |i: usize| unescape(record.get(i).unwrap_or_default());
+        let pos = pos.map(field);
+        if pos[4] == "*" || pos[1] == "固有名詞" {
+            continue;
+        }
+        let surface = match field(head) {
+            head if head.is_empty() => field(index),
+            head => head,
+        };
+        let reading = field(reading);
+        if surface.is_empty() || reading.is_empty() {
+            continue;
+        }
+        let refers_to = match field(dictionary) {
+            // The lexicon may add the id of the word's entry after its
+            // reading, which the dictionary form's own line does not carry.
+            d if !d.is_empty() => d.split(",ref-").next().unwrap_or_default().to_owned(),
+            _ if pos[5] == "終止形-一般" => {
+                let key = [surface.as_str()]
+                    .into_iter()
+                    .chain(pos.iter().map(String::as_str))
+                    .chain([reading.as_str()])
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let normalized = field(normalized);
+                let variant = normalized
+                    .split(',')
+                    .next()
+                    .is_some_and(|n| !n.is_empty() && n != surface);
+                if has_kanji(&surface) && !variant {
+                    words.insert((
+                        katakana_to_hiragana(&reading),
+                        surface.clone(),
+                        pos[4].clone(),
+                        key.clone(),
+                    ));
+                }
+                key
+            }
+            _ => continue,
+        };
+        forms
+            .entry(refers_to)
+            .or_default()
+            .insert((katakana_to_hiragana(&reading), surface));
+    }
+    let mut merged: BTreeMap<(String, String, String), BTreeSet<(String, String)>> =
+        BTreeMap::new();
+    for (reading, surface, conjugation, key) in words {
+        merged
+            .entry((reading, surface, conjugation))
+            .or_default()
+            .extend(forms.remove(&key).unwrap_or_default());
+    }
+    Ok(merged
+        .into_iter()
+        .map(|((reading, surface, conjugation), forms)| ConjugatingWord {
+            reading,
+            surface,
+            conjugation,
+            forms: forms
+                .into_iter()
+                .map(|(reading, surface)| UnidicWord { reading, surface })
+                .collect(),
+        })
         .collect())
 }
 
@@ -257,6 +373,65 @@ mod tests {
         let words = plain_words(csv.as_bytes()).unwrap();
 
         assert_eq!(words, [word("とうきょう", "東京"), word("わたし", "私")]);
+    }
+
+    #[test]
+    fn conjugating_words_are_taken_in_their_dictionary_form_with_the_forms_listed_of_them() {
+        let csv = [
+            HEADER,
+            "辛い,1,1,100,,形容詞,一般,*,*,形容詞,終止形-一般,カライ,,,,,,,\n",
+            "辛い,1,1,100,,形容詞,一般,*,*,形容詞,連体形-一般,カライ,,\"辛い,形容詞,一般,*,*,形容詞,終止形-一般,カライ\",,,,,\n",
+            "辛かっ,1,1,100,,形容詞,一般,*,*,形容詞,連用形-促音便,カラカッ,\"辛い,形容詞,一般,*,*,形容詞,終止形-一般,カライ\",\"辛い,形容詞,一般,*,*,形容詞,終止形-一般,カライ\",,,,,\n",
+            "良い,1,1,100,,形容詞,非自立可能,*,*,形容詞,終止形-一般,イイ,,,,,,,\n",
+            "良い,1,1,100,,形容詞,非自立可能,*,*,形容詞,連体形-一般,イイ,,\"良い,形容詞,非自立可能,*,*,形容詞,終止形-一般,イイ\",,,,,\n",
+            "行なう,1,1,100,,動詞,一般,*,*,五段-ワア行,終止形-一般,オコナウ,\"行う,動詞,一般,*,*,五段-ワア行,終止形-一般,オコナウ\",,,,,,\n",
+            "書く,1,1,100,,動詞,一般,*,*,五段-カ行,終止形-一般,カク,,,,,,,\n",
+            "ある,1,1,100,,動詞,非自立可能,*,*,五段-ラ行,終止形-一般,アル,,,,,,,\n",
+            "私,1,1,100,,代名詞,*,*,*,*,*,ワタシ,,,,,,,\n",
+        ]
+        .concat();
+
+        let words = conjugating_words(csv.as_bytes()).unwrap();
+
+        let conjugating =
+            |reading: &str, surface: &str, conjugation: &str, forms: &[(&str, &str)]| {
+                ConjugatingWord {
+                    reading: reading.into(),
+                    surface: surface.into(),
+                    conjugation: conjugation.into(),
+                    forms: forms.iter().map(|&(r, s)| word(r, s)).collect(),
+                }
+            };
+        assert_eq!(
+            words,
+            [
+                conjugating("いい", "良い", "形容詞", &[("いい", "良い")]),
+                conjugating("かく", "書く", "五段-カ行", &[("かく", "書く")]),
+                conjugating(
+                    "からい",
+                    "辛い",
+                    "形容詞",
+                    &[("からい", "辛い"), ("からかっ", "辛かっ")]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn forms_referring_to_a_dictionary_form_with_a_reference_id_join_it() {
+        let csv = [
+            HEADER,
+            "開ける,1,1,100,,動詞,一般,*,*,下一段-カ行,終止形-一般,ヒラケル,,,,,,,\n",
+            "開け,1,1,100,,動詞,一般,*,*,下一段-カ行,連用形-一般,ヒラケ,\"開ける,動詞,一般,*,*,下一段-カ行,終止形-一般,ヒラケル,ref-732427\",\"開ける,動詞,一般,*,*,下一段-カ行,終止形-一般,ヒラケル,ref-732427\",,,,,\n",
+        ]
+        .concat();
+
+        let words = conjugating_words(csv.as_bytes()).unwrap();
+
+        assert_eq!(
+            words[0].forms,
+            [word("ひらけ", "開け"), word("ひらける", "開ける")]
+        );
     }
 
     #[test]

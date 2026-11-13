@@ -58,7 +58,7 @@ nix develop
 just fetch                     # 素材を build/raw に取得する
 just sudachi                   # 解析器の辞書と SudachiDict の語彙を用意する
 just docs                      # 素材から文書を取り出す
-just kanji                     # 漢字一字の読みの表（Mozc、Unihan）を取得する
+just kanji                     # 漢字一字の読みの表（Mozc、Unihan）と、評価に使う Mozc の辞書の語の一覧を取得する
 just base-titles               # Wikipedia の記事とリダイレクトの見出しを取り出す
 just units                     # 文書を変換の単位に切る
 just dictionary                # 基本辞書を作る

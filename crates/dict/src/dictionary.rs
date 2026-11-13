@@ -5,10 +5,15 @@ use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use kanaemi_engine::{InvalidLine, ItemLine, TextDictionary, mark_placeholders, may_follow_stem};
+use kanaemi_engine::{
+    InvalidLine, ItemLine, TextDictionary, mark_placeholders, may_follow_stem, terminal_ending,
+};
 
-use crate::kana::{HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji, unvoiced};
-use crate::{UnidicWord, Unit};
+use crate::conjugation::{KanaemiType, kanaemi_type};
+use crate::kana::{
+    HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji, is_voicing_of, unvoiced,
+};
+use crate::{AddedReading, AddedReadingUse, ConjugatingWord, UnidicWord, Unit};
 
 /// The label of the base dictionary in its description line.
 pub const BASE_LABEL: &str = "基本";
@@ -76,6 +81,8 @@ pub struct Dictionary {
     /// too few to enter, behind every word met at least [`MIN_COUNT`] times.
     /// The entry keeps the cost of both, which its okurigana line takes.
     pub whole_forms: HashMap<(String, String), u32>,
+    /// Each added reading with what it did, in the order given.
+    pub added_readings: Vec<(AddedReading, AddedReadingUse)>,
     pub report: Report,
 }
 
@@ -115,7 +122,7 @@ const PARTICLE_MIN_COUNT: usize = 10;
 /// the word and the copula apart, as a rarer particle is, would be no help.
 const COPULA_MIN_COUNT: usize = MIN_COUNT;
 /// The conjugation type of a noun with する after it, whose stem the noun is.
-const SURU: &str = "サ行変格";
+pub(crate) const SURU: &str = "サ行変格";
 
 /// A surface of words written whole with at least this share (numerator,
 /// denominator) of its places, in any reading, inside compound units is a
@@ -247,7 +254,7 @@ impl Dictionary {
         units: impl IntoIterator<Item = U>,
         unidic: &[UnidicWord],
     ) -> Self {
-        Self::build_with_lexicon(units, unidic, &[])
+        Self::build_with_lexicon(units, unidic, &[], &[])
     }
 
     /// [`Dictionary::build`] with the words of the whole SudachiDict
@@ -255,11 +262,27 @@ impl Dictionary {
     /// their surface as often as a word must occur to enter: the lexicon
     /// reads a surface the text has in ways the analyzer never chooses
     /// (大文字 as おおもじ), and the rest of it would bring in words no text
-    /// uses.
+    /// uses. Its conjugating words enter by their stem, where units show the
+    /// stem in any reading as often (辛 as から beside つら), or by their
+    /// forms where Kanaemi cannot conjugate them (来る as きたる).
     pub fn build_with_lexicon<U: Borrow<Unit>>(
         units: impl IntoIterator<Item = U>,
         unidic: &[UnidicWord],
         lexicon: &[UnidicWord],
+        conjugating: &[ConjugatingWord],
+    ) -> Self {
+        Self::build_with_readings(units, unidic, lexicon, conjugating, &[])
+    }
+
+    /// [`Dictionary::build_with_lexicon`] with the readings people added,
+    /// which enter as the lexicon's words do, beside the analyzer's reading
+    /// and whatever reading a correction gives the surface.
+    pub fn build_with_readings<U: Borrow<Unit>>(
+        units: impl IntoIterator<Item = U>,
+        unidic: &[UnidicWord],
+        lexicon: &[UnidicWord],
+        conjugating: &[ConjugatingWord],
+        added: &[AddedReading],
     ) -> Self {
         let mut total = 0usize;
         // A whole form and a plain word with the same reading and surface are
@@ -271,6 +294,7 @@ impl Dictionary {
         let mut particle_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
         let mut copula_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
         let mut surfaces: HashMap<String, usize> = HashMap::new();
+        let mut stems: HashMap<(String, String), usize> = HashMap::new();
         let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
         let mut disallowed: BTreeMap<(String, String), (usize, String)> = BTreeMap::new();
         let mut parts = CompoundParts::default();
@@ -342,6 +366,9 @@ impl Dictionary {
                 Some(conjugation.clone()),
             );
             *counts.entry(stem).or_default() += 1;
+            *stems
+                .entry((stem_surface.clone(), conjugation.clone()))
+                .or_default() += 1;
             // A form cut short at a small つ (ハマっ) is no word; its stem is.
             if !unit.reading.ends_with('っ') {
                 *counts
@@ -427,6 +454,56 @@ impl Dictionary {
             let kept = costs.entry(key).or_insert(u32::MAX);
             *kept = (*kept).min(cost_of(n, total) + UNIDIC_EXTRA);
         }
+        let readings: HashSet<(&str, &str, &str)> = conjugating
+            .iter()
+            .map(|w| {
+                (
+                    w.reading.as_str(),
+                    w.surface.as_str(),
+                    w.conjugation.as_str(),
+                )
+            })
+            .collect();
+        for word in conjugating.iter().filter(|w| !is_rendaku(w, &readings)) {
+            let lines: Vec<(Key, usize)> = match lexicon_lines(word) {
+                Some(LexiconLines::Stem(stem)) => {
+                    let seen = (stem.1.clone(), stem.2.clone().unwrap_or_default());
+                    vec![(stem, stems.get(&seen).copied().unwrap_or_default())]
+                }
+                Some(LexiconLines::Forms(forms)) => forms
+                    .into_iter()
+                    .map(|f| {
+                        let n = outside.get(f.surface.as_str()).copied();
+                        (
+                            (f.reading.clone(), f.surface.clone(), None),
+                            n.unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            for (key, n) in lines.into_iter().filter(|&(_, n)| n >= MIN_COUNT) {
+                let kept = costs.entry(key).or_insert(u32::MAX);
+                *kept = (*kept).min(cost_of(n, total) + UNIDIC_EXTRA);
+            }
+        }
+        let added_readings = added
+            .iter()
+            .map(|word| {
+                let Some(&n) = outside
+                    .get(word.surface.as_str())
+                    .filter(|&&n| n >= MIN_COUNT)
+                else {
+                    return (word.clone(), AddedReadingUse::Rare);
+                };
+                let key = (word.reading.clone(), word.surface.clone(), None);
+                if costs.contains_key(&key) {
+                    return (word.clone(), AddedReadingUse::Given);
+                }
+                costs.insert(key, cost_of(n, total) + UNIDIC_EXTRA);
+                (word.clone(), AddedReadingUse::Added)
+            })
+            .collect();
         drop(surfaces);
         drop(outside);
         let entries: Vec<Entry> = costs
@@ -462,6 +539,7 @@ impl Dictionary {
             rare_cost,
             seen_once_cost,
             whole_forms,
+            added_readings,
             report: Report {
                 unknown_conjugations: unknown.into_iter().collect(),
                 disallowed_okurigana: disallowed
@@ -521,6 +599,16 @@ impl Dictionary {
                     .get_mut(&(word.reading.clone(), word.surface.clone()))
             {
                 *whole = (*whole).min(word.cost);
+            }
+            if word.conjugation.is_none() {
+                for (added, used) in &mut self.added_readings {
+                    if *used == AddedReadingUse::Added
+                        && added.reading == word.reading
+                        && added.surface == word.surface
+                    {
+                        *used = AddedReadingUse::Given;
+                    }
+                }
             }
             let key = (
                 word.reading.clone(),
@@ -779,6 +867,74 @@ pub fn nihon_readings(entries: &[Entry]) -> Vec<Entry> {
 /// [`Dictionary::whole_forms`]).
 fn typed_marked(whole_forms: &HashMap<(String, String), u32>) -> impl Fn(&Entry) -> bool + '_ {
     |e| e.conjugation.is_some() || whole_forms.contains_key(&(e.reading.clone(), e.surface.clone()))
+}
+
+/// What a conjugating word of the lexicon enters the dictionary as.
+enum LexiconLines<'a> {
+    /// Its stem, which Kanaemi conjugates whether or not the okurigana are
+    /// typed marked.
+    Stem(Key),
+    /// Its forms, each a word that does not conjugate.
+    Forms(Vec<&'a UnidicWord>),
+}
+
+/// Whether `word` reads as another word of `readings` of its surface and type
+/// does once voiced where words join (強い as づよい beside つよい), a reading
+/// that comes only inside compounds.
+fn is_rendaku(word: &ConjugatingWord, readings: &HashSet<(&str, &str, &str)>) -> bool {
+    let mut chars = word.reading.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let rest = chars.as_str();
+    PLAIN.chars().filter(|&p| is_voicing_of(p, first)).any(|p| {
+        let plain = format!("{p}{rest}");
+        readings.contains(&(
+            plain.as_str(),
+            word.surface.as_str(),
+            word.conjugation.as_str(),
+        ))
+    })
+}
+
+/// How `word` enters: by its stem when Kanaemi conjugates its type, or by
+/// those of its forms whose okurigana follow the kanji when the table does
+/// not know the type, as such units enter (see [`Dictionary::build`]).
+/// `None` for a classical type (出す as いだす), for a reading the lexicon
+/// gives the dictionary form alone, which is a colloquial one (悪い as
+/// わりい), and when the dictionary form does not end as its type does.
+fn lexicon_lines(word: &ConjugatingWord) -> Option<LexiconLines<'_>> {
+    if word.conjugation.starts_with("文語") {
+        return None;
+    }
+    let forms = || {
+        LexiconLines::Forms(
+            word.forms
+                .iter()
+                .filter(|f| okuri_line(&f.reading, &f.surface).is_some())
+                .collect(),
+        )
+    };
+    let (conjugation, ending) = match kanaemi_type(&word.conjugation, &word.surface) {
+        KanaemiType::OutsideTable => return Some(forms()),
+        KanaemiType::Named(conjugation) => match terminal_ending(conjugation) {
+            None => return Some(forms()),
+            Some(ending) => (conjugation, ending),
+        },
+    };
+    if word.forms.iter().all(|f| f.surface == word.surface) {
+        return None;
+    }
+    let stem_surface = word.surface.strip_suffix(ending)?;
+    let stem_reading = word.reading.strip_suffix(ending)?;
+    if !stem_surface.chars().any(is_kanji) || stem_reading.is_empty() {
+        return None;
+    }
+    Some(LexiconLines::Stem((
+        stem_reading.to_owned(),
+        stem_surface.to_owned(),
+        Some(conjugation.to_owned()),
+    )))
 }
 
 /// The okurigana lines of `entries`, each at the cheapest cost of the
@@ -1522,7 +1678,7 @@ mod tests {
         ]
         .concat();
 
-        let dict = Dictionary::build_with_lexicon(&units, &[], &[unidic("ひとはつ", "一髪")]);
+        let dict = Dictionary::build_with_lexicon(&units, &[], &[unidic("ひとはつ", "一髪")], &[]);
 
         assert!(
             find(&dict.entries, "ひとはつ", "一髪").is_none(),
@@ -1674,6 +1830,131 @@ mod tests {
         );
     }
 
+    fn conjugating(
+        reading: &str,
+        surface: &str,
+        conjugation: &str,
+        forms: &[(&str, &str)],
+    ) -> ConjugatingWord {
+        ConjugatingWord {
+            reading: reading.into(),
+            surface: surface.into(),
+            conjugation: conjugation.into(),
+            forms: forms.iter().map(|&(r, s)| unidic(r, s)).collect(),
+        }
+    }
+
+    #[test]
+    fn conjugating_lexicon_words_enter_where_units_show_their_stem_or_form_enough() {
+        let units: Vec<Unit> = [
+            repeat(conj("つらい", "辛い", ("つら", "辛"), "形容詞"), 3),
+            repeat(conj("よい", "良い", ("よ", "良"), "形容詞"), 2),
+            repeat(conj("いだく", "抱く", ("いだ", "抱"), "五段-カ行"), 1),
+            repeat(word("たんぽぽ", "蒲公英"), 2),
+            repeat(word("くる", "来る"), 2),
+        ]
+        .concat();
+        let lexicon = [
+            conjugating(
+                "からい",
+                "辛い",
+                "形容詞",
+                &[("からい", "辛い"), ("からかっ", "辛かっ")],
+            ),
+            conjugating(
+                "いい",
+                "良い",
+                "形容詞",
+                &[("いい", "良い"), ("いっ", "良っ")],
+            ),
+            conjugating(
+                "だく",
+                "抱く",
+                "五段-カ行",
+                &[("だく", "抱く"), ("だい", "抱い")],
+            ),
+            conjugating(
+                "きたる",
+                "来る",
+                "カ行変格",
+                &[("きたる", "来る"), ("きたら", "来ら")],
+            ),
+        ];
+
+        let dict = Dictionary::build_with_lexicon(&units, &[], &[], &lexicon);
+
+        let stem = dict
+            .entries
+            .iter()
+            .find(|e| e.reading == "から" && e.surface == "辛")
+            .unwrap();
+        assert_eq!(stem.conjugation.as_deref(), Some("形容詞"));
+        assert_eq!(stem.cost, cost(3, 10) + 1000);
+        assert!(
+            find(&dict.entries, "からい", "辛い").is_none(),
+            "Kanaemi conjugates the stem"
+        );
+        let good = dict
+            .entries
+            .iter()
+            .find(|e| e.reading == "い" && e.surface == "良")
+            .unwrap();
+        assert_eq!(good.conjugation.as_deref(), Some("形容詞"));
+        assert_eq!(good.cost, cost(2, 10) + 1000);
+        assert!(
+            find(&dict.entries, "だ", "抱").is_none(),
+            "its stem is seen once"
+        );
+        assert!(find(&dict.entries, "だく", "抱く").is_none());
+        let outside = find(&dict.entries, "きたる", "来る").unwrap();
+        assert_eq!(outside.conjugation, None, "its forms are words");
+        assert_eq!(outside.cost, cost(2, 10) + 1000);
+        assert!(find(&dict.entries, "きたら", "来ら").is_none());
+    }
+
+    #[test]
+    fn rendaku_classical_and_dictionary_form_only_readings_of_the_lexicon_stay_out() {
+        let units: Vec<Unit> = [
+            repeat(conj("つよい", "強い", ("つよ", "強"), "形容詞"), 2),
+            repeat(conj("わるい", "悪い", ("わる", "悪"), "形容詞"), 2),
+            repeat(conj("だす", "出す", ("だ", "出"), "五段-サ行"), 2),
+        ]
+        .concat();
+        let lexicon = [
+            conjugating(
+                "つよい",
+                "強い",
+                "形容詞",
+                &[("つよい", "強い"), ("つよかっ", "強かっ")],
+            ),
+            conjugating(
+                "づよい",
+                "強い",
+                "形容詞",
+                &[("づよい", "強い"), ("づよかっ", "強かっ")],
+            ),
+            conjugating("わりい", "悪い", "形容詞", &[("わりい", "悪い")]),
+            conjugating(
+                "いだす",
+                "出す",
+                "文語四段-サ行",
+                &[("いだす", "出す"), ("いだし", "出し")],
+            ),
+        ];
+
+        let dict = Dictionary::build_with_lexicon(&units, &[], &[], &lexicon);
+
+        let stem = |reading: &str, surface: &str| {
+            dict.entries
+                .iter()
+                .any(|e| e.reading == reading && e.surface == surface)
+        };
+        assert!(!stem("づよ", "強"), "a rendaku reading of つよ");
+        assert!(!stem("わりい", "悪い"), "no form but the dictionary form");
+        assert!(!stem("いだす", "出す"), "a classical type");
+        assert!(!stem("いだし", "出し"), "a classical type");
+    }
+
     #[test]
     fn lexicon_words_enter_as_unidic_words_only_where_units_show_the_surface_enough() {
         let units: Vec<Unit> = [
@@ -1688,7 +1969,7 @@ mod tests {
             unidic("しょかん", "手紙"),
         ];
 
-        let dict = Dictionary::build_with_lexicon(&units, &[], &lexicon);
+        let dict = Dictionary::build_with_lexicon(&units, &[], &lexicon, &[]);
 
         assert_eq!(
             find(&dict.entries, "おおもじ", "大文字").unwrap().cost,
@@ -1700,6 +1981,103 @@ mod tests {
         );
         assert!(find(&dict.entries, "おおそうじ", "大掃除").is_none());
         assert!(find(&dict.entries, "しょかん", "手紙").is_none());
+    }
+
+    fn added(reading: &str, surface: &str) -> AddedReading {
+        AddedReading {
+            reading: reading.into(),
+            surface: surface.into(),
+        }
+    }
+
+    #[test]
+    fn added_readings_enter_as_lexicon_words_beside_the_analyzer_s_reading() {
+        let units: Vec<Unit> = [
+            repeat(word("くうぎょう", "空行"), 3),
+            repeat(word("みはらい", "未払い"), 2),
+            repeat(word("てがみ", "手紙"), 1),
+        ]
+        .concat();
+
+        let dict = Dictionary::build_with_readings(
+            &units,
+            &[],
+            &[],
+            &[],
+            &[added("からぎょう", "空行"), added("みばらい", "未払い")],
+        );
+
+        assert_eq!(
+            find(&dict.entries, "からぎょう", "空行").unwrap().cost,
+            cost(3, 6) + 1000
+        );
+        assert_eq!(
+            find(&dict.entries, "くうぎょう", "空行").unwrap().cost,
+            cost(3, 6)
+        );
+        assert_eq!(
+            find(&dict.okuri, "みばら*い", "未払い").unwrap().cost,
+            cost(2, 6) + 1000 + cost(2, 6),
+            "behind the forms typed marked, as the line of any word typed whole"
+        );
+        assert_eq!(
+            dict.added_readings,
+            [
+                (added("からぎょう", "空行"), AddedReadingUse::Added),
+                (added("みばらい", "未払い"), AddedReadingUse::Added),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_added_reading_of_a_surface_too_rare_outside_compounds_stays_out() {
+        let units: Vec<Unit> = [
+            repeat(word("てがみ", "手紙"), 2),
+            vec![word("のうじゅう", "脳汁")],
+        ]
+        .concat();
+
+        let dict =
+            Dictionary::build_with_readings(&units, &[], &[], &[], &[added("のうじる", "脳汁")]);
+
+        assert!(find(&dict.entries, "のうじる", "脳汁").is_none());
+        assert_eq!(
+            dict.added_readings,
+            [(added("のうじる", "脳汁"), AddedReadingUse::Rare)]
+        );
+    }
+
+    #[test]
+    fn an_added_reading_the_dictionary_has_without_it_is_given() {
+        let units: Vec<Unit> = [
+            repeat(word("だいもんじ", "大文字"), 2),
+            repeat(word("かくまる", "角丸"), 2),
+            repeat(word("ちょうかい", "朝会"), 2),
+        ]
+        .concat();
+
+        let mut dict = Dictionary::build_with_readings(
+            &units,
+            &[],
+            &[unidic("おおもじ", "大文字")],
+            &[],
+            &[
+                added("おおもじ", "大文字"),
+                added("かくまる", "角丸"),
+                added("あさかい", "朝会"),
+            ],
+        );
+        dict.add_words([entry("あさかい", "朝会", None, 900)]);
+
+        assert_eq!(
+            dict.added_readings,
+            [
+                (added("おおもじ", "大文字"), AddedReadingUse::Given),
+                (added("かくまる", "角丸"), AddedReadingUse::Given),
+                (added("あさかい", "朝会"), AddedReadingUse::Given),
+            ]
+        );
+        assert_eq!(find(&dict.entries, "あさかい", "朝会").unwrap().cost, 900);
     }
 
     #[test]

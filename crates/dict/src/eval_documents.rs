@@ -12,8 +12,8 @@ use rayon::prelude::*;
 
 use crate::documents::each_document;
 use crate::{
-    Class, DocumentsError, Established, Score, Split, Tallies, Unit, UnitsError, as_typed,
-    engine_with, evaluate_document_with_parts, read_units, split_of,
+    ChainSpan, Class, DocumentsError, Established, Score, Split, Tallies, Unit, UnitsError,
+    as_typed, engine_with, evaluate_document, evaluate_document_with_parts, read_units, split_of,
 };
 
 /// A document of the eval split with its units in position order.
@@ -28,6 +28,9 @@ pub struct EvalDocument {
     /// The units inside each compound `units` types whole, by where it
     /// starts (see [`compound_parts`]).
     pub parts: HashMap<usize, Vec<Unit>>,
+    /// The runs of `units` another IME converts whole, typed apart as one
+    /// unit each (see [`crate::ChainWords::spans`]).
+    pub chains: Vec<ChainSpan>,
 }
 
 /// Where `unit` lies in its document: start and end.
@@ -253,6 +256,7 @@ pub fn each_document_with_units<E: From<EvalDocumentsError>>(
                 text: doc.text,
                 compounds,
                 parts: HashMap::new(),
+                chains: Vec::new(),
             })
             .map_err(Failed::Caller)?;
         }
@@ -278,6 +282,11 @@ pub struct Evaluation {
     pub agreed: Tallies,
     /// The compounds not offered, typed as their parts instead.
     pub split: u64,
+    /// The runs another IME converts whole, typed as one unit each apart
+    /// from the units: one not offered costs a conversion per unit but one.
+    pub chains: Tallies,
+    /// The conversions the runs not offered cost beyond one each.
+    pub chain_extra: u64,
 }
 
 impl Evaluation {
@@ -302,6 +311,7 @@ impl Evaluation {
             .by_kind
             .iter()
             .chain([(&all_name, &all), (&agreed_name, &self.agreed)]);
+        let chains = self.chains.total();
         let mut tsv = String::from(
             "kind\tclass\tunits\tmissing\tfirst\tbest_first\tloss\tpage\tbest_page\tpage_loss\n",
         );
@@ -326,6 +336,19 @@ impl Evaluation {
                 .expect("writing to a String never fails");
             }
         }
+        writeln!(
+            tsv,
+            "chain\tall\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            chains.units,
+            chains.missing,
+            chains.first,
+            chains.best_first,
+            chains.loss(),
+            chains.page,
+            chains.best_page,
+            chains.page_loss(),
+        )
+        .expect("writing to a String never fails");
         tsv
     }
 }
@@ -363,6 +386,19 @@ pub fn evaluate_documents(
                         }
                     },
                 );
+                let parts: HashMap<usize, usize> = doc
+                    .chains
+                    .iter()
+                    .map(|s| (s.unit.position, s.parts))
+                    .collect();
+                let spans: Vec<Unit> = doc.chains.iter().map(|s| s.unit.clone()).collect();
+                let (chains, extra) = (&mut part.chains, &mut part.chain_extra);
+                evaluate_document(&mut field, &spans, &doc.text, |unit, offered, rank| {
+                    chains.add(unit, offered, rank);
+                    if rank.is_none() {
+                        *extra += parts[&unit.position] as u64 - 1;
+                    }
+                });
             }
             part
         })
@@ -374,6 +410,8 @@ pub fn evaluate_documents(
         }
         evaluation.agreed.merge(part.agreed);
         evaluation.split += part.split;
+        evaluation.chains.merge(part.chains);
+        evaluation.chain_extra += part.chain_extra;
     }
     evaluation
 }
@@ -526,6 +564,7 @@ mod tests {
                     text: "漢い字".into(),
                     compounds: Vec::new(),
                     parts: HashMap::new(),
+                    chains: Vec::new(),
                 },
                 EvalDocument {
                     doc_id: "aozora:000015".into(),
@@ -534,6 +573,7 @@ mod tests {
                     text: "あ書".into(),
                     compounds: Vec::new(),
                     parts: HashMap::new(),
+                    chains: Vec::new(),
                 },
             ]
         );
@@ -795,6 +835,7 @@ mod tests {
                     text: "手紙".into(),
                     compounds: Vec::new(),
                     parts: HashMap::new(),
+                    chains: Vec::new(),
                 },
                 EvalDocument {
                     doc_id: "aozora:000004".into(),
@@ -803,6 +844,7 @@ mod tests {
                     text: "漢い字".into(),
                     compounds: Vec::new(),
                     parts: HashMap::new(),
+                    chains: Vec::new(),
                 },
             ]
         );
@@ -872,7 +914,66 @@ mod tests {
             text: String::new(),
             compounds: Vec::new(),
             parts: HashMap::new(),
+            chains: Vec::new(),
         }
+    }
+
+    #[test]
+    fn runs_another_ime_converts_whole_are_scored_apart_with_the_conversions_they_cost() {
+        let dictionary = {
+            let (dictionary, invalid) = TextDictionary::parse(
+                "きどう\t起動\nじ\t時\nせつぞく\t接続\nさき\t先\nせつぞくさき\t接続先\n",
+            );
+            assert_eq!(invalid, []);
+            Arc::new(dictionary)
+        };
+        let span = |position, reading: &str, surface: &str, parts| ChainSpan {
+            unit: Unit {
+                compound: true,
+                ..unit("aozora:01", position, reading, surface)
+            },
+            parts,
+        };
+        let doc = EvalDocument {
+            text: "起動時と接続先".into(),
+            chains: vec![
+                span(0, "きどうじ", "起動時", 2),
+                span(4, "せつぞくさき", "接続先", 2),
+            ],
+            ..eval_document(
+                "aozora:01",
+                &[
+                    ("きどう", "起動"),
+                    ("じ", "時"),
+                    ("せつぞく", "接続"),
+                    ("さき", "先"),
+                ],
+            )
+        };
+
+        let evaluation = evaluate_documents(
+            std::slice::from_ref(&doc),
+            std::slice::from_ref(&dictionary),
+            None,
+            &|_| false,
+        );
+
+        let chains = evaluation.chains.total();
+        assert_eq!((chains.units, chains.missing), (2, 1));
+        assert_eq!(evaluation.chain_extra, 1, "起動時 is typed as 起動 and 時");
+        assert_eq!(
+            evaluation.all().total().units,
+            4,
+            "the units are scored as before"
+        );
+        assert!(
+            evaluation
+                .to_tsv()
+                .lines()
+                .any(|l| l.starts_with("chain\tall\t2\t1\t")),
+            "{}",
+            evaluation.to_tsv()
+        );
     }
 
     #[test]
@@ -949,6 +1050,7 @@ mod tests {
             by_kind: BTreeMap::from([("law".to_owned(), law), ("aozora".to_owned(), aozora)]),
             agreed: Tallies::default(),
             split: 0,
+            ..Evaluation::default()
         };
 
         assert_eq!(
@@ -973,7 +1075,8 @@ mod tests {
              agreed\tcompound\t0\t0\t0\t0\t0\t0\t0\t0\n\
              agreed\tnumeric\t0\t0\t0\t0\t0\t0\t0\t0\n\
              agreed\tvariant\t0\t0\t0\t0\t0\t0\t0\t0\n\
-             agreed\tall\t0\t0\t0\t0\t0\t0\t0\t0\n"
+             agreed\tall\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             chain\tall\t0\t0\t0\t0\t0\t0\t0\t0\n"
         );
     }
 
@@ -1036,6 +1139,7 @@ mod model_tests {
             text: "手神".into(),
             compounds: Vec::new(),
             parts: HashMap::new(),
+            chains: Vec::new(),
         };
         let model = {
             let bits = 10;
