@@ -32,6 +32,10 @@ const MAX_AFTER_NUMBER: f64 = 0.5;
 /// The least share, on each side, of the places a chain occurs at where no
 /// kanji or katakana runs on into it.
 const MIN_APART: f64 = 0.5;
+/// The least such share for a chain no name holds: a word written whole is
+/// often the head or the tail of a longer one (システム構成図, 従量課金制),
+/// where the name of an article mostly stands alone.
+const MIN_UNNAMED_APART: f64 = 0.25;
 /// The least entropy, in bits, of the characters on each side of a chain.
 const MIN_ENTROPY: f64 = 1.5;
 /// How many compounds must show how a part joins for a chain to follow them.
@@ -409,7 +413,7 @@ impl Chains {
         candidates
             .iter()
             .zip(sides(&surfaces, texts))
-            .filter(|(_, sides)| sides.stand_apart())
+            .filter(|(_, sides)| sides.stand_apart(MIN_APART))
             .map(|(&(surface, parts), _)| Title {
                 reading: self.junctions.read(parts),
                 surface: surface.to_owned(),
@@ -421,7 +425,8 @@ impl Chains {
     /// holds, met at least [`REPORT_MIN`] times, whose surface `known` lacks,
     /// read through their junctions. One is taken when it occurs at least
     /// [`MIN_UNNAMED`] times in at least [`MIN_UNNAMED_DOCS`] documents and
-    /// stands apart from what is around it where it occurs in `texts`.
+    /// stands apart from what is around it, by [`MIN_UNNAMED_APART`], where it
+    /// occurs in `texts`.
     pub fn unnamed<'t>(
         &self,
         known: impl Fn(&str) -> bool,
@@ -469,7 +474,7 @@ impl Chains {
                     after_number,
                     taken: chain.count >= MIN_UNNAMED
                         && chain.documents >= MIN_UNNAMED_DOCS
-                        && sides.stand_apart()
+                        && sides.stand_apart(MIN_UNNAMED_APART)
                         && after_number < MAX_AFTER_NUMBER,
                 }
             })
@@ -630,10 +635,10 @@ struct Sides {
 }
 
 impl Sides {
-    fn stand_apart(&self) -> bool {
+    fn stand_apart(&self, min_apart: f64) -> bool {
         [&self.before, &self.after].into_iter().all(|side| {
             let (apart, entropy) = Self::of(side);
-            apart >= MIN_APART && entropy >= MIN_ENTROPY
+            apart >= min_apart && entropy >= MIN_ENTROPY
         })
     }
 
@@ -1113,6 +1118,41 @@ mod tests {
         assert_eq!(
             unnamed(&chains, &[apart("起動時", 8)]),
             [("きどうじ".into(), "起動時".into(), true)]
+        );
+    }
+
+    #[test]
+    fn a_chain_no_name_holds_is_taken_even_when_longer_words_often_end_in_it() {
+        let units = sorted(spread(
+            MIN_UNNAMED,
+            MIN_UNNAMED_DOCS,
+            0,
+            &[("構成", "こうせい"), ("図", "ず")],
+        ));
+        let chains = count(&names(&["構成図"]), &units);
+        // Three places of eight stand apart before it (システム構成図).
+        let text = [
+            apart("構成図", 3),
+            [
+                ("ム", "は"),
+                ("ク", "が"),
+                ("ー", "を"),
+                ("全", "の"),
+                ("概", "も"),
+            ]
+            .iter()
+            .map(|(before, after)| format!("{before}構成図{after}"))
+            .collect(),
+        ]
+        .concat();
+
+        assert_eq!(
+            unnamed(&count(&names(&[]), &units), std::slice::from_ref(&text)),
+            [("こうせいず".into(), "構成図".into(), true)]
+        );
+        assert!(
+            titles(&chains, &[text]).is_empty(),
+            "a chain a name holds still has to stand apart more often"
         );
     }
 
