@@ -144,4 +144,4 @@ test-sudachi:
     cargo test --workspace --release -- --ignored
 
 # Everything CI runs.
-ci: fmt-check lint test
+ci: fmt-check lint test dist
