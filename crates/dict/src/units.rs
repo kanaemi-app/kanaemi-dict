@@ -121,7 +121,7 @@ impl Established {
             if unit.compound {
                 compounds.push(span);
             } else if !unit.parts.is_empty() {
-                joined.push((span.0, span.1, (unit.reading.clone(), unit.surface.clone())));
+                joined.push((span.0, span.1, established_key(unit)));
             }
         }
         flush(&mut joined, &mut compounds);
@@ -135,8 +135,16 @@ impl Established {
     }
 
     fn has(&self, unit: &Unit) -> bool {
-        self.words
-            .contains(&(unit.reading.clone(), unit.surface.clone()))
+        self.words.contains(&established_key(unit))
+    }
+}
+
+/// What [`Established`] counts a unit by: a numeric unit by its item, whatever
+/// the number (`{}しゅるい`, `{half-num}種類`), the dictionary counting it so.
+fn established_key(unit: &Unit) -> (String, String) {
+    match &unit.numeric {
+        Some(n) => (n.reading.clone(), n.surface.clone()),
+        None => (unit.reading.clone(), unit.surface.clone()),
     }
 }
 
@@ -147,6 +155,35 @@ pub fn as_typed(unit: &Unit, established: &Established) -> Vec<Unit> {
     if unit.parts.is_empty() || established.has(unit) {
         return vec![unit.clone()];
     }
+    parts_as_units(unit)
+}
+
+/// The units the dictionary counts for `unit`: those typed for it (see
+/// [`as_typed`]), and, for a number a noun counts (1失点), the noun too, even
+/// when the unit is typed whole. The noun is a word typed alone elsewhere,
+/// and counting it only where no number stands before it would put it behind
+/// the words of its reading (失点 behind 知ってん).
+pub fn as_counted(unit: &Unit, established: &Established) -> Vec<Unit> {
+    let mut units = as_typed(unit, established);
+    if unit.numeric.is_some() && !unit.parts.is_empty() && established.has(unit) {
+        let mut nouns = parts_as_units(unit);
+        let end = unit.position + unit.surface.chars().count();
+        // The noun ending the unit takes what follows the unit (失点の), as
+        // it would were no number before it.
+        if let Some(last) = nouns
+            .last_mut()
+            .filter(|n| n.position + n.surface.chars().count() == end)
+        {
+            last.particle.clone_from(&unit.particle);
+            last.suru.clone_from(&unit.suru);
+            last.copula.clone_from(&unit.copula);
+        }
+        units.extend(nouns);
+    }
+    units
+}
+
+fn parts_as_units(unit: &Unit) -> Vec<Unit> {
     unit.parts
         .iter()
         .map(|p| Unit {
@@ -364,16 +401,22 @@ fn compound_units(words: &Words, units: &[LineUnit], readings: &UnidicReadings) 
                 && is_plain_reading(&c.reading)
                 && is_word(&c.reading, &c.surface)
                 && !is_numbers_alone(parts, readings)
-                && !units
-                    .iter()
-                    .any(|u| u.begin == c.begin && u.surface == c.surface)
+                // A number counted by a noun may be typed as the noun alone,
+                // so its unit does not stand in for the compound (一人称).
+                && !units.iter().any(|u| {
+                    u.begin == c.begin
+                        && u.surface == c.surface
+                        && (u.numeric.is_none() || u.parts.is_empty())
+                })
         })
         .map(plain)
         .collect()
 }
 
 /// Whether `tokens` are numeric units and numbers with no counter alone, as
-/// [`cut_numeric`] cuts them: 第一子, 二階建て, 二十一.
+/// [`cut_numeric`] cuts them: 第一子, 二階建て, 二十一. A common noun counts no
+/// number here: the analyzer's compound of one (一人称) is a word the
+/// numeric unit could only stand for were the noun established as a counter.
 fn is_numbers_alone(mut tokens: &[Token], readings: &UnidicReadings) -> bool {
     while let Some(first) = tokens.first() {
         let starts_number = is_numeral(first)
@@ -381,7 +424,7 @@ fn is_numbers_alone(mut tokens: &[Token], readings: &UnidicReadings) -> bool {
         if !starts_number {
             return false;
         }
-        tokens = &tokens[cut_numeric(tokens, readings).1..];
+        tokens = &tokens[cut_numeric(tokens, readings, false).1..];
     }
     true
 }
@@ -438,7 +481,7 @@ fn cut_line(tokens: &[Token], readings: &UnidicReadings) -> (Vec<LineUnit>, Vec<
     while let Some(n) = rest.iter().position(is_numeral) {
         let start = n - usize::from(n > 0 && rest[n - 1].pos[0] == "接頭辞");
         words(&rest[..start], &mut units);
-        let (unit, taken) = cut_numeric(&rest[start..], readings);
+        let (unit, taken) = cut_numeric(&rest[start..], readings, true);
         units.extend(unit);
         rest = &rest[start + taken..];
     }
@@ -566,21 +609,34 @@ fn read_as_written(token: &Token) -> Token {
 /// suffixes after the counter. A numeral that writes no number (数, 何) makes
 /// them a plain word instead. Returns the unit, if they make one, and how
 /// many tokens it took, which it takes either way.
-fn cut_numeric(tokens: &[Token], readings: &UnidicReadings) -> (Option<LineUnit>, usize) {
+///
+/// A common noun after the number (種類 of 3種類) counts it too when
+/// `nouns_count`, but the unit keeps the words it would be cut into without
+/// the noun counting as its parts: whether the noun counts is up to how often
+/// the documents write the unit (see [`Established`]).
+fn cut_numeric(
+    tokens: &[Token],
+    readings: &UnidicReadings,
+    nouns_count: bool,
+) -> (Option<LineUnit>, usize) {
     let number_start = usize::from(tokens[0].pos[0] == "接頭辞");
     let after = number_start
         + tokens[number_start..]
             .iter()
             .take_while(|t| is_numeral(t))
             .count();
+    let counted_by_noun = nouns_count
+        && tokens
+            .get(after)
+            .is_some_and(|t| !is_counter(t) && takes_number(t));
+    if counted_by_noun
+        && let Some(unit) = cut_counted_by_noun(tokens, number_start, after, readings)
+    {
+        return unit;
+    }
     let counted = tokens.get(after).is_some_and(is_counter);
     let taken = if counted {
-        after
-            + 1
-            + tokens[after + 1..]
-                .iter()
-                .take_while(|t| t.pos[0] == "接尾辞")
-                .count()
+        counted_end(tokens, after)
     } else {
         after
     };
@@ -590,6 +646,90 @@ fn cut_numeric(tokens: &[Token], readings: &UnidicReadings) -> (Option<LineUnit>
     if !counted {
         return (None, after);
     }
+    (
+        counted_unit(tokens, number_start, after, taken, readings),
+        taken,
+    )
+}
+
+/// The index past the counter at `after` and the suffixes after it.
+fn counted_end(tokens: &[Token], after: usize) -> usize {
+    after
+        + 1
+        + tokens[after + 1..]
+            .iter()
+            .take_while(|t| t.pos[0] == "接尾辞")
+            .count()
+}
+
+/// [`cut_numeric`] of a numeral counted by the common noun at `after`, the
+/// unit holding as its parts the words the tokens make without the noun
+/// counting: the noun with its suffixes, and the numeral that writes no
+/// number. None when the noun makes no word to type, or the tokens no unit.
+fn cut_counted_by_noun(
+    tokens: &[Token],
+    number_start: usize,
+    after: usize,
+    readings: &UnidicReadings,
+) -> Option<(Option<LineUnit>, usize)> {
+    let taken = counted_end(tokens, after);
+    let (mut unit, numeral_word) = if writes_no_number(&tokens[number_start..after]) {
+        (
+            word_of_numeral(&tokens[..taken], after, readings)?,
+            word_of_numeral(&tokens[..after], after, readings),
+        )
+    } else {
+        (
+            counted_unit(tokens, number_start, after, taken, readings)?,
+            None,
+        )
+    };
+    let noun_words = cut_words(&tokens[after..taken], readings).0;
+    if noun_words.is_empty() {
+        return None;
+    }
+    unit.parts = numeral_word
+        .iter()
+        .chain(&noun_words)
+        .flat_map(|word| parts_of(word, unit.begin))
+        .collect();
+    Some((Some(unit), taken))
+}
+
+/// `word` as the parts a unit starting at `begin` holds: its own parts when
+/// it has any, else itself.
+fn parts_of(word: &LineUnit, begin: usize) -> Vec<Part> {
+    let offset = word.begin - begin;
+    if !word.parts.is_empty() {
+        return word
+            .parts
+            .iter()
+            .map(|p| Part {
+                offset: offset + p.offset,
+                ..p.clone()
+            })
+            .collect();
+    }
+    vec![Part {
+        offset,
+        reading: word.reading.clone(),
+        surface: word.surface.clone(),
+        stem_reading: word.stem.as_ref().map(|s| s.reading.clone()),
+        stem_surface: word.stem.as_ref().map(|s| s.surface.clone()),
+        conjugation: word.stem.as_ref().map(|s| s.conjugation.clone()),
+        unknown_conjugation: word.unknown_conjugation.clone(),
+    }]
+}
+
+/// The numeric unit of the number from `number_start` to `after` and its
+/// prefix, counted by the tokens from `after` to `taken`.
+fn counted_unit(
+    tokens: &[Token],
+    number_start: usize,
+    after: usize,
+    taken: usize,
+    readings: &UnidicReadings,
+) -> Option<LineUnit> {
     let suffixes: Vec<Token> = tokens[after..taken]
         .iter()
         .enumerate()
@@ -598,13 +738,12 @@ fn cut_numeric(tokens: &[Token], readings: &UnidicReadings) -> (Option<LineUnit>
             ..t.clone()
         })
         .collect();
-    let unit = numeric_unit(
+    numeric_unit(
         &tokens[..number_start],
         &tokens[number_start..after],
         &suffixes,
         readings,
-    );
-    (unit, taken)
+    )
 }
 
 /// Whether the numerals are kanji with one that writes no number (数, 何, 幾):
@@ -711,6 +850,11 @@ fn numeric_unit(
 /// A suffix, or a noun that can count, after a number.
 fn is_counter(token: &Token) -> bool {
     token.pos[0] == "接尾辞" || (token.pos[0] == "名詞" && token.pos[2] == "助数詞可能")
+}
+
+/// A common noun to convert, which may count a number before it (3種類).
+fn takes_number(token: &Token) -> bool {
+    token.pos[0] == "名詞" && token.pos[1] == "普通名詞" && needs_conversion(&token.surface)
 }
 
 fn plain(token: &Token) -> LineUnit {
@@ -1536,6 +1680,101 @@ mod tests {
     }
 
     #[test]
+    fn a_numeric_unit_with_a_noun_is_typed_whole_when_its_item_is_met_as_often_as_the_dictionary_takes_one()
+     {
+        let counted = |position, value: &str, noun: &str, reading: &str| Unit {
+            numeric: Some(Numeric {
+                reading: format!("{{}}{reading}"),
+                surface: format!("{{half-num}}{noun}"),
+                value: value.into(),
+                kana: String::new(),
+            }),
+            surface: format!("{value}{noun}"),
+            reading: format!("{value}{reading}"),
+            parts: vec![Part {
+                offset: value.chars().count(),
+                reading: reading.into(),
+                surface: noun.into(),
+                ..Default::default()
+            }],
+            ..joined_unit(position, "", "", ("", ""))
+        };
+        let kinds = [
+            counted(0, "3", "種類", "しゅるい"),
+            counted(10, "12", "種類", "しゅるい"),
+        ];
+        let player = counted(20, "3", "選手", "せんしゅ");
+        assert_eq!(MIN_COUNT, kinds.len());
+
+        let established = Established::of(kinds.iter().chain([&player]));
+
+        assert_eq!(
+            as_typed(&counted(30, "5", "種類", "しゅるい"), &established),
+            [counted(30, "5", "種類", "しゅるい")]
+        );
+        let typed = as_typed(&player, &established);
+        assert_eq!(
+            typed
+                .iter()
+                .map(|u| (u.position, u.surface.as_str(), u.numeric.is_none()))
+                .collect::<Vec<_>>(),
+            [(21, "選手", true)]
+        );
+    }
+
+    #[test]
+    fn the_dictionary_counts_the_noun_of_a_number_it_counts_also_as_a_word() {
+        let lost = |position, value: &str| Unit {
+            numeric: Some(Numeric {
+                reading: "{}しってん".into(),
+                surface: "{half-num}失点".into(),
+                value: value.into(),
+                kana: String::new(),
+            }),
+            surface: format!("{value}失点"),
+            reading: format!("{value}しってん"),
+            parts: vec![Part {
+                offset: value.chars().count(),
+                reading: "しってん".into(),
+                surface: "失点".into(),
+                ..Default::default()
+            }],
+            ..joined_unit(position, "", "", ("", ""))
+        };
+        let units = [
+            Unit {
+                particle: Some("の".into()),
+                ..lost(0, "1")
+            },
+            lost(10, "2"),
+        ];
+        let established = Established::of(&units);
+        let minna = joined_unit(20, "みなさん", "皆さん", ("みな", "皆"));
+
+        let counted = as_counted(&units[0], &established);
+
+        assert_eq!(
+            counted
+                .iter()
+                .map(|u| (
+                    u.surface.as_str(),
+                    u.numeric.is_some(),
+                    u.particle.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [("1失点", true, Some("の")), ("失点", false, Some("の"))]
+        );
+        assert_eq!(
+            as_counted(&lost(30, "3"), &Established::default()),
+            as_typed(&lost(30, "3"), &Established::default())
+        );
+        assert_eq!(
+            as_counted(&minna, &Established::of([&minna, &minna])),
+            std::slice::from_ref(&minna)
+        );
+    }
+
+    #[test]
     fn a_joined_word_met_only_inside_compounds_is_not_established() {
         let hyde = |doc: &str, position| Unit {
             doc_id: doc.into(),
@@ -2226,6 +2465,58 @@ mod tests {
     }
 
     #[test]
+    fn a_common_noun_after_a_number_is_a_numeric_unit_that_keeps_the_noun_as_its_part() {
+        assert_eq!(
+            cut(&[
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("種類/しゅるい/{NOUN}/種類"),
+                "別/べつ/接尾辞,名詞的,一般,*,*,*/別",
+            ]),
+            [with_parts(
+                numeric(
+                    0,
+                    "3しゅるいべつ",
+                    "3種類別",
+                    (
+                        "{}しゅるいべつ",
+                        "{half-num}種類別",
+                        "3",
+                        "さんしゅるいべつ"
+                    )
+                ),
+                &[(1, "しゅるい", "種類"), (3, "べつ", "別")]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_noun_after_a_number_that_is_proper_or_needs_no_conversion_counts_nothing() {
+        assert_eq!(
+            cut(&[
+                &format!("3/さん/{NUMERAL}/3"),
+                "東京/とうきょう/名詞,固有名詞,地名,一般,*,*/東京",
+                &format!("3/さん/{NUMERAL}/3"),
+                &format!("こと/こと/{NOUN}/こと"),
+            ]),
+            [plain(1, "とうきょう", "東京")]
+        );
+    }
+
+    #[test]
+    fn a_numeral_that_writes_no_number_and_a_noun_are_a_word_typed_as_both() {
+        assert_eq!(
+            cut(&[
+                &format!("何/なん/{NUMERAL}/何"),
+                &format!("種類/しゅるい/{NOUN}/種類"),
+            ]),
+            [with_parts(
+                plain(0, "なんしゅるい", "何種類"),
+                &[(0, "なん", "何"), (1, "しゅるい", "種類")]
+            )]
+        );
+    }
+
+    #[test]
     fn a_number_without_a_counter_makes_no_unit_and_takes_its_prefix_along() {
         assert_eq!(
             cut(&[
@@ -2694,6 +2985,24 @@ mod tests {
                 (0, "にっぽんいち".into(), "日本一".into(), true),
                 (4, "いちがんれふ".into(), "一眼レフ".into(), true),
             ]
+        );
+    }
+
+    #[test]
+    fn a_compound_of_a_number_and_a_common_noun_is_still_a_word() {
+        let units = cut_with_compounds(
+            "一人称",
+            &[
+                &format!("一/いち/{NUMERAL}/一"),
+                &format!("人称/にんしょう/{NOUN}/人称"),
+            ],
+            &[("一人称", "いちにんしょう", NOUN)],
+        );
+
+        let compounds: Vec<_> = units.into_iter().filter(|u| u.3).collect();
+        assert_eq!(
+            compounds,
+            [(0, "いちにんしょう".into(), "一人称".into(), true)]
         );
     }
 

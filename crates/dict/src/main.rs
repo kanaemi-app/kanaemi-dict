@@ -15,22 +15,23 @@ use kanaemi_dict::{
     Dictionary, DistError, DocumentsError, Established, EvalDocument, EvalDocumentsError,
     Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError, RejectedLines, Split,
     TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
-    WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement, as_typed, check_words,
-    clans, common_words, compound_parts, conjugating_words, correction_uses, correction_uses_tsv,
-    counted_reading, counted_voicings, counted_words, counter_words, cut_documents,
-    dictionary_lines, document_ids, document_sources, document_texts, each_document_with_units,
-    engine_with, eval_documents, evaluate_documents, examples_of_document, excluded_readings,
-    field_dictionary, fragment_surfaces, gather, is_word, kanji_entries, keys_diff_tsv,
-    listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji,
-    mozc_emoticons, mozc_readings, mozc_symbols, name_readings, nihon_readings,
-    okurigana_dictionary, parse_added_readings, parse_check_cases, parse_corrections,
-    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
-    read_chain_words, read_names, read_title_entries, read_titles, read_titles_of, read_units,
-    reading_form, sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take,
-    text_units, title_entries, train, turn_of, turned, typed_by_analyzer, typed_units,
-    unihan_readings, unmet_checks_tsv, unnamed_entries, unnamed_tsv, unnamed_words,
-    wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
-    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement, as_counted, as_typed,
+    check_words, clans, common_words, compound_parts, conjugating_words, correction_uses,
+    correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
+    cut_documents, dictionary_lines, document_ids, document_sources, document_texts,
+    each_document_with_units, engine_with, eval_documents, evaluate_documents,
+    examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
+    items_counting_small_numbers, kanji_entries, keys_diff_tsv, listed_dictionary,
+    loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons,
+    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
+    parse_added_readings, parse_check_cases, parse_corrections, parse_word_cases, paths_of,
+    person_dictionary, place_dictionary, place_names, plain_words, read_chain_words, read_names,
+    read_title_entries, read_titles, read_titles_of, read_units, reading_form, sample_tsv,
+    shared_readings, sources_file, split_of, station_dictionary, take, text_units, title_entries,
+    train, turn_of, turned, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv,
+    unnamed_entries, unnamed_tsv, unnamed_words, wikidata_mismatches, wikidata_people,
+    wikidata_readings, wikidata_stations, with_people_read_by_leads, word_misses_tsv,
+    word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{Engine, RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -635,13 +636,17 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             })
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
         let mut total = 0usize;
+        let mut counted_by_nouns: HashSet<(String, String)> = HashSet::new();
         let mut dictionary = Dictionary::build_with_readings(
             units
                 .inspect(|unit| {
                     chains.observe(unit);
                     reads.observe(unit);
+                    if let Some(n) = unit.numeric.as_ref().filter(|_| !unit.parts.is_empty()) {
+                        counted_by_nouns.insert((n.reading.clone(), n.surface.clone()));
+                    }
                 })
-                .flat_map(|unit| as_typed(&unit, &established))
+                .flat_map(|unit| as_counted(&unit, &established))
                 // Titles and chains cost against the units as the dictionary
                 // counts them.
                 .inspect(|_| total += 1),
@@ -707,7 +712,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
                 })?);
             let analyzer = open_analyzer()?;
             counted_words(
-                &dictionary.numeric,
+                &items_counting_small_numbers(&dictionary.numeric, &counted_by_nouns),
                 &counters,
                 &dictionary.numeric_written,
                 |surface| {
