@@ -93,6 +93,10 @@ struct EvaluationOutputs {
     missing_sample: Option<&'static str>,
     /// The runs another IME converts whole that were not offered.
     chains: &'static str,
+    /// The numbers written in kanji, typed in kana, that were not offered,
+    /// and the readings whose first candidates lost.
+    kana_misses: &'static str,
+    kana_losses: &'static str,
 }
 
 const EVALUATION: EvaluationOutputs = EvaluationOutputs {
@@ -104,6 +108,8 @@ const EVALUATION: EvaluationOutputs = EvaluationOutputs {
     diff: "build/evaluation-diff.tsv",
     missing_sample: Some("build/evaluation-missing-sample.tsv"),
     chains: "build/evaluation-chains.tsv",
+    kana_misses: "build/evaluation-kana-misses.tsv",
+    kana_losses: "build/evaluation-kana-losses.tsv",
 };
 /// Why [`EVALUATION`]'s units were not offered their surface, as Kanaemi
 /// explains each conversion.
@@ -120,6 +126,8 @@ const WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
     diff: "build/evaluation-with-diff.tsv",
     missing_sample: None,
     chains: "build/evaluation-with-chains.tsv",
+    kana_misses: "build/evaluation-with-kana-misses.tsv",
+    kana_losses: "build/evaluation-with-kana-losses.tsv",
 };
 /// [`MISSING_REASONS`] and [`LOSS_REASONS`] of [`WITH_ADDITIONAL`].
 const WITH_ADDITIONAL_REASONS: (&str, &str) = (
@@ -189,6 +197,8 @@ const RANKING_EVALUATION: EvaluationOutputs = EvaluationOutputs {
     diff: "build/ranking-diff.tsv",
     missing_sample: None,
     chains: "build/ranking-chains.tsv",
+    kana_misses: "build/ranking-kana-misses.tsv",
+    kana_losses: "build/ranking-kana-losses.tsv",
 };
 /// [`RANKING_EVALUATION`] with every additional dictionary after the base.
 const RANKING_WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
@@ -200,6 +210,8 @@ const RANKING_WITH_ADDITIONAL: EvaluationOutputs = EvaluationOutputs {
     diff: "build/ranking-with-diff.tsv",
     missing_sample: None,
     chains: "build/ranking-with-chains.tsv",
+    kana_misses: "build/ranking-with-kana-misses.tsv",
+    kana_losses: "build/ranking-with-kana-losses.tsv",
 };
 /// Where the training examples wait, in a file of each run's own, while the
 /// model trains.
@@ -292,7 +304,9 @@ usage: kanaemi-dict units
          their surface and the loss against the best order without context
          to build/evaluation.tsv, with the units not offered, the readings
          that lost, every reading and what changed since the run before in
-         build/evaluation-{misses,losses,keys,diff,chains}.tsv, and why units were
+         build/evaluation-{misses,losses,keys,diff,chains}.tsv, the numbers
+         written in kanji, typed in kana, not offered and the readings that
+         lost in build/evaluation-kana-{misses,losses}.tsv, and why units were
          not offered and readings lost in
          build/evaluation-{missing,loss}-reasons.tsv
        kanaemi-dict evaluate --with NAME...
@@ -904,6 +918,8 @@ fn write_evaluation(out: &EvaluationOutputs, evaluation: &Evaluation) -> Result<
         (out.losses, all.losses_tsv()),
         (out.keys, keys.clone()),
         (out.chains, evaluation.chains.misses_tsv()),
+        (out.kana_misses, evaluation.kana.misses_tsv()),
+        (out.kana_losses, evaluation.kana.losses_tsv()),
     ] {
         write_atomically(path, |w| {
             w.write_all(tsv.as_bytes()).map_err(write_error(path))
@@ -1033,6 +1049,7 @@ fn print_scores(label: &str, evaluation: &Evaluation) {
         .chain([
             ("all", all.total()),
             ("agreed with mecab", evaluation.agreed.total()),
+            ("numbers in kanji typed in kana", evaluation.kana.total()),
         ]);
     for (class, s) in rows {
         println!(
