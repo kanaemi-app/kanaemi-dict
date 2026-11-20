@@ -21,17 +21,17 @@ use kanaemi_dict::{
     cut_documents, dictionary_lines, document_ids, document_sources, document_texts,
     each_document_with_units, engine_with, eval_documents, evaluate_documents,
     examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
-    items_counting_small_numbers, kanji_entries, keys_diff_tsv, listed_dictionary,
-    loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons,
-    mozc_readings, mozc_symbols, name_readings, nihon_readings, okurigana_dictionary,
-    parse_added_readings, parse_check_cases, parse_corrections, parse_word_cases, paths_of,
-    person_dictionary, place_dictionary, place_names, plain_words, read_chain_words, read_names,
-    read_title_entries, read_titles, read_titles_of, read_units, reading_form, sample_tsv,
-    shared_readings, sources_file, split_of, station_dictionary, take, text_units, title_entries,
-    train, turn_of, turned, typed_by_analyzer, typed_units, unihan_readings, unmet_checks_tsv,
-    unnamed_entries, unnamed_tsv, unnamed_words, wikidata_mismatches, wikidata_people,
-    wikidata_readings, wikidata_stations, with_people_read_by_leads, word_misses_tsv,
-    word_scores_tsv, write_atomically, year_dictionary,
+    items_counting_small_numbers, kana_number_lines, kanji_entries, keys_diff_tsv,
+    listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji,
+    mozc_emoticons, mozc_readings, mozc_symbols, name_readings, nihon_readings,
+    okurigana_dictionary, parse_added_readings, parse_check_cases, parse_corrections,
+    parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
+    read_chain_words, read_names, read_title_entries, read_titles, read_titles_of, read_units,
+    reading_form, sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take,
+    text_units, title_entries, train, turn_of, turned, typed_by_analyzer, typed_units,
+    unihan_readings, unmet_checks_tsv, unnamed_entries, unnamed_tsv, unnamed_words,
+    wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
+    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
 };
 use kanaemi_engine::{Engine, RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -747,6 +747,13 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         );
         dictionary.add_numeric(voiced);
         println!("counted voicings: {}", dictionary.numeric.len() - before);
+        let before = dictionary.numeric.len();
+        let kana = kana_number_lines(&dictionary.numeric);
+        dictionary.add_numeric(kana);
+        println!(
+            "lines of numbers typed in kana: {}",
+            dictionary.numeric.len() - before
+        );
         dictionary.add_words(counted);
         let nihon = nihon_readings(&dictionary.entries);
         println!("nihon: {}", nihon.len());
