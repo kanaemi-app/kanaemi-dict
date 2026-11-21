@@ -1,6 +1,6 @@
 # 小さい数と助数詞の語を、かなの数で打っても引けるようにする
 
-状態：一部置き換え（コストの行は `20261011-cost-small-counted-words-also-by-how-often-they-are-written.md` で置き換えた）
+状態：一部置き換え（コストの行は `20261011-cost-small-counted-words-also-by-how-often-they-are-written.md` で、Kanaemi がかなの数を数として読む案と十より大きい数を入れる案の判断は `20261121-take-numbers-typed-in-kana-with-kana-numeric-items.md` で置き換えた）
 
 ## 背景
 
