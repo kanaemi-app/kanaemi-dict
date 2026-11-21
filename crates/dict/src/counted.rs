@@ -238,6 +238,26 @@ pub fn counted_voicings<'a>(
     voiced
 }
 
+/// The lines of `numeric` that take one number, written again with the number
+/// typed in kana (`{kana}ぼん` for `{}ぼん`), in the same notation and at the
+/// same cost: how the documents write the number after the counter is how
+/// one who types it in kana wants it written. Kanaemi puts what these lines
+/// give behind every other candidate of the reading, so they offer the
+/// numbers no word of [`counted_words`] has (十二回, 三千円) without moving
+/// the words that do (一発 before 一髪). The voiced lines are there already
+/// (`{}ぼん` and `{}ぽん` beside `{}ほん`), as `{kana}` takes the number in
+/// any of its changed sounds (さん, いっ, じゅっ).
+pub fn kana_number_lines(numeric: &[Entry]) -> Vec<Entry> {
+    numeric
+        .iter()
+        .filter(|e| e.reading.matches("{}").count() == 1)
+        .map(|e| Entry {
+            reading: e.reading.replace("{}", "{kana}"),
+            ..e.clone()
+        })
+        .collect()
+}
+
 /// The counters of the numeric items that start with their one placeholder
 /// (`{kanji}匹` read `{}ひき` has 匹), written from a kanji or a kana and with
 /// no bracket (not mm, nor 日（セル）), each at the smallest cost among its
@@ -426,6 +446,46 @@ mod tests {
             conjugation: None,
             cost,
         }
+    }
+
+    #[test]
+    fn each_numeric_line_of_one_number_is_written_again_for_the_number_typed_in_kana() {
+        let numeric = [
+            line("{}ほん", "{half-num}本", 900),
+            line("{}ぼん", "{kanji}本", 1000),
+            line("だい{}かい", "第{kanji}回", 1100),
+            line("{}がつ{}にち", "{kanji}月{kanji}日", 1200),
+        ];
+
+        let lines = kana_number_lines(&numeric);
+
+        assert_eq!(
+            lines,
+            [
+                line("{kana}ほん", "{half-num}本", 900),
+                line("{kana}ぼん", "{kanji}本", 1000),
+                line("だい{kana}かい", "第{kanji}回", 1100),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_number_typed_in_kana_is_filled_in_as_the_line_writes_it() {
+        let text: String = kana_number_lines(&[
+            line("{}ぼん", "{kanji}本", 1000),
+            line("{}ぽん", "{half-num}本", 900),
+        ])
+        .iter()
+        .map(|e| format!("{}\t{}\t\t{}\n", e.reading, e.surface, e.cost))
+        .collect();
+        let (dictionary, invalid) = kanaemi_engine::TextDictionary::parse(&text);
+        assert_eq!(invalid, []);
+        let engine = crate::engine(std::sync::Arc::new(dictionary));
+
+        let offered = |reading| crate::offered(&engine, reading, None);
+
+        assert_eq!(offered("さんびゃくさんぼん")[0], "三百三本");
+        assert_eq!(offered("じゅっぽん")[0], "10本");
     }
 
     #[test]

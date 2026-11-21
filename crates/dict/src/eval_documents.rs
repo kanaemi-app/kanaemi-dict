@@ -287,6 +287,29 @@ pub struct Evaluation {
     pub chains: Tallies,
     /// The conversions the runs not offered cost beyond one each.
     pub chain_extra: u64,
+    /// The numeric units written in kanji, typed with the number in kana
+    /// apart from the units (see [`typed_in_kana`]).
+    pub kana: Tallies,
+}
+
+/// The numeric units of `units` whose number is written in kanji (十二回),
+/// as a typist who types the number in kana does: read as the unit reads in
+/// kana (じゅうにかい) and scored as words, not under the number's
+/// placeholder, since the kana of each number is a reading of its own. A
+/// number written in digits is typed in digits, and one written a kanji per
+/// digit (二〇二六) is not read out in kana.
+pub fn typed_in_kana(units: &[Unit]) -> Vec<Unit> {
+    units
+        .iter()
+        .filter_map(|unit| {
+            let numeric = unit.numeric.as_ref()?;
+            (numeric.surface.contains("{kanji}") && !numeric.kana.is_empty()).then(|| Unit {
+                reading: numeric.kana.clone(),
+                numeric: None,
+                ..unit.clone()
+            })
+        })
+        .collect()
 }
 
 impl Evaluation {
@@ -349,6 +372,20 @@ impl Evaluation {
             chains.page_loss(),
         )
         .expect("writing to a String never fails");
+        let kana = self.kana.total();
+        writeln!(
+            tsv,
+            "kana\tall\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            kana.units,
+            kana.missing,
+            kana.first,
+            kana.best_first,
+            kana.loss(),
+            kana.page,
+            kana.best_page,
+            kana.page_loss(),
+        )
+        .expect("writing to a String never fails");
         tsv
     }
 }
@@ -399,6 +436,13 @@ pub fn evaluate_documents(
                         *extra += parts[&unit.position] as u64 - 1;
                     }
                 });
+                let kana = &mut part.kana;
+                evaluate_document(
+                    &mut field,
+                    &typed_in_kana(&doc.units),
+                    &doc.text,
+                    |unit, offered, rank| kana.add(unit, offered, rank),
+                );
             }
             part
         })
@@ -412,6 +456,7 @@ pub fn evaluate_documents(
         evaluation.split += part.split;
         evaluation.chains.merge(part.chains);
         evaluation.chain_extra += part.chain_extra;
+        evaluation.kana.merge(part.kana);
     }
     evaluation
 }
@@ -976,6 +1021,91 @@ mod tests {
         );
     }
 
+    fn numeric_unit(reading: &str, surface: &str, placed: (&str, &str), kana: &str) -> Unit {
+        Unit {
+            numeric: Some(crate::Numeric {
+                reading: placed.0.into(),
+                surface: placed.1.into(),
+                value: reading.chars().take_while(char::is_ascii_digit).collect(),
+                kana: kana.into(),
+            }),
+            ..unit("aozora:01", 0, reading, surface)
+        }
+    }
+
+    #[test]
+    fn a_number_written_in_kanji_is_typed_in_kana_too_and_one_in_digits_is_not() {
+        let units = [
+            numeric_unit("12かい", "十二回", ("{}かい", "{kanji}回"), "じゅうにかい"),
+            numeric_unit("3ぼん", "3本", ("{}ぼん", "{half-num}本"), "さんぼん"),
+            numeric_unit(
+                "2026ねん",
+                "二〇二六年",
+                ("{}ねん", "{kanji-num}年"),
+                "にせんにじゅうろくねん",
+            ),
+            numeric_unit("1つ", "一つ", ("{}つ", "{kanji}つ"), ""),
+            unit("aozora:01", 0, "てがみ", "手紙"),
+        ];
+
+        let typed = typed_in_kana(&units);
+
+        assert_eq!(
+            typed,
+            [Unit {
+                numeric: None,
+                ..unit("aozora:01", 0, "じゅうにかい", "十二回")
+            }]
+        );
+    }
+
+    #[test]
+    fn numbers_written_in_kanji_are_scored_apart_typed_in_kana() {
+        let dictionary = |text: &str| {
+            let (dictionary, invalid) = TextDictionary::parse(text);
+            assert_eq!(invalid, []);
+            Arc::new(dictionary)
+        };
+        let doc = EvalDocument {
+            text: "十二回と三本".into(),
+            units: vec![
+                numeric_unit("12かい", "十二回", ("{}かい", "{kanji}回"), "じゅうにかい"),
+                Unit {
+                    position: 4,
+                    ..numeric_unit("3ぼん", "三本", ("{}ぼん", "{kanji}本"), "さんぼん")
+                },
+            ],
+            ..eval_document("aozora:01", &[])
+        };
+        let small = dictionary("{}かい\t{kanji}回\n{}ぼん\t{kanji}本\nさんぼん\t三本\n");
+        let kana = dictionary(
+            "{}かい\t{kanji}回\n{}ぼん\t{kanji}本\nさんぼん\t三本\n{kana}かい\t{kanji}回\n",
+        );
+
+        let before = evaluate_documents(std::slice::from_ref(&doc), &[small], None, &|_| false);
+        let after = evaluate_documents(std::slice::from_ref(&doc), &[kana], None, &|_| false);
+
+        let score = |e: &Evaluation| {
+            let s = e.kana.total();
+            (s.units, s.missing)
+        };
+        assert_eq!(score(&before), (2, 1), "じゅうにかい is not offered 十二回");
+        assert_eq!(score(&after), (2, 0));
+        assert_eq!(
+            after.all().total().units,
+            2,
+            "the units are scored as before"
+        );
+        assert!(
+            before
+                .to_tsv()
+                .lines()
+                .any(|l| l.starts_with("kana\tall\t2\t1\t")),
+            "{}",
+            before.to_tsv()
+        );
+    }
+
     #[test]
     fn documents_are_scored_per_kind_the_same_as_each_one_alone() {
         let dictionary = {
@@ -1076,7 +1206,8 @@ mod tests {
              agreed\tnumeric\t0\t0\t0\t0\t0\t0\t0\t0\n\
              agreed\tvariant\t0\t0\t0\t0\t0\t0\t0\t0\n\
              agreed\tall\t0\t0\t0\t0\t0\t0\t0\t0\n\
-             chain\tall\t0\t0\t0\t0\t0\t0\t0\t0\n"
+             chain\tall\t0\t0\t0\t0\t0\t0\t0\t0\n\
+             kana\tall\t0\t0\t0\t0\t0\t0\t0\t0\n"
         );
     }
 

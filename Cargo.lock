@@ -287,7 +287,7 @@ dependencies = [
 [[package]]
 name = "kanaemi-core"
 version = "0.0.0"
-source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#81937c7d054acaca22d5fc393343c4e2afb79c0a"
+source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#38ddfade6b2588d8669a2aa4ad29d24b2b213e42"
 
 [[package]]
 name = "kanaemi-dict"
@@ -310,7 +310,7 @@ dependencies = [
 [[package]]
 name = "kanaemi-engine"
 version = "0.0.0"
-source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#81937c7d054acaca22d5fc393343c4e2afb79c0a"
+source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#38ddfade6b2588d8669a2aa4ad29d24b2b213e42"
 dependencies = [
  "encoding_rs",
  "fst",
@@ -320,13 +320,14 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "unicode-normalization",
+ "windows-sys",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "kanaemi-functions"
 version = "0.0.0"
-source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#81937c7d054acaca22d5fc393343c4e2afb79c0a"
+source = "git+https://github.com/kanaemi-app/kanaemi?branch=main#38ddfade6b2588d8669a2aa4ad29d24b2b213e42"
 dependencies = [
  "getrandom",
  "kanaemi-engine",
@@ -836,6 +837,15 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "xxhash-rust"
