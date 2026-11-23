@@ -61,6 +61,7 @@ just docs                      # 素材から文書を取り出す
 just kanji                     # 漢字一字の読みの表（Mozc、Unihan）と、評価に使う Mozc の辞書の語の一覧を取得する
 just base-titles               # Wikipedia の記事とリダイレクトの見出しを取り出す
 just units                     # 文書を変換の単位に切る
+just kana-readings             # 読みがかなで書かれた回数を数える
 just dictionary                # 基本辞書を作る
 just dictionary --train-only   # 評価と学習に使う、学習用の文書だけの基本辞書を作る
 just evaluate                  # 基本辞書を評価し、候補に出ない単位と並びの損失を数え、前の実行と比べる

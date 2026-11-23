@@ -9,7 +9,7 @@ use sudachi::config::Config;
 use sudachi::dic::dictionary::JapaneseDictionary;
 use sudachi::error::SudachiError;
 
-use crate::kana::unvoiced;
+use crate::kana::{has_kanji, is_reading_kana, unvoiced};
 use crate::{Corrections, UnidicReadings, katakana_to_hiragana};
 
 /// One morpheme as the unit cutting needs it.
@@ -146,6 +146,16 @@ impl Analyzer {
         Ok(Words { tokens, compounds })
     }
 
+    /// The words of `text` written in hiragana alone that do not conjugate
+    /// and that the analyzer normalizes to a surface with kanji, as that
+    /// surface and the kana (あした as 明日).
+    pub fn kana_words(
+        &self,
+        text: impl AsRef<str>,
+    ) -> Result<Vec<(String, String)>, AnalyzerError> {
+        kana_words(&self.dict, text.as_ref())
+    }
+
     fn misread(&self, token: &Token) -> bool {
         let known = self.readings.of(&token.surface);
         token.pos.get(4).is_some_and(|t| t == "*")
@@ -237,6 +247,33 @@ fn read(dict: &JapaneseDictionary, text: &str) -> Result<Read, AnalyzerError> {
         }
     }
     Ok(out)
+}
+
+/// [`Analyzer::kana_words`] as `dict` reads them.
+fn kana_words(
+    dict: &JapaneseDictionary,
+    text: &str,
+) -> Result<Vec<(String, String)>, AnalyzerError> {
+    let tokenizer = StatelessTokenizer::new(dict);
+    let morphemes = match tokenizer.tokenize(text, Mode::B, false) {
+        Ok(morphemes) => morphemes,
+        Err(SudachiError::InputTooLong(..)) if text.chars().nth(1).is_some() => {
+            let (head, tail) = text.split_at(middle_cut(text));
+            let mut words = kana_words(dict, head)?;
+            words.extend(kana_words(dict, tail)?);
+            return Ok(words);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(morphemes
+        .iter()
+        .filter(|m| {
+            m.part_of_speech().get(4).is_some_and(|t| t == "*")
+                && m.surface().chars().all(is_reading_kana)
+                && has_kanji(m.normalized_form())
+        })
+        .map(|m| (m.normalized_form().to_owned(), m.surface().to_string()))
+        .collect())
 }
 
 /// The dictionary form of a conjugating word as Sudachi normalizes its
@@ -504,6 +541,14 @@ mod tests {
         assert_eq!(normalized("行な"), Some(("行なう", "行う")));
         assert_eq!(normalized("使え"), Some(("使える", "使える")));
         assert_eq!(normalized("見れ"), Some(("見れる", "見れる")));
+    }
+
+    #[test]
+    #[ignore = "needs SudachiDict"]
+    fn words_in_hiragana_are_given_as_the_surface_they_stand_for() {
+        let words = analyzer().kana_words("あした明日の話をする").unwrap();
+
+        assert_eq!(words, [("明日".to_owned(), "あした".to_owned())]);
     }
 
     #[test]

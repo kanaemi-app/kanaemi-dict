@@ -13,25 +13,27 @@ use kanaemi_dict::{
     AddedReading, AddedReadingUse, AddedReadingsError, Agreement, Analyzer, AnalyzerError,
     BASE_LABEL, Base, ChainCounter, ChainWords, Class, Corrections, CorrectionsError, CutError,
     Dictionary, DistError, DocumentsError, Established, EvalDocument, EvalDocumentsError,
-    Evaluation, ExampleFile, Examples, KanjiError, Readings, ReadingsError, RejectedLines, Split,
-    TitleReadings, TitlesError, UnidicError, UnidicReadings, UnidicWord, Unit, UnitsError,
-    WordCase, WordCasesError, WordResult, WordScore, WriteError, agreement, as_counted, as_typed,
-    check_words, clans, common_words, compound_parts, conjugating_words, correction_uses,
-    correction_uses_tsv, counted_reading, counted_voicings, counted_words, counter_words,
-    cut_documents, dictionary_lines, document_ids, document_sources, document_texts,
-    each_document_with_units, engine_with, eval_documents, evaluate_documents,
-    examples_of_document, excluded_readings, field_dictionary, fragment_surfaces, gather, is_word,
-    items_counting_small_numbers, kana_number_lines, kanji_entries, keys_diff_tsv,
-    listed_dictionary, loss_reasons_tsv, mismatches_tsv, miss_reasons_tsv, model_file, mozc_emoji,
-    mozc_emoticons, mozc_readings, mozc_symbols, name_readings, nihon_readings,
-    okurigana_dictionary, parse_added_readings, parse_check_cases, parse_corrections,
+    Evaluation, ExampleFile, Examples, KanaReadingsError, KanjiError, OtherReadings, Readings,
+    ReadingsError, RejectedLines, Split, TitleReadings, TitlesError, UnidicError, UnidicReadings,
+    UnidicWord, Unit, UnitsError, WordCase, WordCasesError, WordResult, WordScore, WriteError,
+    agreement, as_counted, as_typed, check_words, clans, common_words, compound_parts,
+    conjugating_words, correction_uses, correction_uses_tsv, counted_questions, counted_reading,
+    counted_voicings, counted_words, counter_words, cut_documents, dictionary_lines, document_ids,
+    document_sources, document_texts, each_document_with_units, engine_with, eval_documents,
+    evaluate_documents, examples_of_document, excluded_readings, field_dictionary,
+    fragment_surfaces, gather, is_word, items_counting_small_numbers, kana_number_lines,
+    kanji_entries, keys_diff_tsv, listed_dictionary, loss_reasons_tsv, mismatches_tsv,
+    miss_reasons_tsv, model_file, mozc_emoji, mozc_emoticons, mozc_readings, mozc_symbols,
+    name_readings, nihon_readings, okurigana_dictionary, other_readings_tsv, parse_added_readings,
+    parse_check_cases, parse_corrections, parse_kana_readings, parse_other_readings,
     parse_word_cases, paths_of, person_dictionary, place_dictionary, place_names, plain_words,
     read_chain_words, read_names, read_title_entries, read_titles, read_titles_of, read_units,
     reading_form, sample_tsv, shared_readings, sources_file, split_of, station_dictionary, take,
     text_units, title_entries, train, turn_of, turned, typed_by_analyzer, typed_units,
     unihan_readings, unmet_checks_tsv, unnamed_entries, unnamed_tsv, unnamed_words,
     wikidata_mismatches, wikidata_people, wikidata_readings, wikidata_stations,
-    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically, year_dictionary,
+    with_people_read_by_leads, word_misses_tsv, word_scores_tsv, write_atomically,
+    write_kana_readings, year_dictionary,
 };
 use kanaemi_engine::{Engine, RankingModel, TextDictionary};
 use rayon::prelude::*;
@@ -64,6 +66,10 @@ const KANJI_EXCLUDED: &str = "kanji/excluded.tsv";
 const KANJI_SOURCE: &str = "mozc-single-kanji";
 const UNIHAN_SOURCE: &str = "unicode-unihan";
 const UNITS: &str = "build/units.jsonl";
+/// How often the documents spell the readings of surfaces in kana.
+const KANA_READINGS: &str = "build/kana-readings.tsv";
+/// The readings the analyzer does not give, which the model also learns.
+const OTHER_READINGS: &str = "build/dictionaries/base-train-other-readings.tsv";
 /// Mozc's word list, which says which runs of units the evaluation also types
 /// as one word.
 const CHAIN_WORDS: [&str; 10] = [
@@ -286,8 +292,12 @@ usage: kanaemi-dict units
          build/sudachi/system_small.dic, reading the words it joins as
          build/sudachi/{small,core,notcore}_lex.csv read them, and applying
          the corrections of analyzer/corrections.tsv
+       kanaemi-dict kana-readings
+         count how often build/docs.jsonl spells the readings of surfaces in
+         kana into build/kana-readings.tsv
        kanaemi-dict dictionary [--train-only]
-         build build/dictionaries/base.tsv from build/units.jsonl, the
+         build build/dictionaries/base.tsv from build/units.jsonl,
+         build/kana-readings.tsv, the
          UniDic lexicon build/sudachi/small_lex.csv and the readings
          build/sudachi/{core,notcore}_lex.csv and analyzer/added-readings.tsv
          give the surfaces of the units, with the words of one
@@ -392,6 +402,13 @@ enum Error {
         path: PathBuf,
         source: AddedReadingsError,
     },
+    #[error("counting the kana spellings of {}: {source}", path.display())]
+    KanaReadings {
+        path: PathBuf,
+        source: KanaReadingsError,
+    },
+    #[error("{} is malformed; build it again", path.display())]
+    MalformedReadings { path: PathBuf },
     #[error(
         "{} left as it was: added readings the base needs not: {}",
         path.display(),
@@ -456,6 +473,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["units"] => cut_units(),
+        ["kana-readings"] => count_kana_readings(),
         ["dictionary"] => build_dictionary(false),
         ["dictionary", "--train-only"] => build_dictionary(true),
         ["evaluate"] => evaluate(&[]),
@@ -600,6 +618,22 @@ fn cut_units() -> Result<(), Error> {
     Ok(())
 }
 
+/// Counts the kana spellings of the documents by the surface they stand for.
+fn count_kana_readings() -> Result<(), Error> {
+    let analyzer = open_analyzer()?;
+    let docs = open(DOCS)?;
+    let lines = write_atomically(KANA_READINGS, |out| {
+        write_kana_readings(docs, |text| analyzer.kana_words(text), out).map_err(|source| {
+            Error::KanaReadings {
+                path: DOCS.into(),
+                source,
+            }
+        })
+    })?;
+    println!("readings spelled in kana: {lines}, out: {KANA_READINGS}");
+    Ok(())
+}
+
 /// Builds the base dictionary, from the units of every document or with
 /// `train_only` of the train documents alone, and writes it and its report
 /// only when Kanaemi reads every line.
@@ -628,6 +662,11 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
         }
         (lexicon, conjugating)
     };
+    let kana = parse_kana_readings(&read_to_string(KANA_READINGS)?, train_only).ok_or(
+        Error::MalformedReadings {
+            path: KANA_READINGS.into(),
+        },
+    )?;
     let names = read_names(open(BASE_NAMES)?).map_err(read_error(BASE_NAMES))?;
     let titles = read_titles(open(BASE_TITLES)?).map_err(|source| Error::Titles {
         path: BASE_TITLES.into(),
@@ -651,7 +690,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             .filter(|unit| !train_only || split_of(&unit.doc_id) == Split::Train);
         let mut total = 0usize;
         let mut counted_by_nouns: HashSet<(String, String)> = HashSet::new();
-        let mut dictionary = Dictionary::build_with_readings(
+        let mut dictionary = Dictionary::build_with_kana(
             units
                 .inspect(|unit| {
                     chains.observe(unit);
@@ -668,6 +707,7 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             &lexicon,
             &conjugating,
             &added_readings()?,
+            &kana,
         );
         if let Some(e) = failure {
             return Err(e);
@@ -746,6 +786,13 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             dictionary.entries.iter().chain(&counted),
         );
         dictionary.add_numeric(voiced);
+        let questions = counted_questions(
+            &dictionary.entries,
+            &counted,
+            &dictionary.numeric,
+            dictionary.rare_cost.unwrap_or_default(),
+        );
+        println!("counted questions: {}", questions.len());
         println!("counted voicings: {}", dictionary.numeric.len() - before);
         let before = dictionary.numeric.len();
         let kana = kana_number_lines(&dictionary.numeric);
@@ -755,6 +802,10 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
             dictionary.numeric.len() - before
         );
         dictionary.add_words(counted);
+        for (entry, other) in questions {
+            dictionary.add_words([entry]);
+            dictionary.other_readings.push(other);
+        }
         let nihon = nihon_readings(&dictionary.entries);
         println!("nihon: {}", nihon.len());
         dictionary.add_words(nihon);
@@ -826,6 +877,14 @@ fn build_dictionary(train_only: bool) -> Result<(), Error> {
     if let Some(cost) = dictionary.seen_once_cost {
         write_atomically(outputs.seen_once, |w| {
             writeln!(w, "{cost}").map_err(write_error(outputs.seen_once))
+        })?;
+    }
+    println!("other readings: {}", dictionary.other_readings.len());
+    if train_only {
+        let tsv = other_readings_tsv(&dictionary.other_readings);
+        write_atomically(OTHER_READINGS, |w| {
+            w.write_all(tsv.as_bytes())
+                .map_err(write_error(OTHER_READINGS))
         })?;
     }
     if !train_only {
@@ -1127,6 +1186,10 @@ fn train_ranking() -> Result<(), Error> {
         fragments
     };
     println!("fragments: {}", fragments.len());
+    let others =
+        parse_other_readings(&read_to_string(OTHER_READINGS)?).ok_or(Error::MalformedReadings {
+            path: OTHER_READINGS.into(),
+        })?;
     let mut taken: HashSet<String> = HashSet::new();
     let mut sources = BTreeSet::from(ANALYZER_SOURCES.map(String::from));
     let mut add = |units: &str, docs: &str, budget: usize| -> Result<(), Error> {
@@ -1140,6 +1203,7 @@ fn train_ranking() -> Result<(), Error> {
                 additional,
                 fragments: &fragments,
                 established: &established,
+                others: &others,
             },
             &mut examples,
             &mut sources,
@@ -1247,6 +1311,7 @@ struct Teaching<'a> {
     additional: &'a [Arc<TextDictionary>],
     fragments: &'a HashSet<String>,
     established: &'a Established,
+    others: &'a OtherReadings,
 }
 
 /// Adds the examples of the train documents of `units` and `docs` that are
@@ -1279,7 +1344,7 @@ fn add_examples(
                     teaching.fragments,
                     teaching.established,
                 );
-                examples_of_document(engine, &units, &doc.text)
+                examples_of_document(engine, &units, &doc.text, teaching.others)
             })
             .collect();
         let mut block = Examples::default();
