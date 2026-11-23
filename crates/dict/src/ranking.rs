@@ -13,7 +13,9 @@ use kanaemi_engine::{
 };
 
 use crate::kana::is_hiragana;
-use crate::{Established, Query, Spans, Unit, as_typed, particle_line, query_of, span_of};
+use crate::{
+    Established, OtherReadings, Query, Spans, Unit, as_typed, particle_line, query_of, span_of,
+};
 
 /// The widest hash a model file allows.
 pub const MAX_BITS: u8 = 28;
@@ -113,10 +115,16 @@ impl Examples {
 /// the evaluation types it, with the document's earlier units as the field's
 /// commits and the text before it as the field's committed text, and once
 /// more into an empty field. A unit is also typed in the
-/// [other ways](other_typings) it may be. Typings with a single candidate or
+/// [other ways](other_typings) it may be, and by the [readings](other_readings)
+/// of its surface in `others`. Typings with a single candidate or
 /// without the unit's surface among the candidates teach nothing and are left
 /// out.
-pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Examples {
+pub fn examples_of_document(
+    engine: &Engine,
+    units: &[Unit],
+    text: &str,
+    others: &OtherReadings,
+) -> Examples {
     let chars: Vec<char> = text.chars().collect();
     let mut history: Vec<(String, String)> = Vec::new();
     let mut examples = Examples::default();
@@ -126,7 +134,10 @@ pub fn examples_of_document(engine: &Engine, units: &[Unit], text: &str) -> Exam
         let context: String = chars[end.saturating_sub(CONTEXT_CHARS)..end]
             .iter()
             .collect();
-        for other in other_typings(unit, &query) {
+        for other in other_typings(unit, &query)
+            .into_iter()
+            .chain(other_readings(unit, others))
+        {
             let candidates = engine.candidate_facts(&other.reading, other.okurigana.as_deref());
             push_typing(&mut examples, &other, &candidates, &history, &context);
         }
@@ -288,6 +299,25 @@ fn other_typings(unit: &Unit, query: &Query) -> Vec<Query> {
         okurigana: Some(okurigana),
         expected: unit.surface.clone(),
     }]
+}
+
+/// A word written whole typed by the other readings of its surface (あした for
+/// 明日, which the analyzer reads あす), in their share of its places. Without
+/// them the model sees the surface under such a reading only as a wrong
+/// candidate of another word.
+fn other_readings(unit: &Unit, others: &OtherReadings) -> Vec<Query> {
+    if unit.numeric.is_some() || unit.conjugation.is_some() || unit.unknown_conjugation.is_some() {
+        return Vec::new();
+    }
+    others
+        .at(&unit.surface, &unit.doc_id, unit.position)
+        .filter(|reading| *reading != unit.reading)
+        .map(|reading| Query {
+            reading: reading.to_owned(),
+            okurigana: None,
+            expected: unit.surface.clone(),
+        })
+        .collect()
 }
 
 /// Examples kept as blocks, each loaded whole when trained on, so that only
@@ -540,7 +570,12 @@ mod tests {
             unit(7, "かん", "漢"),
         ];
 
-        let examples = examples_of_document(&engine, &units, "この漢と手紙と漢");
+        let examples = examples_of_document(
+            &engine,
+            &units,
+            "この漢と手紙と漢",
+            &OtherReadings::default(),
+        );
 
         assert_eq!(examples.len(), 4, "手紙 has no rival");
         let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
@@ -643,7 +678,7 @@ mod tests {
             unit(3, "かん", "漢"),
         ];
 
-        let examples = examples_of_document(&engine, &units, "書いた漢");
+        let examples = examples_of_document(&engine, &units, "書いた漢", &OtherReadings::default());
 
         assert_eq!(examples.len(), 6, "2 typings of 書いた and 漢, each twice");
         let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
@@ -656,10 +691,38 @@ mod tests {
     }
 
     #[test]
+    fn a_word_is_also_typed_by_the_other_readings_of_its_surface() {
+        let others = OtherReadings::new([crate::OtherReading {
+            surface: "明日".into(),
+            reading: "あした".into(),
+            share: 1.0,
+        }]);
+        let engine = engine_of("あした\t晨\t\t100\nあした\t明日\t\t200\n");
+        let units = [unit(0, "あす", "明日")];
+
+        let taught = examples_of_document(&engine, &units, "明日", &others);
+        let untaught = examples_of_document(&engine, &units, "明日", &OtherReadings::default());
+
+        assert_eq!(taught.len(), 2);
+        assert_eq!(taught.correct(0), 1);
+        assert_eq!(untaught.len(), 0);
+        assert_eq!(
+            other_readings(&unit(0, "あした", "明日"), &others),
+            [],
+            "typed so already"
+        );
+    }
+
+    #[test]
     fn a_unit_whose_surface_is_no_candidate_is_no_example() {
         let engine = engine_of("かん\t缶\t\t5\nかん\t漢\t\t10\n");
 
-        let examples = examples_of_document(&engine, &[unit(0, "かん", "幹")], "幹");
+        let examples = examples_of_document(
+            &engine,
+            &[unit(0, "かん", "幹")],
+            "幹",
+            &OtherReadings::default(),
+        );
 
         assert!(examples.is_empty());
     }
@@ -737,7 +800,7 @@ mod tests {
             ("{}ほん", "{kanji}本", "にほん"),
         )];
 
-        let examples = examples_of_document(&engine, &units, "二本");
+        let examples = examples_of_document(&engine, &units, "二本", &OtherReadings::default());
 
         let correct_of = |i: usize| examples.candidates(i).nth(examples.correct(i)).unwrap();
         assert!(correct_of(0).contains(&index("rs\u{1f}にほん\u{1f}二本")));
@@ -763,7 +826,7 @@ mod tests {
             },
         ];
 
-        let examples = examples_of_document(&engine, &units, "3本と3本");
+        let examples = examples_of_document(&engine, &units, "3本と3本", &OtherReadings::default());
 
         let second = examples.candidates(2).nth(examples.correct(2)).unwrap();
         assert!(
@@ -934,7 +997,12 @@ mod tests {
         let emoji = parsed("はこ\t📦\t\t8192\n");
         let engine = engine_with(&turned(&base, &[emoji], 0));
 
-        let examples = examples_of_document(&engine, &[unit(0, "はこ", "箱")], "箱");
+        let examples = examples_of_document(
+            &engine,
+            &[unit(0, "はこ", "箱")],
+            "箱",
+            &OtherReadings::default(),
+        );
 
         let lost: Vec<&[u32]> = examples
             .candidates(0)

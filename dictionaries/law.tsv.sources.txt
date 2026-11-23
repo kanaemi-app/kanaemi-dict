@@ -1,4 +1,4 @@
-# sha256 3dabf38060fd3d129174a5fe5cbd386710e54097b7e190c52d49c2af80620980
+# sha256 0bf6a9e334cd6171dfc11bc2e47ccf4c28f8a5d5e181cc4e9fc27ccaa9f333ac
 egov-all-xml
 sudachidict-core-lex
 sudachidict-full

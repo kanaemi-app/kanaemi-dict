@@ -56,7 +56,11 @@ base-titles:
 units:
     cargo run --release -p kanaemi-dict -- units
 
-# Build build/dictionaries/base.tsv from build/units.jsonl and the UniDic lexicon, writing the cost of a word met once
+# Count how often build/docs.jsonl spells the readings of surfaces in kana into build/kana-readings.tsv.
+kana-readings:
+    cargo run --release -p kanaemi-dict -- kana-readings
+
+# Build build/dictionaries/base.tsv from build/units.jsonl, build/kana-readings.tsv and the UniDic lexicon, writing the cost of a word met once
 # to build/dictionaries/base-seen-once.txt; `--train-only` builds build/dictionaries/base-train.tsv and
 # base-train-seen-once.txt from the train documents alone. It fails, unless `--train-only`, on a line of
 # analyzer/added-readings.tsv the base would have without it or does not take.

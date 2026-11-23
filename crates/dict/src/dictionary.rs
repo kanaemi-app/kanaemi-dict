@@ -13,7 +13,9 @@ use crate::conjugation::{KanaemiType, kanaemi_type};
 use crate::kana::{
     HA_ROW, PLAIN, SEMI_VOICED, VOICED, is_hiragana, is_kanji, is_voicing_of, unvoiced,
 };
-use crate::{AddedReading, AddedReadingUse, ConjugatingWord, UnidicWord, Unit};
+use crate::{
+    AddedReading, AddedReadingUse, ConjugatingWord, KanaReadings, OtherReading, UnidicWord, Unit,
+};
 
 /// The label of the base dictionary in its description line.
 pub const BASE_LABEL: &str = "基本";
@@ -83,6 +85,9 @@ pub struct Dictionary {
     pub whole_forms: HashMap<(String, String), u32>,
     /// Each added reading with what it did, in the order given.
     pub added_readings: Vec<(AddedReading, AddedReadingUse)>,
+    /// The readings the analyzer does not give, whose costs are estimated
+    /// from how often they are used.
+    pub other_readings: Vec<OtherReading>,
     pub report: Report,
 }
 
@@ -284,6 +289,27 @@ impl Dictionary {
         conjugating: &[ConjugatingWord],
         added: &[AddedReading],
     ) -> Self {
+        Self::build_with_kana(
+            units,
+            unidic,
+            lexicon,
+            conjugating,
+            added,
+            &KanaReadings::default(),
+        )
+    }
+
+    /// [`Dictionary::build_with_readings`] with UniDic's and the lexicon's
+    /// readings of a surface costed by how often `kana` has them spelled,
+    /// where that is cheaper than [`UNIDIC_EXTRA`].
+    pub fn build_with_kana<U: Borrow<Unit>>(
+        units: impl IntoIterator<Item = U>,
+        unidic: &[UnidicWord],
+        lexicon: &[UnidicWord],
+        conjugating: &[ConjugatingWord],
+        added: &[AddedReading],
+        kana: &KanaReadings,
+    ) -> Self {
         let mut total = 0usize;
         // A whole form and a plain word with the same reading and surface are
         // one item, so they share one count.
@@ -428,6 +454,41 @@ impl Dictionary {
                 ((reading, surface), cost)
             })
             .collect();
+        // The reading the units give each surface most often.
+        let mut mains: HashMap<String, (usize, String)> = HashMap::new();
+        for ((reading, surface, conjugation), &count) in &counts {
+            if conjugation.is_some() {
+                continue;
+            }
+            let main = mains.entry(surface.clone()).or_default();
+            if (count, reading) > (main.0, &main.1) {
+                *main = (count, reading.clone());
+            }
+        }
+        let mut other_readings: BTreeMap<(String, String), f64> = BTreeMap::new();
+        // The cost of a reading the analyzer gives none of the `n` places of
+        // the surface, or few of them.
+        let mut other_cost = |word: &UnidicWord, n: usize| {
+            let extra = cost_of(n, total) + UNIDIC_EXTRA;
+            let Some((_, main)) = mains.get(&word.surface) else {
+                return extra;
+            };
+            let Some(estimate) = (*main != word.reading)
+                .then(|| kana.estimate(&word.surface, &word.reading, main, n))
+                .flatten()
+            else {
+                return extra;
+            };
+            let cost = cost_of_share(estimate, total);
+            if cost >= extra {
+                return extra;
+            }
+            other_readings.insert(
+                (word.surface.clone(), word.reading.clone()),
+                estimate / n as f64,
+            );
+            cost
+        };
         let mut costs: HashMap<Key, u32> = HashMap::new();
         for (key, count) in counts {
             if count >= MIN_COUNT {
@@ -438,7 +499,7 @@ impl Dictionary {
         for word in unidic {
             let cost = surfaces
                 .get(word.surface.as_str())
-                .map_or(UNIDIC_UNSEEN, |&n| cost_of(n, total) + UNIDIC_EXTRA);
+                .map_or(UNIDIC_UNSEEN, |&n| other_cost(word, n));
             let key = (word.reading.clone(), word.surface.clone(), None);
             let kept = costs.entry(key).or_insert(u32::MAX);
             *kept = (*kept).min(cost);
@@ -452,7 +513,7 @@ impl Dictionary {
             };
             let key = (word.reading.clone(), word.surface.clone(), None);
             let kept = costs.entry(key).or_insert(u32::MAX);
-            *kept = (*kept).min(cost_of(n, total) + UNIDIC_EXTRA);
+            *kept = (*kept).min(other_cost(word, n));
         }
         let readings: HashSet<(&str, &str, &str)> = conjugating
             .iter()
@@ -540,6 +601,14 @@ impl Dictionary {
             seen_once_cost,
             whole_forms,
             added_readings,
+            other_readings: other_readings
+                .into_iter()
+                .map(|((surface, reading), share)| OtherReading {
+                    surface,
+                    reading,
+                    share,
+                })
+                .collect(),
             report: Report {
                 unknown_conjugations: unknown.into_iter().collect(),
                 disallowed_okurigana: disallowed
@@ -1109,7 +1178,12 @@ pub(crate) fn voicings(reading: &str) -> Vec<String> {
 
 /// `-ln(count / total) × 100`, rounded.
 pub(crate) fn cost_of(count: usize, total: usize) -> u32 {
-    (-(count as f64 / total as f64).ln() * 100.0).round() as u32
+    cost_of_share(count as f64, total)
+}
+
+/// [`cost_of`] a count estimated, which need not be whole.
+fn cost_of_share(count: f64, total: usize) -> u32 {
+    (-(count / total as f64).ln() * 100.0).round() as u32
 }
 
 /// The okurigana line of a word whose surface ends in kanji and hiragana:
@@ -2026,6 +2100,44 @@ mod tests {
                 (added("からぎょう", "空行"), AddedReadingUse::Added),
                 (added("みばらい", "未払い"), AddedReadingUse::Added),
             ]
+        );
+    }
+
+    #[test]
+    fn a_reading_the_analyzer_does_not_give_costs_as_its_spellings_in_kana_tell() {
+        let units: Vec<Unit> = [
+            repeat(word("あす", "明日"), 6),
+            repeat(word("てがみ", "手紙"), 4),
+        ]
+        .concat();
+        let kana = KanaReadings::new([
+            ("明日".to_owned(), "あした".to_owned(), 6),
+            ("明日".to_owned(), "あす".to_owned(), 2),
+        ]);
+
+        let dict = Dictionary::build_with_kana(
+            &units,
+            &[unidic("みょうにち", "明日"), unidic("あす", "明日")],
+            &[unidic("あした", "明日")],
+            &[],
+            &[],
+            &kana,
+        );
+
+        let cost_of_word = |reading| find(&dict.entries, reading, "明日").unwrap().cost;
+        assert_eq!(cost_of_word("あす"), cost(6, 10));
+        assert_eq!(
+            cost_of_word("あした"),
+            (-(4.5f64 / 10.0).ln() * 100.0).round() as u32
+        );
+        assert_eq!(cost_of_word("みょうにち"), cost(6, 10) + 1000);
+        assert_eq!(
+            dict.other_readings,
+            [OtherReading {
+                surface: "明日".into(),
+                reading: "あした".into(),
+                share: 0.75,
+            }]
         );
     }
 

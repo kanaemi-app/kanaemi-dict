@@ -10,7 +10,7 @@ use crate::kana::{
     unvoiced,
 };
 use crate::units::reading_after_number;
-use crate::{Entry, Token, UnidicReadings};
+use crate::{Entry, OtherReading, Token, UnidicReadings};
 
 /// The numbers the words are made for, as kanji.
 const NUMBERS: [&str; 10] = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
@@ -151,6 +151,72 @@ pub fn counted_words<E>(
     }
     words.sort_by(|a, b| (&a.reading, &a.surface).cmp(&(&b.reading, &b.surface)));
     Ok(words)
+}
+
+/// The words of 何 and a counter (何時) of `entries` read as the word of 三 and
+/// the counter in `counted` reads, with なん for さん (なんじ beside いつ,
+/// なんぷん beside なにぶん): 何 sounds as 三 does before a counter, and the
+/// analyzer reads some of them only as another word. A word enters when the
+/// units have its surface, at most at `rare_cost`. It costs as the surface
+/// does in all its readings, but no less than the counter in `numeric` and one
+/// of ten numbers more, so that a word whose head only looks like a counter
+/// (何事, 何者) stays behind. Each comes with the share its cost gives it of
+/// the surface's places.
+pub fn counted_questions(
+    entries: &[Entry],
+    counted: &[Entry],
+    numeric: &[Entry],
+    rare_cost: u32,
+) -> Vec<(Entry, OtherReading)> {
+    let counters = counters(numeric);
+    let mut surfaces: BTreeMap<&str, Vec<&Entry>> = BTreeMap::new();
+    for e in entries {
+        if e.surface.starts_with('何') && e.conjugation.is_none() {
+            surfaces.entry(&e.surface).or_default().push(e);
+        }
+    }
+    let three: HashMap<&str, &str> = counted
+        .iter()
+        .filter_map(|e| {
+            Some((
+                e.surface.strip_prefix('三')?,
+                e.reading.strip_prefix("さん")?,
+            ))
+        })
+        .collect();
+    let mut questions = Vec::new();
+    for (surface, read) in surfaces {
+        let Some(counter) = surface.strip_prefix('何') else {
+            continue;
+        };
+        let (Some(after), Some(&counter_cost)) = (three.get(counter), counters.get(counter)) else {
+            continue;
+        };
+        let reading = format!("なん{after}");
+        if read.iter().any(|e| e.reading == reading) || !read.iter().any(|e| e.cost <= rare_cost) {
+            continue;
+        }
+        let places: f64 = read
+            .iter()
+            .map(|e| (-f64::from(e.cost) / 100.0).exp())
+            .sum();
+        let whole = (-places.ln() * 100.0).round() as u32;
+        let cost = whole.max(counter_cost + ONE_OF_TEN);
+        questions.push((
+            Entry {
+                reading: reading.clone(),
+                surface: surface.to_owned(),
+                conjugation: None,
+                cost,
+            },
+            OtherReading {
+                surface: surface.to_owned(),
+                reading,
+                share: (-f64::from(cost - whole) / 100.0).exp(),
+            },
+        ));
+    }
+    questions
 }
 
 /// The voiced numeric lines of the counters a word of `words` of one to ten
@@ -740,6 +806,59 @@ mod tests {
         assert_eq!(
             counted_reading(&tokens, "一人位"),
             Some(CountedReading::Word("ひとりくらい".into()))
+        );
+    }
+
+    fn plain(reading: &str, surface: &str, cost: u32) -> Entry {
+        Entry {
+            reading: reading.into(),
+            surface: surface.into(),
+            conjugation: None,
+            cost,
+        }
+    }
+
+    #[test]
+    fn what_counter_is_read_as_three_of_it_is() {
+        let entries = [
+            plain("いつ", "何時", 1000),
+            plain("なにごと", "何事", 1000),
+            plain("なんど", "何度", 800),
+            plain("なにわ", "何話", 3000),
+        ];
+        let counted = [
+            plain("さんじ", "三時", 900),
+            plain("さんじ", "三事", 1800),
+            plain("さんど", "三度", 900),
+            plain("さんわ", "三話", 900),
+        ];
+        let numeric = [
+            plain("{}じ", "{half-num}時", 700),
+            plain("{}ごと", "{kanji}事", 1600),
+            plain("{}ど", "{half-num}度", 700),
+            plain("{}わ", "{half-num}話", 700),
+        ];
+
+        let questions = counted_questions(&entries, &counted, &numeric, 1600);
+
+        let lines: Vec<_> = questions
+            .iter()
+            .map(|(e, o)| {
+                (
+                    e.reading.as_str(),
+                    e.surface.as_str(),
+                    e.cost,
+                    (o.share * 1000.0).round(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("なんじ", "何事", 1830, 0.0),
+                ("なんじ", "何時", 1000, 1000.0),
+            ],
+            "何度 reads so already, and 何話 is in no text"
         );
     }
 
